@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [ '3.11', '3.12', '3.13', '3.14' ]
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+    - name: Install hatch
+      run: |
+        python -m pip install pip==26.2.1
+        python -m pip install hatch==1.18.0
+    - name: Lint and type-check
+      run: hatch run +py=${{ matrix.python-version }} lint:check
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [ '3.11', '3.12', '3.13', '3.14' ]
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+    - name: Install hatch
+      run: |
+        python -m pip install pip==26.2.1
+        python -m pip install hatch==1.18.0
+    - name: Run tests (against a real wsgidav server, see tests/server.py)
+      run: hatch run +py=${{ matrix.python-version }} hatch-test:run
+
+  docs:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+    - name: Set up Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      with:
+        python-version: '3.13'
+        cache: 'pip'
+    - name: Install hatch
+      run: |
+        python -m pip install pip==26.2.1
+        python -m pip install hatch==1.18.0
+    - name: Build docs
+      run: hatch run docs:build
