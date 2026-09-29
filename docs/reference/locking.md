@@ -19,6 +19,24 @@ e.g. a shorter timeout).
    :members:
 ```
 
+## Refreshing a lock
+
+A lock's timeout can be extended without releasing and re-acquiring it -
+which would risk another client taking the lock in the gap between the
+two (RFC 4918 §9.10.2):
+
+```python
+with client.lock("Documents/report.docx", timeout=60) as active_lock:
+    ...  # still working past the original timeout
+    active_lock = client.refresh_lock(
+        "Documents/report.docx", active_lock.token, timeout=300
+    )
+```
+
+```{eval-rst}
+.. autofunction:: webdav.client.Client.refresh_lock
+```
+
 ## The `If` header
 
 Writes through a held lock automatically carry an `If` header asserting

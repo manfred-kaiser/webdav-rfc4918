@@ -126,7 +126,7 @@ ignore = [
 [tool.ruff.lint.pylint]
 # Client.__init__ has 12 independent, keyword-only configuration params
 # (base_url plus 11 keyword-only: auth/session/retry/chunk_size/cert/
-# verify/tls/headers/max_response_size/allow_redirects/
+# verify/tls/headers/max_response_size/redirect_policy/
 # trusted_redirect_origins) - each is independently meaningful and none
 # group naturally beyond what TLSOptions already bundles (the
 # TLS-internals subset). Kept in sync with [tool.pylint.design].max-args

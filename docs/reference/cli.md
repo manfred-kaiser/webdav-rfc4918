@@ -23,3 +23,28 @@ $ dav info webdav://webdav.example.org/notes.txt
 
 `mv`/`cp` are server-side operations (COPY/MOVE) and therefore require
 both URLs to point at the same server.
+
+## Connection options
+
+Every {class}`~webdav.client.Client` constructor option is available as a
+flag on every subcommand, grouped in `--help`:
+
+```console
+$ dav ls --help
+```
+
+**mTLS / TLS**
+: `--cert`/`--key` (client certificate), `--key-password` (default:
+  `$WEBDAV_KEY_PASSWORD`), `--ca-cert` (custom CA bundle; server
+  verification itself can never be disabled), `--crl-cert` (repeatable),
+  `--ciphers`, `--tls-min-version`/`--tls-max-version` (`1.2`/`1.3`).
+
+**Redirects** (see {doc}`redirects`)
+: `--redirect-policy {never,same-origin,whitelist,all}` (default:
+  `same-origin`), `--trusted-redirect-origin` (repeatable; requires
+  `--redirect-policy whitelist`).
+
+**Connection tuning**
+: `--max-response-size` (bytes, or `none` to disable the cap; default:
+  64 MiB), `--chunk-size` (bytes; default: 4 MiB), `--no-retry` (don't
+  automatically retry a transient failure).

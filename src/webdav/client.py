@@ -7,6 +7,7 @@ import pathlib
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
+from enum import Enum
 from functools import partial
 from http import HTTPStatus
 from io import TextIOWrapper
@@ -85,6 +86,52 @@ _DEFAULT_PORTS = {"http": 80, "https": 443}
 _MISSING = object()
 
 
+class RedirectPolicy(Enum):
+    """How :meth:`Client._request` decides whether to follow a 3xx redirect.
+
+    HTTP permits a server to answer *any* method with a redirect (RFC
+    9110 sec. 15.4); nothing requires a client to *follow* one, and
+    blindly doing so is unsafe for a general-purpose client - a
+    malicious or compromised server could otherwise redirect a write to
+    a different resource, or (307/308) to a completely different host
+    while fully replaying the request body, with no error raised to the
+    caller. Four explicit, named tiers, deliberately mirroring the
+    browser ``fetch()`` ``redirect``/``credentials`` options for a
+    familiar mental model - there is no implicit "trust everything"
+    default; :data:`ALL` exists, but has to be chosen on purpose:
+
+    - :data:`NEVER`: never follow any redirect - ``fetch``'s
+      ``redirect: "error"``. The strictest tier, for a caller that wants
+      zero surprises about where a request ends up.
+    - :data:`SAME_ORIGIN` (the default): follow a same-origin redirect
+      automatically, refuse (``RedirectNotFollowedError``) anything else
+      - safe by construction, since a same-origin redirect can't move a
+      request or its body outside the server the caller already chose
+      to trust.
+    - :data:`WHITELIST`: additionally follow a redirect to an origin
+      ``trusted_redirect_origins`` (see :class:`Client`) names - e.g. a
+      signed-upload gateway on a separate origin. Requires
+      ``trusted_redirect_origins`` to actually be set; using
+      ``WHITELIST`` without it (or setting ``trusted_redirect_origins``
+      under a different policy) is rejected at :class:`Client`
+      construction as a likely mistake rather than silently doing
+      nothing.
+    - :data:`ALL`: follow a redirect to any origin at all. The
+      unrestricted tier - only ever appropriate when the caller has
+      independently decided every redirect this server could possibly
+      issue is fine to follow.
+
+    Regardless of tier, this client's own credentials are never
+    forwarded to a *different* origin a redirect lands on - only to its
+    own (see :meth:`Client._send_without_credentials`).
+    """
+
+    NEVER = "never"
+    SAME_ORIGIN = "same-origin"
+    WHITELIST = "whitelist"
+    ALL = "all"
+
+
 def _origin(url: str) -> tuple[str, str | None, int | None]:
     """``(scheme, hostname, port)`` with the scheme's default port filled in.
 
@@ -94,6 +141,7 @@ def _origin(url: str) -> tuple[str, str | None, int | None]:
     """
     parts = urlsplit(url)
     return (parts.scheme, parts.hostname, parts.port or _DEFAULT_PORTS.get(parts.scheme))
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -283,7 +331,7 @@ class Client:
         tls: TLSOptions | None = None,
         headers: dict[str, str] | None = None,
         max_response_size: "int | None" = DEFAULT_MAX_RESPONSE_SIZE,
-        allow_redirects: bool = True,
+        redirect_policy: RedirectPolicy = RedirectPolicy.SAME_ORIGIN,
         trusted_redirect_origins: "Iterable[str] | Callable[[str], bool] | None" = None,
     ) -> None:
         """Instantiate a client for a WebDAV server.
@@ -323,41 +371,18 @@ class Client:
                 Does not apply to GET downloads, which always stream
                 through :mod:`webdav.streaming` regardless of this
                 setting.
-            allow_redirects: This client's default redirect policy - the
-                three tiers this and ``trusted_redirect_origins`` together
-                form (deliberately mirroring the browser ``fetch()``
-                ``redirect``/``credentials`` options for a familiar
-                mental model):
-
-                - ``False``: never follow any redirect, from any call on
-                  this client - the strictest tier (``fetch``'s
-                  ``redirect: "error"``), for a caller that wants zero
-                  surprises about where a request ends up.
-                - ``True`` (the default): follow a same-origin redirect
-                  automatically, refuse (``RedirectNotFollowedError``)
-                  anything else - safe by construction, since a
-                  same-origin redirect can't move a request or its body
-                  outside the server the caller already chose to trust.
-                - Additionally set ``trusted_redirect_origins`` to also
-                  follow specific other origins (e.g. a signed-upload
-                  gateway) - this client's own credentials are never
-                  forwarded there, only to its own origin (see
-                  :meth:`_send_without_credentials`).
-
-                Overridable per call on the methods that expose their own
-                ``allow_redirects`` (e.g. :meth:`propfind`).
-            trusted_redirect_origins: Beyond this client's own origin
-                (always implicitly trusted), which redirect targets to
-                also follow. HTTP permits a server to redirect a request
-                anywhere, including to a completely different host - a
-                real, legitimate pattern (e.g. a cloud-storage gateway
-                redirecting PUT to a signed upload URL on a separate
-                origin) - but blindly trusting whatever origin a server
-                names at request time is exactly how a malicious or
-                compromised server could exfiltrate a request body
-                cross-origin. This keeps that decision with whoever
-                configures the client, not the server, in one of two
-                shapes:
+            redirect_policy: This client's default redirect-following
+                policy - see :class:`RedirectPolicy`. Overridable per
+                call on the methods that expose their own
+                ``redirect_policy`` (e.g. :meth:`propfind`).
+            trusted_redirect_origins: Which redirect targets
+                :data:`RedirectPolicy.WHITELIST` follows, beyond this
+                client's own origin (always implicitly trusted). Required
+                (and only meaningful) together with
+                ``redirect_policy=RedirectPolicy.WHITELIST`` - set with
+                any other policy, or left unset under ``WHITELIST``, is
+                rejected at construction as a likely mistake rather than
+                silently doing nothing. One of two shapes:
 
                 - An iterable of exact origins (``"https://host"`` or
                   ``"https://host:port"``) - the straightforward case
@@ -376,10 +401,9 @@ class Client:
                   DNS-delegated under it), not one exact host - scope it
                   as tightly as the actual deployment allows.
 
-                A redirect to any origin neither this client's own nor
-                covered by this parameter is always refused
-                (``RedirectNotFollowedError``); same-origin redirects are
-                always allowed regardless of this setting.
+        Raises:
+            ValueError: ``trusted_redirect_origins`` and ``redirect_policy``
+                disagree - see ``trusted_redirect_origins`` above.
 
         """
         self.session: WebDAVSession = session or WebDAVSession()
@@ -389,11 +413,24 @@ class Client:
                 self.session.headers.update(headers)
             _configure_tls(self.session, cert=cert, verify=verify, tls=tls)
 
+        if redirect_policy == RedirectPolicy.WHITELIST and trusted_redirect_origins is None:
+            msg = (
+                "redirect_policy=RedirectPolicy.WHITELIST requires "
+                "trusted_redirect_origins to be set"
+            )
+            raise ValueError(msg)
+        if redirect_policy != RedirectPolicy.WHITELIST and trusted_redirect_origins is not None:
+            msg = (
+                "trusted_redirect_origins has no effect without "
+                "redirect_policy=RedirectPolicy.WHITELIST"
+            )
+            raise ValueError(msg)
+
         self.base_url = URL(base_url)
         self.with_retry = retry if callable(retry) else _retry(retry)
         self.chunk_size = chunk_size
         self.max_response_size = max_response_size
-        self.allow_redirects = allow_redirects
+        self.redirect_policy = redirect_policy
         self._is_trusted_redirect_target = _build_redirect_trust_check(
             trusted_redirect_origins
         )
@@ -500,26 +537,24 @@ class Client:
         body, with no error raised to the caller.
 
         This method never delegates redirect-following to ``requests``
-        itself; instead, a same-origin redirect (or one to an origin
-        ``trusted_redirect_origins`` at :class:`Client` construction
-        approves) is followed automatically, up to :data:`_MAX_REDIRECTS`
-        hops, and only when the request body is one that's safe to resend
-        (see :func:`_has_replayable_body`). A redirect to any other
-        origin, or one that can't be safely replayed, raises
-        :class:`~webdav.exceptions.RedirectNotFollowedError` instead.
-        Passing ``allow_redirects=False`` explicitly disables even
-        same-origin following, for a caller that wants zero surprises
-        about where a request ends up.
+        itself; instead, this client's own :class:`RedirectPolicy`
+        decides which redirect target (if any) to follow, up to
+        :data:`_MAX_REDIRECTS` hops, and only when the request body is
+        one that's safe to resend (see :func:`_has_replayable_body`). A
+        redirect the policy doesn't allow, or one that can't be safely
+        replayed, raises :class:`~webdav.exceptions.RedirectNotFollowedError`
+        instead. Pass ``redirect_policy=`` explicitly to override this
+        client's own policy for one call.
 
-        A redirect that crosses into a *different* (trusted) origin never
-        carries this session's credentials there - same rationale, and
-        same mechanism, as ``requests``' own ``Session.rebuild_auth()``
-        for its native redirect-following, which following redirects via
-        our own loop instead of delegating to ``requests`` bypasses
+        A redirect that crosses into a *different* origin never carries
+        this session's credentials there - same rationale, and same
+        mechanism, as ``requests``' own ``Session.rebuild_auth()`` for
+        its native redirect-following, which following redirects via our
+        own loop instead of delegating to ``requests`` bypasses
         otherwise: see :meth:`_send_without_credentials`.
         """
         url = str(self.join_url(path, add_trailing_slash=add_trailing_slash))
-        follow = kwargs.pop("allow_redirects", self.allow_redirects)
+        policy = kwargs.pop("redirect_policy", self.redirect_policy)
         kwargs["allow_redirects"] = False
 
         if_header = self._if_header_for(path)
@@ -532,7 +567,7 @@ class Client:
 
         hops = 0
         while (
-            follow
+            policy != RedirectPolicy.NEVER
             and (http_resp.is_redirect or http_resp.is_permanent_redirect)
             and hops < _MAX_REDIRECTS
         ):
@@ -541,7 +576,12 @@ class Client:
                 break
             target = urljoin(http_resp.url, location)
             same_origin = _origin(target) == _origin(url)
-            if not same_origin and not self._is_trusted_redirect_target(target):
+            allowed = (
+                same_origin
+                or policy == RedirectPolicy.ALL
+                or (policy == RedirectPolicy.WHITELIST and self._is_trusted_redirect_target(target))
+            )
+            if not allowed:
                 break
             if not _has_replayable_body(kwargs.get("data")):
                 break
@@ -633,16 +673,16 @@ class Client:
         path: str,
         data: str | None = None,
         headers: dict[str, str] | None = None,
-        allow_redirects: bool | None = None,
+        redirect_policy: "RedirectPolicy | None" = None,
     ) -> "MultiStatusResponse":
         """Send a PROPFIND request and parse the multistatus response.
 
-        ``allow_redirects`` defaults to this client's own
-        ``allow_redirects`` policy (see :class:`Client`) when left unset -
-        pass it explicitly only to override that policy for this one call.
+        ``redirect_policy`` defaults to this client's own
+        :attr:`~Client.redirect_policy` when left unset - pass it
+        explicitly only to override that policy for this one call.
         """
         redirect_kwargs: dict[str, Any] = (
-            {} if allow_redirects is None else {"allow_redirects": allow_redirects}
+            {} if redirect_policy is None else {"redirect_policy": redirect_policy}
         )
         call = partial(
             self._request,

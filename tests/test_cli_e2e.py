@@ -35,3 +35,35 @@ def test_mv_cross_server_is_rejected(
     exit_code = cli.main(["mv", _url(server_url, "a.txt"), "webdav://other-host/b.txt"])
     assert exit_code == 1
     assert "same server" in capsys.readouterr().err
+
+
+def test_redirect_policy_flag_is_honored(
+    server_url: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for policy in ("never", "same-origin", "all"):
+        assert cli.main(["ls", _url(server_url, ""), "--redirect-policy", policy]) == 0
+    capsys.readouterr()
+
+
+def test_whitelist_without_trusted_origin_is_a_clean_cli_error(
+    server_url: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = cli.main(["ls", _url(server_url, ""), "--redirect-policy", "whitelist"])
+    assert exit_code == 1
+    assert "trusted_redirect_origins" in capsys.readouterr().err
+
+
+def test_max_response_size_none_disables_the_cap(
+    server_url: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["ls", _url(server_url, ""), "--max-response-size", "none"]) == 0
+    capsys.readouterr()
+
+
+def test_invalid_redirect_policy_is_a_clean_argparse_error(
+    server_url: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["ls", _url(server_url, ""), "--redirect-policy", "bogus"])
+    assert exc_info.value.code == 2
+    assert "invalid" in capsys.readouterr().err.lower()

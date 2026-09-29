@@ -25,7 +25,7 @@ from typing import cast
 import pytest
 
 from tests.rogue_server import RogueBehavior, rogue_server
-from webdav import Client, RedirectNotFollowedError, WebDAVError
+from webdav import Client, RedirectNotFollowedError, RedirectPolicy, WebDAVError
 from webdav.locks import build_lock_body
 from webdav.xml_utils import parse_xml
 
@@ -306,12 +306,12 @@ def test_missing_trailing_slash_same_origin_redirect_is_followed() -> None:
 
     Found via comparison with a sibling project's PR: some WebDAV servers
     301 a PROPFIND missing its trailing slash instead of just serving the
-    collection - after this library defaulted every request to
-    allow_redirects=False, that broke info()/exists()/isdir()/get_props()
-    against such a server. Superseded by the general same-origin
-    redirect-following policy (Client(allow_redirects=True), the
-    default): a same-origin 301 just adding "/" is simply one instance of
-    "a same-origin redirect", nothing trailing-slash-specific about the
+    collection - after this library defaulted every request to refuse
+    all redirects, that broke info()/exists()/isdir()/get_props() against
+    such a server. Superseded by the general same-origin redirect-
+    following policy (RedirectPolicy.SAME_ORIGIN, the default): a
+    same-origin 301 just adding "/" is simply one instance of "a
+    same-origin redirect", nothing trailing-slash-specific about the
     handling anymore. See
     test_cross_origin_redirect_is_refused_even_with_a_plausible_pretext
     for confirmation that an *untrue* same-origin claim (a redirect to an
@@ -383,7 +383,7 @@ def test_trusted_cross_origin_redirect_does_not_forward_credentials() -> None:
     """A trusted-but-different redirect target must never receive this client's auth.
 
     Being trusted enough to receive the request's body (e.g. a
-    signed-upload gateway pattern, via trusted_redirect_origins) doesn't
+    signed-upload gateway pattern, via RedirectPolicy.WHITELIST) doesn't
     make that origin trusted with this client's separate WebDAV-server
     credentials too - requests' own native redirect-following strips
     Authorization on a host change (Session.rebuild_auth); following
@@ -426,6 +426,7 @@ def test_trusted_cross_origin_redirect_does_not_forward_credentials() -> None:
             Client(
                 gateway_url,
                 auth=("secretuser", "secretpass"),
+                redirect_policy=RedirectPolicy.WHITELIST,
                 trusted_redirect_origins=[storage_url],
             ) as client,
         ):

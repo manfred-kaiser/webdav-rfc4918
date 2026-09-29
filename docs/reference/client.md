@@ -7,7 +7,8 @@
    :exclude-members: lock
 ```
 
-See {doc}`locking` for `Client.lock()`.
+See {doc}`locking` for `Client.lock()` and {doc}`redirects` for
+`redirect_policy`/`trusted_redirect_origins`.
 
 ## Exceptions
 

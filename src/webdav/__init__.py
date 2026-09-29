@@ -1,6 +1,6 @@
 """RFC 4918 compliant WebDAV client, built on ``requests``."""
 
-from webdav.client import Client
+from webdav.client import Client, RedirectPolicy
 from webdav.exceptions import (
     ClientError,
     ForbiddenError,
@@ -34,6 +34,7 @@ __all__ = [
     "MalformedResponseError",
     "MultiStatusError",
     "RedirectNotFollowedError",
+    "RedirectPolicy",
     "ResourceAlreadyExistsError",
     "ResourceConflictError",
     "ResourceLockedError",

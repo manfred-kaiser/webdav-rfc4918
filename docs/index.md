@@ -29,6 +29,7 @@ client.upload_file("Gorilla.jpg", "Photos/Gorilla.jpg")
 
 reference/client
 reference/locking
+reference/redirects
 reference/tls
 reference/fsspec
 reference/cli
