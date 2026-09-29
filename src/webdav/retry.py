@@ -39,7 +39,7 @@ def retry(enabled: bool = False, tries: int = 3) -> RetryFunc:
         tries: Maximum attempts when ``enabled``.
 
     Retries :class:`~webdav.exceptions.HTTPStatusError` subclasses marked
-    ``retryable = True`` (423 Locked, 429, 5xx, ...) and transient
+    ``retryable = True`` (429, 5xx, ...) and transient
     transport errors (timeouts, connection errors) - not, e.g., 404 or 403,
     which retrying cannot fix.
 

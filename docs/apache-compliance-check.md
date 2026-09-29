@@ -1,6 +1,6 @@
 # Apache mod_dav compliance check
 
-`tests/test_client_e2e.py` runs automatically against `wsgidav` (pure
+`tests/test_session_e2e.py` runs automatically against `wsgidav` (pure
 Python, no system dependency). `tests/test_apache_compliance.py` is a
 separate, manual cross-check against a real Apache + `mod_dav` instance -
 an independent implementation, useful because WebDAV servers are known to

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from tests.server import AUTH, webdav_server
-from webdav import Client
+from webdav import Session
 
 
 @pytest.fixture
@@ -23,7 +23,7 @@ def server_url(storage_dir: Path) -> Iterator[str]:
 
 
 @pytest.fixture
-def client(server_url: str) -> Iterator[Client]:
-    """A :class:`Client` authenticated against the test server."""
-    with Client(server_url, auth=AUTH) as c:
+def client(server_url: str) -> Iterator[Session]:
+    """A :class:`Session` authenticated against the test server."""
+    with Session(server_url, auth=AUTH) as c:
         yield c

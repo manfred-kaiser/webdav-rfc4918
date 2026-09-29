@@ -25,7 +25,7 @@ from typing import cast
 import pytest
 
 from tests.rogue_server import RogueBehavior, rogue_server
-from webdav import Client, RedirectNotFollowedError, RedirectPolicy, WebDAVError
+from webdav import RedirectNotFollowedError, RedirectPolicy, Session, WebDAVError
 from webdav.locks import build_lock_body
 from webdav.xml_utils import parse_xml
 
@@ -38,13 +38,13 @@ def test_put_does_not_follow_redirect_to_a_different_resource() -> None:
     behavior = RogueBehavior(redirect_from="/victim.txt", redirect_target=None)
     with rogue_server(behavior) as url:
         behavior.redirect_target = f"{url}/attacker-stash.txt"
-        with Client(url) as client, pytest.raises(RedirectNotFollowedError):
+        with Session(url) as client, pytest.raises(RedirectNotFollowedError):
             client.upload_fileobj(io.BytesIO(b"secret"), "victim.txt")
 
     attacker_hits = [r for r in behavior.requests if r[1] == "/attacker-stash.txt"]
-    assert not attacker_hits, (
-        "request body was forwarded to a location the caller never asked for"
-    )
+    assert (
+        not attacker_hits
+    ), "request body was forwarded to a location the caller never asked for"
 
 
 @contextmanager
@@ -90,13 +90,15 @@ def test_string_bodied_write_does_not_leak_across_hosts_on_redirect() -> None:
                 self.end_headers()
 
         with _raw_http_server(Victim) as victim_url:
-            client = Client(victim_url, auth=("realuser", "realpass123"))
+            client = Session(victim_url, auth=("realuser", "realpass123"))
             with pytest.raises(RedirectNotFollowedError):
-                client.set_props("victim.txt", set_props={"displayname": "CONFIDENTIAL"})
+                client.set_props(
+                    "victim.txt", set_props={"displayname": "CONFIDENTIAL"}
+                )
 
-    assert not attacker_hits, (
-        f"request body was forwarded cross-host to the attacker: {attacker_hits!r}"
-    )
+    assert (
+        not attacker_hits
+    ), f"request body was forwarded cross-host to the attacker: {attacker_hits!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +109,11 @@ def test_string_bodied_write_does_not_leak_across_hosts_on_redirect() -> None:
 
 def test_malformed_multistatus_body_raises_a_webdaverror() -> None:
     behavior = RogueBehavior(malformed_multistatus_body=b"<this is not > < valid xml")
-    with rogue_server(behavior) as url, Client(url) as client, pytest.raises(WebDAVError):
+    with (
+        rogue_server(behavior) as url,
+        Session(url) as client,
+        pytest.raises(WebDAVError),
+    ):
         client.get_props("anything")
 
 
@@ -177,7 +183,7 @@ def test_billion_laughs_is_rejected_quickly() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Client-side header/CRLF injection resilience via a malicious lock token
+# client-side header/CRLF injection resilience via a malicious lock token
 # ---------------------------------------------------------------------------
 
 
@@ -196,17 +202,19 @@ def test_owner_with_crlf_stays_inside_the_xml_body() -> None:
     # parse, so the round-tripped text legitimately differs from the input
     # by that one substitution - the point being tested is that it stays a
     # single XML text node, not raw bytes that could affect anything else.
-    assert owner_text == "attacker\nX-Injected: evil"
+    assert owner_text == "attacker\r\nX-Injected: evil"
 
 
 # ---------------------------------------------------------------------------
-# get_property() convenience-lookup correctness for zero/falsy values
+# get_props()/info() correctness for zero/falsy values
 # ---------------------------------------------------------------------------
 
 
-def test_get_property_returns_zero_for_an_empty_file(client: Client) -> None:
+def test_an_empty_file_has_size_zero_not_none(client: Session) -> None:
     client.upload_fileobj(io.BytesIO(b""), "empty.txt")
-    assert client.get_property("empty.txt", "content_length") == 0
+    assert client.get_props("empty.txt", names=["content_length"]).content_length == 0
+    assert client.info("empty.txt").size == 0
+    assert client.content_length("empty.txt") == 0
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +223,7 @@ def test_get_property_returns_zero_for_an_empty_file(client: Client) -> None:
 
 
 def test_download_file_refuses_to_follow_a_local_symlink(
-    client: Client, tmp_path: Path
+    client: Session, tmp_path: Path
 ) -> None:
     client.upload_fileobj(io.BytesIO(b"remote content"), "dl.txt")
 
@@ -240,7 +248,7 @@ def test_spoofed_lockroot_does_not_redirect_lock_bookkeeping() -> None:
     """A server's <lockroot> for a granted lock must never be trusted blindly.
 
     Found during a later invasive re-audit of the RFC-compliance fixes
-    themselves: an earlier version of Client._lock_bookkeeping_path() used
+    themselves: an earlier version of Session._lock_bookkeeping_path() used
     the server-reported <lockroot> to key self._locks, on the RFC-literal
     reasoning that lockroot is authoritative. A malicious/compromised
     server can set <lockroot> to an entirely unrelated href (even on a
@@ -285,13 +293,13 @@ def test_spoofed_lockroot_does_not_redirect_lock_bookkeeping() -> None:
 
     with (
         _raw_http_server(Handler) as url,
-        Client(url) as client,
-        client.lock("victim.txt", scope="exclusive") as active_lock,
+        Session(url) as client,
+        client.locked("victim.txt", scope="exclusive") as active_lock,
     ):
         assert active_lock.lock_root == "/other-secret.txt"  # the server's lie
         # Bookkeeping must follow what the caller asked for, not the lie.
-        assert client._if_header_for("victim.txt") is not None
-        assert client._if_header_for("other-secret.txt") is None
+        assert client.locks.token_for(client.resolve_url("victim.txt")) is not None
+        assert client.locks.token_for(client.resolve_url("other-secret.txt")) is None
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +353,7 @@ def test_missing_trailing_slash_same_origin_redirect_is_followed() -> None:
             self.end_headers()
             self.wfile.write(body)
 
-    with _raw_http_server(Handler) as url, Client(url) as client:
+    with _raw_http_server(Handler) as url, Session(url) as client:
         assert client.exists("somedir") is True
         assert client.isdir("somedir") is True
 
@@ -373,7 +381,7 @@ def test_cross_origin_redirect_is_refused_even_with_a_plausible_pretext() -> Non
 
     with (
         _raw_http_server(Handler) as url,
-        Client(url) as client,
+        Session(url) as client,
         pytest.raises(RedirectNotFollowedError),
     ):
         client.exists("somedir")
@@ -400,7 +408,9 @@ def test_trusted_cross_origin_redirect_does_not_forward_credentials() -> None:
             length = int(self.headers.get("Content-Length", 0) or 0)
             received["body"] = self.rfile.read(length) if length else b""
             received["had_auth"] = "Authorization" in self.headers
-            body = b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"></d:multistatus>'
+            body = (
+                b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"></d:multistatus>'
+            )
             self.send_response(207)
             self.send_header("Content-Type", "application/xml")
             self.send_header("Content-Length", str(len(body)))
@@ -423,7 +433,7 @@ def test_trusted_cross_origin_redirect_does_not_forward_credentials() -> None:
 
         with (
             _raw_http_server(Gateway) as gateway_url,
-            Client(
+            Session(
                 gateway_url,
                 auth=("secretuser", "secretpass"),
                 redirect_policy=RedirectPolicy.WHITELIST,

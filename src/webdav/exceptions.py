@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, ClassVar
 
 import requests.exceptions
 
+from webdav.redirects import redact_url
+
 if TYPE_CHECKING:
     from requests import Response
 
@@ -76,6 +78,14 @@ class TLSConfigError(ClientError):
     """
 
 
+class InsecureConfigurationError(ClientError, ValueError):
+    """Raised when a session would be set up or used without verifying the server's certificate.
+
+    A :class:`ClientError` (so a :class:`WebDAVError`) and a ``ValueError`` (it is,
+    at heart, an unacceptable argument): catch whichever suits.
+    """
+
+
 class LockError(ClientError):
     """Raised for lock-token/`If`-header related failures.
 
@@ -126,7 +136,7 @@ class MultiStatusError(WebDAVError):
         super().__init__(msg)
 
 
-class HTTPStatusError(WebDAVError):
+class HTTPStatusError(WebDAVError, requests.exceptions.HTTPError):
     """Raised when the server returned an unexpected/error HTTP status.
 
     A subclass registered in ``STATUS_CODE_EXCEPTIONS`` is raised instead
@@ -164,7 +174,7 @@ class HTTPStatusError(WebDAVError):
     def error_codes(self) -> "frozenset[str]":
         """RFC 4918 §16 precondition/postcondition codes from the response body.
 
-        E.g. ``{"no-conflicting-lock"}`` for a 423 from :meth:`Client.lock`,
+        E.g. ``{"no-conflicting-lock"}`` for a 423 from :meth:`Session.locked`,
         or ``{"lock-token-submitted"}`` for a write through a stale token -
         lets a caller distinguish *why* without re-parsing the response
         body itself. Lazily parsed and cached: most callers never need
@@ -181,18 +191,24 @@ def _parse_error_codes(response: "Response") -> "frozenset[str]":
     if not content:
         return frozenset()
     try:
-        tree = ET.fromstring(content)  # noqa: S314 -- see webdav.xml_utils's module docstring: stdlib expat never resolves external entities and rejects entity-amplification by default
-    except ET.ParseError:
+        # See webdav.xml_utils's module docstring: stdlib expat never resolves
+        # external entities and rejects entity-amplification by default.
+        tree = ET.fromstring(content)  # noqa: S314 # nosec B314
+    except (ET.ParseError, LookupError, ValueError, UnicodeError):
         return frozenset()
     tag = tree.tag
     local_name = tag.rpartition("}")[2] if tag.startswith("{") else tag
-    error_el = tree if local_name == "error" else tree.find(f"{{{_DAV_NAMESPACE}}}error")
+    error_el = (
+        tree if local_name == "error" else tree.find(f"{{{_DAV_NAMESPACE}}}error")
+    )
     if error_el is None:
         return frozenset()
     codes = set()
     for child in error_el:
         child_tag = child.tag
-        codes.add(child_tag.rpartition("}")[2] if child_tag.startswith("{") else child_tag)
+        codes.add(
+            child_tag.rpartition("}")[2] if child_tag.startswith("{") else child_tag
+        )
     return frozenset(codes)
 
 
@@ -239,14 +255,43 @@ class ResourceConflictError(HTTPStatusError):
 
 
 @_register
-class ResourceAlreadyExistsError(HTTPStatusError):
-    """Raised when the destination resource already exists (412).
+class PreconditionFailedError(HTTPStatusError):
+    """Raised when a condition the request set did not hold (412).
 
-    Servers commonly answer a conditional write (``Overwrite: F``) that
-    would clobber an existing resource with 412 Precondition Failed.
+    ``If-Match``/``If-None-Match`` (a lost update, or a resource that is
+    already there), ``Overwrite: F`` on a destination that exists, an ``If``
+    header naming a lock token that is not (or no longer) held. The cause is
+    in :attr:`~HTTPStatusError.error_codes` when the server gave one; where
+    the library knows which condition it set, it raises the more specific
+    :class:`ResourceAlreadyExistsError` instead.
     """
 
     default_status_code = HTTPStatus.PRECONDITION_FAILED
+
+    def __init__(
+        self,
+        response: "Response",
+        path: str | None = None,
+        msg: str | None = None,
+    ) -> None:
+        """Instantiate with the failed response and the request path."""
+        default = (
+            f"A condition of the request was not met (412) for {path!r}"
+            if path
+            else None
+        )
+        super().__init__(response, path=path, msg=msg or default)
+
+
+class ResourceAlreadyExistsError(PreconditionFailedError):
+    """Raised when the resource that was to be created already exists.
+
+    Not what a bare 412 turns into - a 412 can mean other things (see
+    :class:`PreconditionFailedError`) - but what an operation that asked for
+    "create, do not replace" raises when the server refuses: an upload with
+    ``overwrite=False`` (``If-None-Match: *``) or ``mkdir`` on an existing
+    collection.
+    """
 
     def __init__(self, response: "Response", path: str | None = None) -> None:
         """Instantiate with the failed response and the existing path."""
@@ -277,7 +322,7 @@ class ResourceLockedError(HTTPStatusError):
     """Raised when the resource is locked (423)."""
 
     default_status_code = HTTPStatus.LOCKED
-    retryable = True
+    retryable = False  # a lock does not go away in the seconds a retry would wait
 
 
 @_register
@@ -362,15 +407,16 @@ class BandwidthLimitExceededError(HTTPStatusError):
 class RedirectNotFollowedError(HTTPStatusError):
     """Raised when the server answered with a redirect this request didn't follow.
 
-    Every request defaults to ``allow_redirects=False`` (see
-    :meth:`~webdav.client.Client._request`) specifically so a malicious or
+    A :class:`~webdav.session.Session` only follows the redirects its
+    :class:`~webdav.redirects.RedirectPolicy` allows, so a malicious or
     compromised server can't silently redirect a write's body to an
     unintended resource or a different host - HTTP permits a 3xx response
     to any method (RFC 9110 sec. 15.4), so this can happen legitimately
     too, e.g. a cloud-storage gateway redirecting a PUT to a signed upload
     URL. The server's requested target is on the response:
-    ``exc.response.headers.get("Location")``. Pass ``allow_redirects=True``
-    explicitly on a call if your server relies on this pattern.
+    ``exc.response.headers.get("Location")``. Use
+    ``RedirectPolicy.WHITELIST`` (or pass ``redirect_policy=`` on a call)
+    if your server relies on this pattern.
 
     Not registered in ``STATUS_CODE_EXCEPTIONS`` (unlike every other
     subclass here) since it applies to a whole class of status codes
@@ -378,6 +424,28 @@ class RedirectNotFollowedError(HTTPStatusError):
     """
 
     retryable = False
+
+    def __init__(self, response: "Response", path: str | None = None) -> None:
+        """Instantiate with the unfollowed redirect and the request path."""
+        reason = getattr(response, "redirect_refusal", None)
+        location = response.headers.get("Location")
+        msg = f"received {response.status_code} ({_phrase_for(response.status_code)})"
+        if path:
+            msg += f" for {path!r}"
+        if location:
+            msg += f", redirecting to {redact_url(location)!r}"
+        msg += f" - not followed: {reason}" if reason else " - not followed"
+        super().__init__(response, path=path, msg=msg)
+
+    @property
+    def reason(self) -> "str | None":
+        """Why the redirect was not followed (``None`` if not recorded)."""
+        reason: str | None = getattr(self.response, "redirect_refusal", None)
+        return reason
+
+
+class InsecureTransportWarning(UserWarning):
+    """Credentials are about to be sent over plain ``http`` to a non-local host."""
 
 
 def raise_for_status(response: "Response", path: str | None = None) -> None:
@@ -397,7 +465,9 @@ def raise_for_status(response: "Response", path: str | None = None) -> None:
     """
     if response.is_redirect or response.is_permanent_redirect:
         raise RedirectNotFollowedError(response, path=path)
-    if response.ok:
+    # Not ``response.ok``: on a :class:`webdav.response.Response` that calls
+    # back into ``raise_for_status()``, i.e. into this function.
+    if not 400 <= response.status_code < 600:
         return
     exc_cls = STATUS_CODE_EXCEPTIONS.get(response.status_code, HTTPStatusError)
     raise exc_cls(response, path=path)

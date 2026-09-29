@@ -17,8 +17,9 @@ from typing import TYPE_CHECKING
 
 import requests.exceptions
 
-from webdav.exceptions import raise_for_status
-from webdav.session import Method
+from webdav.exceptions import ClientError, raise_for_status
+from webdav.methods import Method
+from webdav.parse_utils import parse_uint
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
     from requests import Response as HTTPResponse
     from typing_extensions import Buffer
 
-    from webdav.client import Client
+    from webdav.session import Session
 
 DEFAULT_CHUNK_SIZE = 2**22
 MAX_RESUME_ATTEMPTS = 5
@@ -64,7 +65,14 @@ class SizedIterator:
         return self._iterator
 
 
-_TRANSIENT_ERRORS = (requests.exceptions.Timeout, requests.exceptions.ConnectionError)
+#: What a resumed download treats as "the connection broke, try again from
+#: where we stopped": a timeout, a refused/reset connection, and a body that
+#: ends before its declared length or in the middle of a chunk.
+_TRANSIENT_ERRORS = (
+    requests.exceptions.Timeout,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.ChunkedEncodingError,
+)
 
 
 def _validate_resumed_response(
@@ -86,36 +94,107 @@ def _validate_resumed_response(
             f"expected a 206 Partial Content response resuming at byte "
             f"{pos}, got {response.status_code}"
         )
-        raise requests.exceptions.ConnectionError(msg)
+        raise ClientError(msg)
 
     content_range = response.headers.get("Content-Range", "")
     if not content_range.startswith(f"bytes {pos}-"):
         msg = f"expected Content-Range starting at byte {pos}, got {content_range!r}"
-        raise requests.exceptions.ConnectionError(msg)
+        raise ClientError(msg)
 
     new_etag = response.headers.get("ETag")
     if etag and new_etag and new_etag != etag:
         msg = "resource changed during download (ETag mismatch)"
-        raise requests.exceptions.ConnectionError(msg)
+        raise ClientError(msg)
 
     new_last_modified = response.headers.get("Last-Modified")
     if last_modified and new_last_modified and new_last_modified != last_modified:
         msg = "resource changed during download (Last-Modified mismatch)"
-        raise requests.exceptions.ConnectionError(msg)
+        raise ClientError(msg)
 
 
-def _get(client: "Client", url: str, pos: int = 0) -> "HTTPResponse":
-    """Send a (possibly ranged) streaming GET."""
-    headers = {"Range": f"bytes={pos}-"} if pos else {}
-    response = client.session.request(Method.GET, url, headers=headers, stream=True)
-    if response.status_code != HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE:
+def _get(session: "Session", url: str, pos: int = 0) -> "HTTPResponse":
+    """Send a (possibly ranged) streaming GET.
+
+    Always ``Accept-Encoding: identity``: a byte range addresses the
+    *encoded* representation, while the bytes counted (and written) are the
+    decoded ones - resuming a gzip-encoded body at "byte N" would splice the
+    wrong data into the output, and ``Content-Length`` would not be the size
+    of the file.
+    """
+    headers = {"Accept-Encoding": "identity"}
+    if pos:
+        headers["Range"] = f"bytes={pos}-"
+    response = session.request(Method.GET, url, headers=headers, stream=True)
+    # A 416 is only meaningful when resuming ("nothing left after pos"); on
+    # the first request it is an error like any other, not an empty file.
+    if not (pos and response.status_code == HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE):
         raise_for_status(response)
     return response
 
 
+def _require_end_of_file(
+    response: "HTTPResponse", pos: int, expected: int | None
+) -> None:
+    """A 416 on a resume means "nothing left after byte ``pos``" - if ``pos`` is the end.
+
+    Anything else (a shorter file now, no total at all) means the download
+    stopped short, and calling that a success would hand back a truncated
+    file.
+
+    Raises:
+        ClientError: The transfer is not complete.
+
+    """
+    content_range = response.headers.get("Content-Range", "")
+    total = (
+        parse_uint(content_range.rpartition("/")[2])
+        if content_range.startswith("bytes */")
+        else None
+    )
+    if total is None or total != pos or (expected is not None and expected != pos):
+        msg = (
+            f"download stopped after {pos} bytes and the server "
+            f"reports {content_range or 'no length'!r} - not a complete transfer"
+        )
+        raise ClientError(msg)
+
+
+def _complete_length(response: "HTTPResponse") -> int | None:
+    """The size of the whole resource, as far as ``response`` says."""
+    content_range = response.headers.get("Content-Range", "")
+    total = content_range.rpartition("/")[2]
+    if content_range.startswith("bytes ") and total != "*":
+        return parse_uint(total)
+    if response.status_code == HTTPStatus.OK:
+        return parse_uint(response.headers.get("Content-Length"))
+    return None
+
+
+def _can_resume(
+    session: "Session",
+    url: str,
+    response: "HTTPResponse",
+    etag: str | None,
+    last_modified: str | None,
+) -> bool:
+    """Whether a broken download may be continued with a ``Range`` request.
+
+    The server has to support ranges, and the *original* response has to have
+    given a validator (a strong ETag, or Last-Modified): without one, a
+    resumed response has no way to be verified as the same representation (see
+    ``_validate_resumed_response``), and resuming anyway risks silently
+    splicing together two different versions of the resource.
+    """
+    supports_ranges = (
+        response.headers.get("Accept-Ranges") == "bytes"
+        or session.features_for(url).supports_ranges
+    )
+    return bool(supports_ranges and (etag or last_modified))
+
+
 @contextmanager
 def iter_url(
-    client: "Client",
+    session: "Session",
     url: str,
     chunk_size: int | None = None,
     pos: int = 0,
@@ -125,12 +204,18 @@ def iter_url(
     def gen(response: "HTTPResponse") -> Generator[bytes, None, None]:
         nonlocal pos
         etag = response.headers.get("ETag")
+        if etag and etag.startswith("W/"):
+            # A weak validator says "equivalent", not "the same bytes" - no
+            # basis for splicing a resumed range onto what was already written.
+            etag = None
         last_modified = response.headers.get("Last-Modified")
         attempts = 0
+        expected = _complete_length(response)
         try:
             while True:
                 if response.status_code == HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE:
-                    return  # range request outside file
+                    _require_end_of_file(response, pos, expected)
+                    return
 
                 if pos:
                     _validate_resumed_response(response, pos, etag, last_modified)
@@ -139,31 +224,26 @@ def iter_url(
                     for chunk in response.iter_content(chunk_size=chunk_size):
                         pos += len(chunk)
                         yield chunk
+                    if expected is not None and pos != expected:
+                        msg = f"download ended after {pos} of {expected} bytes"
+                        raise ClientError(msg)
                     break
                 except _TRANSIENT_ERRORS:
                     response.close()
-                    supports_ranges = (
-                        response.headers.get("Accept-Ranges") == "bytes"
-                        or client.detected_features.supports_ranges
-                    )
-                    # Without ETag/Last-Modified from the *original*
-                    # response, a resumed response has no way to be
-                    # verified as the same representation (see
-                    # _validate_resumed_response) - resuming anyway risks
-                    # silently splicing together two different versions of
-                    # the resource. Fail closed: surface the original
-                    # error and let the caller restart the download fresh.
-                    if not supports_ranges or not (etag or last_modified):
-                        raise
+                    # Fail closed - surface the original error and let the
+                    # caller restart the download fresh - unless this can be
+                    # resumed *and* checked (see _can_resume).
                     attempts += 1
-                    if attempts > MAX_RESUME_ATTEMPTS:
+                    if attempts > MAX_RESUME_ATTEMPTS or not _can_resume(
+                        session, url, response, etag, last_modified
+                    ):
                         raise
                     time.sleep(RESUME_BACKOFF_SECONDS * attempts)
-                    response = _get(client, url, pos=pos)
+                    response = _get(session, url, pos=pos)
         finally:
             response.close()
 
-    response = _get(client, url, pos=pos)
+    response = _get(session, url, pos=pos)
     chunks = gen(response)
     try:
         yield response, chunks
@@ -176,16 +256,16 @@ class IterStream(RawIOBase):
     """A read-only, seekable, streaming file-like object over a GET response."""
 
     def __init__(
-        self, client: "Client", url: str, chunk_size: int | None = None
+        self, session: "Session", url: str, chunk_size: int | None = None
     ) -> None:
         """Set up the stream; the actual request is sent on ``__enter__``."""
         super().__init__()
         self.buffer = b""
-        self.chunk_size = chunk_size or client.chunk_size
-        self.client = client
+        self.chunk_size = chunk_size or session.chunk_size
+        self.session = session
         self.url = url
         self._loc: int = 0
-        self._cm = iter_url(client, self.url, chunk_size=chunk_size)
+        self._cm = iter_url(session, self.url, chunk_size=chunk_size)
         self._iterator: Iterator[bytes] | None = None
         self._initial_response: HTTPResponse | None = None
 
@@ -195,14 +275,13 @@ class IterStream(RawIOBase):
         response = self._initial_response
         if response and response.headers.get("Accept-Ranges") == "bytes":
             return True
-        return self.client.detected_features.supports_ranges
+        return self.session.features_for(self.url).supports_ranges
 
     @property
     def size(self) -> int | None:
         """Size of the resource, from ``Content-Length`` - ``None`` if unknown."""
         assert self._initial_response
-        content_length: str = self._initial_response.headers.get("Content-Length", "")
-        return int(content_length) if content_length.isdigit() else None
+        return parse_uint(self._initial_response.headers.get("Content-Length"))
 
     @property
     def loc(self) -> int:
@@ -260,7 +339,7 @@ class IterStream(RawIOBase):
             raise ValueError(msg)
 
         self.close()
-        self._cm = iter_url(self.client, self.url, pos=loc, chunk_size=self.chunk_size)
+        self._cm = iter_url(self.session, self.url, pos=loc, chunk_size=self.chunk_size)
         _, self._iterator = self._cm.__enter__()
         self.loc = loc
         return loc

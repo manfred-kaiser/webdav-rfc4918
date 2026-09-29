@@ -5,32 +5,69 @@ response, including the ``Timeout``/``Lock-Token`` header syntax
 (RFC 4918 §10.5/§10.7).
 """
 
+import posixpath
+import re
+import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from xml.etree.ElementTree import Element
 
-from webdav.exceptions import MalformedResponseError
+from webdav.conditional import (
+    Condition,
+    build_if_header_single,
+    merge_if_headers,
+    token_condition,
+)
+from webdav.exceptions import ClientError, MalformedResponseError
+from webdav.parse_utils import parse_uint
+from webdav.redirects import effective_origin
+from webdav.urls import URL, path_key
 from webdav.xml_utils import dav, parse_xml, split_clark, sub_dav_element, to_xml_string
 
-#: Characters that must never appear in a lock token that's later going to
-#: be embedded in an ``If``/``Lock-Token`` request header - the transport
-#: layer (``http.client``) already refuses to send a header value
-#: containing these (CRLF-injection protection), but rejecting it here
-#: gives a clear, library-specific error instead of a transport-level one
-#: surfacing much later, from an unrelated call.
-_FORBIDDEN_TOKEN_CHARS = "\r\n\x00"  # noqa: S105 -- control chars, not a password
+#: What a lock token may look like. A token is a Coded-URL (RFC 4918 sec.
+#: 10.4): an absolute URI, in ASCII, that this library puts between ``<`` and
+#: ``>`` in an ``If`` or ``Lock-Token`` header. The server chose it, so it is
+#: checked against the URI character set - a token containing ``>``, a space
+#: or a quote could otherwise close the brackets and add conditions of its
+#: own to the header, and one with characters outside Latin-1 would make
+#: every later request under that path fail to encode.
+_TOKEN_RE = re.compile(r"[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]{1,1024}")
+
+
+def check_token(token: str) -> str:
+    """Return ``token`` if it is a usable lock token.
+
+    Raises:
+        MalformedResponseError: It is not (see ``_TOKEN_RE``).
+
+    """
+    if not _TOKEN_RE.fullmatch(token):
+        msg = f"server returned an unusable lock token: {token[:60]!r}"
+        raise MalformedResponseError(msg)
+    return token
+
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from requests import Response as HTTPResponse
 
+    from webdav.redirects import Origin
+
+#: How long a lock is requested for when the caller says nothing, in seconds.
+#: Deliberately finite: a client that crashes or loses the network never
+#: sends its UNLOCK, and an "Infinite" lock would then block everyone else
+#: until an administrator steps in. Pass ``lock_timeout=None`` for infinite.
+DEFAULT_LOCK_TIMEOUT = 600
+
 #: RFC 4918 §9.10.
 EXCLUSIVE = "exclusive"
 SHARED = "shared"
 
 
-def build_lock_body(scope: str = EXCLUSIVE, owner: "str | Element | None" = None) -> str:
+def build_lock_body(
+    scope: str = EXCLUSIVE, owner: "str | Element | None" = None
+) -> str:
     """Build a LOCK request body (RFC 4918 §9.10.3).
 
     Args:
@@ -41,6 +78,9 @@ def build_lock_body(scope: str = EXCLUSIVE, owner: "str | Element | None" = None
             example uses ``<D:href>mailto:...</D:href>``).
 
     """
+    if scope not in (EXCLUSIVE, SHARED):
+        msg = f"lock scope must be {EXCLUSIVE!r} or {SHARED!r}, got {scope!r}"
+        raise ValueError(msg)
     root = Element(dav("lockinfo"))
     scope_el = sub_dav_element(root, "lockscope")
     sub_dav_element(scope_el, scope)
@@ -68,9 +108,20 @@ def format_timeout(seconds: "int | Iterable[int | None] | None") -> str:
             regardless, see :attr:`ActiveLock.timeout`.
 
     """
-    values: Iterable[int | None] = (
-        (seconds,) if seconds is None or isinstance(seconds, int) else seconds
+    values: list[int | None] = (
+        [seconds] if seconds is None or isinstance(seconds, int) else list(seconds)
     )
+    if not values:
+        msg = "a Timeout preference list cannot be empty"
+        raise ValueError(msg)
+    for value in values:
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value < 2**32
+        ):
+            msg = f"a lock timeout is a number of seconds (0 to 2**32-1) or None, got {value!r}"
+            raise ValueError(msg)
     return ", ".join("Infinite" if s is None else f"Second-{s}" for s in values)
 
 
@@ -84,9 +135,7 @@ def parse_timeout(value: str | None) -> "int | None":
         return None
     first = value.split(",")[0].strip()
     if first.startswith("Second-"):
-        digits = first[len("Second-") :]
-        if digits.isdigit():
-            return int(digits)
+        return parse_uint(first[len("Second-") :])
     return None
 
 
@@ -141,13 +190,11 @@ class ActiveLock:
                 character that could never be a legitimate lock token.
 
         """
-        token = element.findtext(f"{dav('locktoken')}/{dav('href')}")
+        token = (element.findtext(f"{dav('locktoken')}/{dav('href')}") or "").strip()
         if not token:
             msg = "<d:activelock> is missing a required <d:locktoken><d:href>"
             raise MalformedResponseError(msg)
-        if any(c in token for c in _FORBIDDEN_TOKEN_CHARS):
-            msg = f"server returned a lock token with a control character: {token!r}"
-            raise MalformedResponseError(msg)
+        check_token(token)
 
         scope = (
             SHARED
@@ -171,31 +218,252 @@ class ActiveLock:
         )
 
 
-def parse_lock_response(http_response: "HTTPResponse") -> ActiveLock:
+def parse_lock_response(
+    http_response: "HTTPResponse", expected_token: "str | None" = None
+) -> ActiveLock:
     """Parse a successful LOCK response into an :class:`ActiveLock`.
 
     Works for both a new lock (``Lock-Token`` response header present)
-    and a lock refresh (RFC 4918 §9.10.2 - no ``Lock-Token`` header is
-    sent back, the token is only in the body).
+    and a lock refresh (RFC 4918 sec. 9.10.2 - no ``Lock-Token`` header is
+    sent back, the token is only in the body; pass the refreshed lock's
+    token as ``expected_token``).
+
+    A ``lockdiscovery`` may list several locks (shared locks): the one
+    described is the one whose token is the ``Lock-Token`` header (or
+    ``expected_token``) - never simply the first, which could be another
+    holder's lock.
 
     Raises:
         MalformedResponseError: The response body has no usable
-            ``<d:activelock>``.
+            ``<d:activelock>``, or none of them is the lock asked about.
 
     """
     tree = parse_xml(http_response.content)
-    activelock_el = tree.find(f".//{dav('activelock')}")
-    if activelock_el is None:
+    elements = tree.findall(f".//{dav('activelock')}")
+    if not elements:
         msg = "LOCK response body has no <d:activelock>"
         raise MalformedResponseError(msg)
 
-    header_token = http_response.headers.get("Lock-Token", "").strip("<>")
+    header_token = http_response.headers.get("Lock-Token", "").strip().strip("<>")
     timeout_header = http_response.headers.get("Timeout")
-    lock = ActiveLock.from_element(activelock_el, timeout_header=timeout_header)
-    if header_token and header_token != lock.token:
-        # RFC 4918 doesn't actually allow these to disagree - if a server
-        # does it anyway, the header is authoritative (it's what UNLOCK
-        # needs verbatim), but this is worth surfacing rather than
-        # silently picking one.
-        lock.token = header_token
-    return lock
+    wanted = check_token(header_token) if header_token else expected_token
+    locks = [
+        ActiveLock.from_element(el, timeout_header=timeout_header) for el in elements
+    ]
+    if wanted:
+        for lock in locks:
+            if lock.token == wanted:
+                return lock
+        if header_token and len(locks) == 1:
+            # RFC 4918 doesn't actually allow these to disagree - if a server
+            # does it anyway, the header is authoritative (it's what UNLOCK
+            # needs verbatim) and there is no other lock it could be about.
+            locks[0].token = header_token
+            return locks[0]
+        msg = "LOCK response lists no lock with the token that was asked about"
+        raise MalformedResponseError(msg)
+    if len(locks) == 1:
+        return locks[0]
+    msg = "LOCK response lists several locks and names none of them"
+    raise MalformedResponseError(msg)
+
+
+@dataclass(frozen=True)
+class HeldLock:
+    """A lock this session took: where, which token, how deep."""
+
+    url: str
+    token: str
+    depth: str
+
+
+def _tag_url(url: str) -> str:
+    """``url`` as it is written into an ``If`` header: a valid URI, without query or fragment.
+
+    The resource tag is a Coded-URL, so a space, a ``>`` or a non-ASCII character
+    in it has to be percent-encoded (it could otherwise close the bracket early
+    or fail to encode), and a fragment is not part of what a lock is on.
+    """
+    parsed = URL(url)
+    parsed.query = ""
+    parsed.fragment = ""
+    return str(parsed)
+
+
+class LockRegistry:
+    """The locks a session currently holds, so its writes can carry their tokens.
+
+    Keyed by *origin and path* of the URL that was locked (never a bare
+    path): a lock token is a capability for one resource on one server,
+    and must not be attached to a request for the same path on a
+    different host. Lookups are on the requested URL only - never on a
+    server-supplied ``lockroot``, which a malicious server could point at
+    an unrelated resource to make this client attach a token somewhere
+    the caller never asked for.
+
+    Thread-safe: a session (and so its registry) may be shared.
+    """
+
+    def __init__(self) -> None:
+        """Create an empty registry."""
+        # (origin, comparison key of the path) -> the locks held there; a
+        # list since RFC 4918 sec. 6.2 lets several (shared) locks coexist
+        # on one resource.
+        self._held: dict[tuple[Origin, str], list[HeldLock]] = {}
+        self._mutex = threading.RLock()
+
+    def __bool__(self) -> bool:
+        """Whether any lock is held."""
+        return bool(self._held)
+
+    @staticmethod
+    def _key(url: str) -> "tuple[Origin, str]":
+        origin = effective_origin(url)
+        if origin is None:
+            msg = f"cannot track a lock for {url!r}: not a plain http(s) URL"
+            raise ClientError(msg)
+        return origin, path_key(URL(url).path)
+
+    def add(self, url: str, token: str, depth: str) -> None:
+        """Record that ``token`` (with ``depth``) is held on ``url``."""
+        key = self._key(url)
+        check_token(token)
+        with self._mutex:
+            self._held.setdefault(key, []).append(HeldLock(_tag_url(url), token, depth))
+
+    def discard(self, url: str, token: str, depth: str) -> None:
+        """Forget a held lock; a no-op if it isn't recorded."""
+        key = self._key(url)
+        with self._mutex:
+            entries = self._held.get(key)
+            if not entries:
+                return
+            entries[:] = [e for e in entries if (e.token, e.depth) != (token, depth)]
+            if not entries:
+                del self._held[key]
+
+    def replace_token(self, old: str, new: str) -> None:
+        """Swap a token after a refresh (RFC 4918 sec. 9.10.2)."""
+        check_token(new)
+        with self._mutex:
+            for entries in self._held.values():
+                for i, held in enumerate(entries):
+                    if held.token == old:
+                        entries[i] = HeldLock(held.url, new, held.depth)
+
+    def covering(self, url: str) -> list[HeldLock]:
+        """The locks a write to ``url`` has to present a token for.
+
+        - a lock on ``url`` itself;
+        - a ``Depth: infinity`` lock on an ancestor (it covers everything
+          below it, including not-yet-existing members);
+        - a lock - of *either* depth - on ``url``'s parent collection: RFC
+          4918 sec. 7.4 has a write lock on a collection prevent members
+          being added to or removed from it, whether it was taken with
+          ``Depth: 0`` or ``infinity``.
+
+        Matched purely on the path string, never on whether anything
+        exists there.
+        """
+        if not self._held:
+            return []
+        try:
+            origin, path = self._key(url)
+        except ClientError:
+            return []
+        parent = posixpath.dirname(path.rstrip("/")) or "/"
+        found: list[HeldLock] = []
+        with self._mutex:
+            for (held_origin, held_path), entries in self._held.items():
+                if held_origin != origin:
+                    continue
+                # The root ("/") needs no extra separator before its
+                # children; every other path does, so "/a" doesn't also
+                # match "/ab".
+                prefix = held_path if held_path == "/" else held_path + "/"
+                for held in entries:
+                    exact = path == held_path
+                    below = held.depth == "infinity" and path.startswith(prefix)
+                    if exact or below or (path != "/" and held_path == parent):
+                        found.append(held)
+        return found
+
+    def below(self, url: str) -> list[HeldLock]:
+        """The locks held strictly *inside* ``url`` (on members of the collection it names).
+
+        A ``DELETE`` or ``MOVE`` of a collection takes everything under it along,
+        and RFC 4918 sec. 7.4/10.4 wants the token of every locked resource within
+        that scope submitted.
+        """
+        if not self._held:
+            return []
+        try:
+            origin, path = self._key(url)
+        except ClientError:
+            return []
+        prefix = path if path == "/" else path + "/"
+        with self._mutex:
+            return [
+                held
+                for (held_origin, held_path), entries in self._held.items()
+                if held_origin == origin
+                and held_path != path
+                and held_path.startswith(prefix)
+                for held in entries
+            ]
+
+    def token_for(self, url: str) -> str | None:
+        """The token of a held lock that covers ``url`` itself, if any.
+
+        (The lock itself, or a ``Depth: infinity`` lock above it - not a
+        lock that merely protects the membership of its parent
+        collection, see :meth:`covering`.)
+        """
+        try:
+            _origin, path = self._key(url)
+        except ClientError:
+            return None
+        for held in self.covering(url):
+            held_path = self._key(held.url)[1]
+            if path == held_path or held.depth == "infinity":
+                return held.token
+        return None
+
+    def if_header(self, *urls: str, include_below: "Iterable[str]" = ()) -> str | None:
+        """The ``If`` header a write touching ``urls`` needs, or ``None``.
+
+        ``include_below`` names the ones whose *members* the write takes along (a
+        ``DELETE``/``MOVE`` of a collection): the locks held inside those are
+        presented too.
+
+        A write to one resource that is itself locked gets the plain
+        (untagged) form ``(<token>)``. Anything else - a request touching
+        several resources (COPY/MOVE), or one that needs the lock of a
+        *parent* collection or of members below - gets a tagged list per lock, each
+        scoped to the resource the lock is on (sec. 10.4: an untagged token only
+        speaks about the request's own resource, and the lock on a parent
+        is not one on it). The two forms cannot be mixed in one header.
+        """
+        held_locks: list[HeldLock] = []
+        for url in urls:
+            for held in self.covering(url):
+                if held not in held_locks:
+                    held_locks.append(held)
+        for url in include_below:
+            for held in self.below(url):
+                if held not in held_locks:
+                    held_locks.append(held)
+        if not held_locks:
+            return None
+        if (
+            len(urls) == 1
+            and not tuple(include_below)
+            and all(self._key(h.url) == self._key(urls[0]) for h in held_locks)
+        ):
+            return token_condition(held_locks[0].token)
+        return merge_if_headers(
+            *(
+                build_if_header_single([Condition(token=h.token)], resource=h.url)
+                for h in held_locks
+            )
+        )

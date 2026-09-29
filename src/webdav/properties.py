@@ -8,12 +8,14 @@ common live properties (``getetag``, ``getcontentlength``, ...).
 """
 
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 from xml.etree.ElementTree import Element
 
 from webdav.date_utils import from_rfc1123, fromisoformat
 from webdav.exceptions import MalformedResponseError
 from webdav.locks import ActiveLock, LockEntry
+from webdav.parse_utils import parse_uint
 from webdav.xml_utils import (
     DAV_NAMESPACE,
     clark,
@@ -75,9 +77,7 @@ class PropStat:
         """Parse a ``<d:propstat>`` element."""
         status_line = element.findtext(dav("status")) or ""
         parts = status_line.split()
-        self.status_code = (
-            int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 0
-        )
+        self.status_code = (parse_uint(parts[1]) or 0) if len(parts) >= 2 else 0
         self.response_description = element.findtext(dav("responsedescription"))
         self.error = element.find(dav("error"))
 
@@ -124,10 +124,7 @@ class DAVProperties:
         self.etag: str | None = leaf_text("getetag") or None
         self.content_type: str | None = leaf_text("getcontenttype")
 
-        content_length = leaf_text("getcontentlength")
-        self.content_length: int | None = (
-            int(content_length) if content_length and content_length.isdigit() else None
-        )
+        self.content_length: int | None = parse_uint(leaf_text("getcontentlength"))
         self.content_language: str | None = leaf_text("getcontentlanguage")
         self.display_name: str | None = leaf_text("displayname")
 
@@ -171,29 +168,17 @@ class DAVProperties:
                     failed[tag] = propstat.status_code
         return cls(elements, failed)
 
-    def get(self, namespace: str, local_name: str, default: Any = None) -> Any:
-        """Return the text of a property by (namespace, local_name)."""
-        el = self.elements.get(clark(namespace, local_name))
-        if el is None:
-            return default
-        return el.text if len(el) == 0 else el
+    def element(self, namespace: str, local_name: str) -> "Element | None":
+        """The XML element of a property, or ``None`` if the server did not return it."""
+        return self.elements.get(clark(namespace, local_name))
 
-    def as_dict(self, raw: bool = False) -> dict[str, Any]:
-        """Return properties as a plain dict.
+    def text(self, namespace: str, local_name: str) -> "str | None":
+        """The text of a property, or ``None`` if it is absent or has no text (use :meth:`element`)."""
+        el = self.element(namespace, local_name)
+        return el.text if el is not None and len(el) == 0 else None
 
-        Args:
-            raw: If True, return every returned property keyed by its
-                local name (namespace dropped) instead of just the
-                well-known convenience subset.
-
-        """
-        if raw:
-            result: dict[str, Any] = {}
-            for tag, el in self.elements.items():
-                _, local_name = split_clark(tag)
-                result[local_name] = el.text if len(el) == 0 else el
-            return result
-
+    def as_dict(self) -> dict[str, Any]:
+        """The well-known live properties as a plain dict (``None`` for one the server did not return)."""
         return {
             "content_length": self.content_length,
             "created": self.created,
@@ -244,13 +229,11 @@ def build_propfind_body(
         sub_dav_element(root, "allprop")
         if include:
             include_el = sub_dav_element(root, "include")
-            for name in include:
-                namespace, local_name = _resolve_name(name)
+            for namespace, local_name in _names(include, "include"):
                 include_el.append(Element(clark(namespace, local_name)))
     else:
         prop_el = sub_dav_element(root, "prop")
-        for name in names or ():
-            namespace, local_name = _resolve_name(name)
+        for namespace, local_name in _names(names, "names"):
             prop_el.append(Element(clark(namespace, local_name)))
     return to_xml_string(root)
 
@@ -270,6 +253,9 @@ def build_proppatch_body(
         remove_props: Properties to remove.
 
     """
+    if not set_props and not remove_props:
+        msg = "a PROPPATCH needs at least one property to set or remove (RFC 4918 sec. 14.19)"
+        raise ValueError(msg)
     root = Element("{DAV:}propertyupdate")
 
     if set_props:
@@ -284,20 +270,70 @@ def build_proppatch_body(
                 prop_el.append(wrapper)
             else:
                 el = Element(tag)
+                if not isinstance(value, str):
+                    msg = f"property value for {name!r} must be str or Element, got {type(value).__name__}"
+                    raise TypeError(msg)
                 el.text = value
                 prop_el.append(el)
 
     if remove_props:
         remove_el = sub_dav_element(root, "remove")
         prop_el = sub_dav_element(remove_el, "prop")
-        for name in remove_props:
-            namespace, local_name = _resolve_name(name)
+        for namespace, local_name in _names(remove_props, "remove_props"):
             prop_el.append(Element(clark(namespace, local_name)))
 
     return to_xml_string(root)
 
 
+#: The local part of an XML name (NCName): a letter or underscore, then letters,
+#: digits, dots, hyphens, underscores - no colon, no space, nothing that could end
+#: the name and start something else.
+_NCNAME = re.compile(r"[^\W\d][\w.\-]*")
+
+
 def _resolve_name(name: "str | PropName") -> PropName:
+    """Turn a property name into ``(namespace, local_name)``, refusing anything that is not one.
+
+    Accepted: a convenience name (``"etag"``), a bare ``DAV:`` local name
+    (``"getetag"``), Clark notation (``"{urn:x}y"`` - the form ``DAVProperties``
+    reports names in) and a ``(namespace, local_name)`` tuple; an empty
+    namespace means no namespace.
+
+    Raises:
+        ValueError: Not a valid property name (the name could otherwise alter the XML around it).
+        TypeError: Not a ``str`` or a pair of ``str``.
+
+    """
     if isinstance(name, tuple):
-        return name
-    return DAV_NAMESPACE, CONVENIENCE_PROPS.get(name, name)
+        if len(name) != 2 or not all(isinstance(part, str) for part in name):
+            msg = f"a property name is a str or a (namespace, local name) pair of str, got {name!r}"
+            raise TypeError(msg)
+        namespace, local_name = name
+    elif isinstance(name, str):
+        if name.startswith("{"):
+            namespace, brace, local_name = name[1:].partition("}")
+            if not brace:
+                msg = f"invalid property name {name!r}: unclosed namespace"
+                raise ValueError(msg)
+        else:
+            namespace, local_name = DAV_NAMESPACE, CONVENIENCE_PROPS.get(name, name)
+    else:
+        msg = f"a property name is a str or a (namespace, local name) pair of str, got {type(name).__name__}"
+        raise TypeError(msg)
+    if not _NCNAME.fullmatch(local_name):
+        msg = f"invalid property name {local_name!r}"
+        raise ValueError(msg)
+    if any(c in namespace for c in "{}<>&\"'") or not namespace.isprintable():
+        msg = f"invalid property namespace {namespace!r}"
+        raise ValueError(msg)
+    return namespace, local_name
+
+
+def _names(names: "Iterable[str | PropName] | None", what: str) -> "list[PropName]":
+    """The names in ``names`` resolved - and a single ``str`` refused (it would be read as its characters)."""
+    if names is None:
+        return []
+    if isinstance(names, str | bytes):
+        msg = f"{what} is a list of names, not a single {type(names).__name__}: pass [{names!r}]"
+        raise TypeError(msg)
+    return [_resolve_name(name) for name in names]

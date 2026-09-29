@@ -1,0 +1,4 @@
+# Everything, and in particular the release machinery, is reviewed by the maintainer.
+*                @manfred-kaiser
+/.github/        @manfred-kaiser
+/pyproject.toml  @manfred-kaiser

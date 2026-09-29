@@ -20,16 +20,15 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
 ]
-dependencies = [ "python-dateutil>=2.8.1", "requests>=2.31,<3" ]
+dependencies = [ "requests>=2.32.4,<3", "urllib3>=2.7.0,<3" ]
 
 [project.scripts]
 dav = "webdav.cli:main"
 
 [project.optional-dependencies]
-all = [ "webdav-rfc4918[cli,fsspec]" ]
-cli = [ "colorama" ]
+all = [ "webdav-rfc4918[fsspec]" ]
 docs = [ "myst-parser", "sphinx", "sphinx-copybutton", "sphinx-rtd-theme" ]
-fsspec = [ "fsspec>=2021.7" ]
+fsspec = [ "fsspec>=2022.11.0" ]
 
 [project.urls]
 Homepage = "https://github.com/manfred-kaiser/webdav-rfc4918"
@@ -41,7 +40,7 @@ Tracker = "https://github.com/manfred-kaiser/webdav-rfc4918/issues"
 packages = [ "src/webdav" ]
 
 [tool.hatch.envs.hatch-test]
-dependencies = [ "pytest", "pytest-cov", "pytest-xdist", "typing-extensions" ]
+dependencies = [ "hypothesis", "pytest", "pytest-cov", "pytest-xdist", "typing-extensions" ]
 extra-dependencies = [ "webdav-rfc4918[all]", "cheroot", "wsgidav" ]
 
 [tool.hatch.envs.hatch-test.scripts]
@@ -71,11 +70,10 @@ dependencies = [
   "pytest-cov",
   "pytest-xdist",
   "ruff",
-  "types-colorama",
-  "types-python-dateutil",
   "types-requests",
   "cheroot",
   "wsgidav",
+  "hypothesis",
 ]
 
 [tool.hatch.envs.lint.scripts]
@@ -93,11 +91,13 @@ check = [
 python = [ "3.11", "3.12", "3.13", "3.14" ]
 
 [tool.flake8]
+# __init__.py re-exports the public API (and `open`, deliberately not in __all__).
+per-file-ignores = [ "src/webdav/__init__.py:F401" ]
 # E203/W503 are black's own documented flake8 exceptions (black's slice/
 # operator-wrap style conflicts with pycodestyle's). E704 joins them for
 # the same reason: black's "dummy implementations" style collapses a
 # trivial `def foo(): ...` body onto one line (the `@overload` stubs in
-# client.py's `open()`) - exactly what E704 flags.
+# session.py's `open()`) - exactly what E704 flags.
 ignore = [ "E203", "E501", "E704", "W503" ]
 
 [tool.black]
@@ -124,14 +124,13 @@ ignore = [
 ]
 
 [tool.ruff.lint.pylint]
-# Client.__init__ has 12 independent, keyword-only configuration params
-# (base_url plus 11 keyword-only: auth/session/retry/chunk_size/cert/
-# verify/tls/headers/max_response_size/redirect_policy/
-# trusted_redirect_origins) - each is independently meaningful and none
-# group naturally beyond what TLSOptions already bundles (the
-# TLS-internals subset). Kept in sync with [tool.pylint.design].max-args
-# below.
-max-args = 12
+# Session.__init__ has 13 independent configuration params (base_url plus
+# 12 keyword-only: auth/headers/cert/verify/tls/timeout/redirect_policy/
+# trusted_redirect_origins/max_response_size/retry/chunk_size/
+# raise_on_error) - each is independently meaningful and none group
+# naturally beyond what TLSOptions already bundles (the TLS-internals
+# subset). Kept in sync with [tool.pylint.design].max-args below.
+max-args = 13
 
 [tool.ruff.lint.per-file-ignores]
 "docs/**" = [ "INP001" ]
@@ -164,18 +163,27 @@ disable = [
   # (FeatureDetection, Method, PropStat, RetryFunc) - a near-universal
   # pylint nitpick against small, single-purpose classes.
   "too-few-public-methods",
+  # api.py mirrors Session on purpose (same signatures, thin delegation).
+  "duplicate-code",
+  # urllib3 connections get request/getresponse from http.client; pylint cannot see it.
+  "no-member",
+  # fsspec.get_file adds nothing but the documented outfile handling.
+  "signature-differs",
 ]
+
 
 [tool.pylint.design]
 # Kept in sync with [tool.ruff.lint.pylint].max-args - see its comment.
-max-args = 12
+max-args = 13
+max-parents = 8  # the exception hierarchy is deliberately fine-grained
 max-positional-arguments = 9
-# Client is a comprehensive WebDAV facade (ls/info/exists/mkdir/move/copy/
-# lock/open/upload/download/props/...), same shape as httpx.Client or
-# requests.Session - splitting it into several classes purely to satisfy
-# this metric would work against the single-entry-point API this project
-# explicitly aims for. A little headroom over its current size (31).
-max-public-methods = 34
+# Session is the single entry point: the HTTP/WebDAV verbs plus the
+# file-system operations (ls/info/exists/mkdir/open/upload/download/props/
+# ...), like requests.Session is for HTTP - splitting it into several
+# classes purely to satisfy this metric would work against the
+# one-object API this project explicitly aims for. A little headroom over
+# its current size (43).
+max-public-methods = 46
 
 [tool.pylint.MASTER]
 load-plugins = "pylint.extensions.docparams"

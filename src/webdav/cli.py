@@ -3,13 +3,14 @@
 Every command takes one or more WebDAV URLs
 (``webdav://host/path``/``webdavs://host/path``, or plain ``http(s)://``) -
 the scheme's host/port is the server, everything after it is the
-resource path. Authentication is ``user:pass@host`` in the URL,
-``--user``/``--password``, or the ``WEBDAV_USER``/``WEBDAV_PASSWORD``
-environment variables, in that order of precedence. mTLS (client
-certificates) is available via ``--cert``/``--key``/``--ca-cert`` - see
-``--help`` on any subcommand. Every :class:`~webdav.client.Client`
-constructor option (redirect policy, response-size cap, retry, TLS
-details, ...) has a corresponding flag - see the "connection options"
+resource path. Authentication is ``--user``/``--password``, else
+``user:pass@host`` in the URL, else the ``WEBDAV_USER``/``WEBDAV_PASSWORD``
+environment variables, in that order of precedence (an explicit flag beats
+what a pasted URL happens to contain). mTLS (client certificates) is
+available via ``--cert``/``--key``/``--ca-cert`` - see ``--help`` on any
+subcommand. The commonly needed :class:`~webdav.session.Session`
+constructor options (redirect policy, response-size cap, retry, timeout,
+chunk size, TLS details) have a corresponding flag - see the "connection"
 group in ``--help``.
 """
 
@@ -17,12 +18,14 @@ import argparse
 import os
 import ssl
 import sys
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import requests.exceptions
 
-from webdav.client import Client, RedirectPolicy
+from webdav.redirects import RedirectPolicy
+from webdav.session import Session
 from webdav.tls import DEFAULT_MINIMUM_TLS_VERSION, TLSOptions
 
 if TYPE_CHECKING:
@@ -45,7 +48,7 @@ _TLS_VERSIONS = {
 _REDIRECT_POLICIES = {policy.value: policy for policy in RedirectPolicy}
 
 #: Distinguishes "--max-response-size/--chunk-size wasn't given at all"
-#: (use Client()'s own default) from "given as 'none'" (None is itself a
+#: (use Session()'s own default) from "given as 'none'" (None is itself a
 #: meaningful value for --max-response-size: disable the cap).
 _UNSET = object()
 
@@ -64,6 +67,12 @@ def _split_url(
         msg = f"unsupported URL scheme {parts.scheme!r} (expected webdav(s)/dav(s)/http(s))"
         raise CLIError(msg)
 
+    if parts.query or parts.fragment:
+        # Neither is part of a resource's address here; dropping them silently
+        # would act on a different resource than the one the URL names.
+        msg = "a URL with a query or fragment is not supported (a signed URL is not a WebDAV path)"
+        raise CLIError(msg)
+
     resolved_user = user or parts.username or os.environ.get("WEBDAV_USER")
     resolved_password = (
         password or parts.password or os.environ.get("WEBDAV_PASSWORD") or ""
@@ -71,20 +80,58 @@ def _split_url(
     auth = (resolved_user, resolved_password) if resolved_user is not None else None
 
     host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"  # an IPv6 literal keeps its brackets in a URL
     netloc = f"{host}:{parts.port}" if parts.port else host
     base_url = urlunsplit((scheme, netloc, "", "", ""))
-    return base_url, parts.path or "/", auth
+    # The path on the command line is the URL's: percent-decode it once, so
+    # ``a%20b.txt`` names "a b.txt" (Session paths are plain names).
+    return base_url, unquote(parts.path) or "/", auth
 
 
-def _positive_int_or_none(value: str) -> "int | None":
-    """Argparse type: a positive byte count, or 'none'/'0' to disable a cap."""
-    if value.lower() in ("none", "unlimited", "0"):
-        return None
-    parsed = int(value)
+def _positive_int(value: str) -> int:
+    """Argparse type: a positive integer (``0`` and negatives are refused, not reinterpreted)."""
+    try:
+        parsed = int(value)
+    except ValueError:
+        parsed = 0
     if parsed <= 0:
-        msg = f"must be a positive integer or 'none', got {value!r}"
+        msg = f"must be a positive integer, got {value!r}"
         raise argparse.ArgumentTypeError(msg)
     return parsed
+
+
+def _size_cap(value: str) -> "int | None":
+    """Argparse type: a positive byte count, or 'none'/'unlimited' to disable the cap.
+
+    ``0`` is deliberately *not* "unlimited": a typo that silently removes a
+    safety limit is the wrong way to fail.
+    """
+    if value.lower() in ("none", "unlimited"):
+        return None
+    return _positive_int(value)
+
+
+def _positive_seconds(value: str) -> float:
+    """Argparse type: a positive number of seconds."""
+    try:
+        parsed = float(value)
+    except ValueError:
+        parsed = 0.0
+    if not parsed > 0:
+        msg = f"must be a positive number of seconds, got {value!r}"
+        raise argparse.ArgumentTypeError(msg)
+    return parsed
+
+
+def _printable(text: object) -> str:
+    """``text`` with control characters made visible.
+
+    Names and values come from the server: an ESC sequence or a newline in
+    one would otherwise repaint the terminal or forge an extra line of
+    output.
+    """
+    return "".join(c if c.isprintable() else repr(c)[1:-1] for c in str(text))
 
 
 def _redirect_policy(value: str) -> RedirectPolicy:
@@ -106,7 +153,7 @@ def _tls_version(value: str) -> ssl.TLSVersion:
 
 
 def _client_kwargs(args: argparse.Namespace) -> dict[str, Any]:
-    """Build every :class:`~webdav.client.Client` constructor kwarg from ``args``."""
+    """Build every :class:`~webdav.session.Session` constructor kwarg from ``args``."""
     cert: str | tuple[str, str] | None = (
         (args.cert, args.key) if args.cert and args.key else args.cert
     )
@@ -114,7 +161,13 @@ def _client_kwargs(args: argparse.Namespace) -> dict[str, Any]:
 
     key_password = args.key_password or os.environ.get("WEBDAV_KEY_PASSWORD")
     tls = None
-    if key_password or args.tls_min_version or args.tls_max_version or args.ciphers or args.crl_cert:
+    if (
+        key_password
+        or args.tls_min_version
+        or args.tls_max_version
+        or args.ciphers
+        or args.crl_cert
+    ):
         tls = TLSOptions(
             key_password=key_password,
             crl_files=args.crl_cert or None,
@@ -130,7 +183,7 @@ def _client_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "retry": not args.no_retry,
         "redirect_policy": args.redirect_policy,
     }
-    # Only override Client()'s own defaults when the flag was actually
+    # Only override Session()'s own defaults when the flag was actually
     # given - args.max_response_size/.chunk_size default to the _UNSET
     # sentinel, not None, specifically so "not given" and "given as
     # 'none'" (a real, meaningful value for --max-response-size, meaning
@@ -139,34 +192,34 @@ def _client_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         kwargs["max_response_size"] = args.max_response_size
     if args.chunk_size is not _UNSET:
         kwargs["chunk_size"] = args.chunk_size
+    if args.timeout is not _UNSET:
+        kwargs["timeout"] = args.timeout
     if args.trusted_redirect_origin:
         kwargs["trusted_redirect_origins"] = args.trusted_redirect_origin
     return kwargs
 
 
-def _client_for(url: str, args: argparse.Namespace) -> tuple[Client, str]:
+def _client_for(url: str, args: argparse.Namespace) -> tuple[Session, str]:
     base_url, path, auth = _split_url(url, user=args.user, password=args.password)
-    return Client(base_url, auth=auth, **_client_kwargs(args)), path
+    return Session(base_url, auth=auth, **_client_kwargs(args)), path
 
 
 def _cmd_ls(args: argparse.Namespace) -> None:
     client, path = _client_for(args.url, args)
     with client:
-        entries = client.ls(path, detail=True)
+        entries = client.ls(path)
     for entry in entries:
-        name = entry.get("name", "")
-        size = entry.get("content_length")
-        kind = "d" if entry.get("type") == "directory" else "f"
-        size_str = "-" if size is None else str(size)
-        print(f"{kind}  {size_str:>12}  {name}")
+        kind = "d" if entry.is_dir else "f"
+        size_str = "-" if entry.size is None else str(entry.size)
+        print(f"{kind}  {size_str:>12}  {_printable(entry.name)}")
 
 
 def _cmd_info(args: argparse.Namespace) -> None:
     client, path = _client_for(args.url, args)
     with client:
         info = client.info(path)
-    for key, value in info.items():
-        print(f"{key}: {value}")
+    for key, value in info.as_dict().items():
+        print(f"{_printable(key)}: {_printable(value)}")
 
 
 def _cmd_cat(args: argparse.Namespace) -> None:
@@ -178,7 +231,10 @@ def _cmd_cat(args: argparse.Namespace) -> None:
 def _cmd_get(args: argparse.Namespace) -> None:
     client, path = _client_for(args.url, args)
     with client:
-        client.download_file(path, args.local_path)
+        if args.local_path == "-":  # standard output, like ``cat``
+            client.download_fileobj(path, sys.stdout.buffer)
+        else:
+            client.download_file(path, args.local_path)
 
 
 def _cmd_put(args: argparse.Namespace) -> None:
@@ -196,12 +252,17 @@ def _cmd_mkdir(args: argparse.Namespace) -> None:
 def _cmd_rm(args: argparse.Namespace) -> None:
     client, path = _client_for(args.url, args)
     with client:
+        # DELETE on a collection removes everything below it; like ``rm``,
+        # that takes -r, not an accident.
+        if not args.recursive and client.isdir(path) and client.ls(path):
+            msg = f"{path} is a non-empty collection (use -r to remove it and everything in it)"
+            raise CLIError(msg)
         client.remove(path)
 
 
 def _same_server_paths(
     src: str, dst: str, args: argparse.Namespace
-) -> tuple[Client, str, str]:
+) -> tuple[Session, str, str]:
     src_base, src_path, src_auth = _split_url(
         src, user=args.user, password=args.password
     )
@@ -211,23 +272,23 @@ def _same_server_paths(
     if (src_base, src_auth) != (dst_base, dst_auth):
         msg = "source and destination must be on the same server (move/copy is server-side)"
         raise CLIError(msg)
-    return Client(src_base, auth=src_auth, **_client_kwargs(args)), src_path, dst_path
+    return Session(src_base, auth=src_auth, **_client_kwargs(args)), src_path, dst_path
 
 
 def _cmd_mv(args: argparse.Namespace) -> None:
     client, src_path, dst_path = _same_server_paths(args.src, args.dst, args)
     with client:
-        client.move(src_path, dst_path, overwrite=args.overwrite)
+        client.move(src_path, dst_path, overwrite=args.overwrite).raise_for_status()
 
 
 def _cmd_cp(args: argparse.Namespace) -> None:
     client, src_path, dst_path = _same_server_paths(args.src, args.dst, args)
     with client:
-        client.copy(src_path, dst_path, overwrite=args.overwrite)
+        client.copy(src_path, dst_path, overwrite=args.overwrite).raise_for_status()
 
 
 def _add_client_args(parser: argparse.ArgumentParser) -> None:
-    """Add every flag that configures the underlying :class:`~webdav.client.Client`."""
+    """Add every flag that configures the underlying :class:`~webdav.session.Session`."""
     auth = parser.add_argument_group("authentication")
     auth.add_argument(
         "--user", default=None, help="username (default: $WEBDAV_USER, or from the URL)"
@@ -323,24 +384,32 @@ def _add_client_args(parser: argparse.ArgumentParser) -> None:
     conn = parser.add_argument_group("connection")
     conn.add_argument(
         "--max-response-size",
-        type=_positive_int_or_none,
+        type=_size_cap,
         default=_UNSET,
         metavar="BYTES",
-        help="reject a PROPFIND/PROPPATCH/LOCK response larger than this "
-        "many bytes ('none' to disable; default: 64 MiB)",
+        help="reject a response body larger than this many bytes "
+        "('none' to disable; default: 64 MiB)",
     )
     conn.add_argument(
         "--chunk-size",
-        type=_positive_int_or_none,
+        type=_positive_int,
         default=_UNSET,
         metavar="BYTES",
         help="chunk size for streaming uploads/downloads (default: 4 MiB)",
     )
     conn.add_argument(
+        "--timeout",
+        type=_positive_seconds,
+        default=_UNSET,
+        metavar="SECONDS",
+        help="give up when the server does not answer for this long "
+        "(connect and read; default: 10 to connect, 60 to read)",
+    )
+    conn.add_argument(
         "--no-retry",
         action="store_true",
-        help="don't automatically retry a transient failure (423 Locked, "
-        "5xx, connection errors) - retries by default",
+        help="don't automatically retry a transient failure (429, 5xx, "
+        "connection errors) of a read - retries by default",
     )
 
 
@@ -387,9 +456,15 @@ def build_parser() -> argparse.ArgumentParser:
     mkdir_parser.set_defaults(func=_cmd_mkdir)
 
     rm_parser = subparsers.add_parser(
-        "rm", help="remove a resource (or collection, recursively)"
+        "rm", help="remove a resource (a non-empty collection needs -r)"
     )
     rm_parser.add_argument("url")
+    rm_parser.add_argument(
+        "-r",
+        "--recursive",
+        action="store_true",
+        help="remove a collection and everything in it",
+    )
     _add_client_args(rm_parser)
     rm_parser.set_defaults(func=_cmd_rm)
 
@@ -416,8 +491,16 @@ def main(argv: "Sequence[str] | None" = None) -> int:
     args = parser.parse_args(argv)
     try:
         args.func(args)
+    except BrokenPipeError:
+        # ``dav ls | head``: the reader went away. Not an error - and point stdout
+        # at /dev/null so the interpreter's own flush at exit does not complain.
+        with suppress(
+            OSError, ValueError
+        ):  # no real stdout (captured): nothing to redirect
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
     except (CLIError, OSError, ValueError, requests.exceptions.RequestException) as exc:
-        print(f"dav {args.command}: {exc}", file=sys.stderr)
+        print(f"dav {args.command}: {_printable(exc)}", file=sys.stderr)
         return 1
     return 0
 

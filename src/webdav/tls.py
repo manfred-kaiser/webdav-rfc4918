@@ -13,13 +13,13 @@ turn it off), TLS 1.2 is the floor, and TLS compression is disabled
 
 import os
 import ssl
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import requests
-from requests.adapters import HTTPAdapter
 
+from webdav.deadline import DeadlineAdapter
 from webdav.exceptions import TLSConfigError
 
 if TYPE_CHECKING:
@@ -39,11 +39,12 @@ class TLSOptions:
 
     Only needed for what plain ``requests`` ``cert=``/``verify=`` cannot
     express: an encrypted private key, CRL checking, or explicit cipher
-    restriction. Leave unset (the ``Client`` default) to use ``requests``'
+    restriction. Leave unset (the ``Session`` default) to use ``requests``'
     own attributes directly.
     """
 
-    key_password: str | None = None
+    #: Never shown by ``repr``: a options object ends up in tracebacks and logs.
+    key_password: str | None = field(default=None, repr=False)
     ca_files: "Iterable[StrPath] | StrPath | None" = None
     crl_files: "Iterable[StrPath] | StrPath | None" = None
     ciphers: str | None = None
@@ -97,6 +98,11 @@ def build_ssl_context(
 
     """
     options = options or TLSOptions()
+    if options.minimum_version < ssl.TLSVersion.TLSv1_2:
+        msg = (
+            f"minimum_version {options.minimum_version.name} is below the TLS 1.2 floor"
+        )
+        raise TLSConfigError(msg)
 
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.minimum_version = options.minimum_version
@@ -105,8 +111,11 @@ def build_ssl_context(
     context.verify_mode = ssl.CERT_REQUIRED
     context.check_hostname = True
     context.options |= ssl.OP_NO_COMPRESSION
+    # Strict RFC 5280 checking of the certificate chain (the default of
+    # ``ssl.create_default_context``, but not of a bare ``SSLContext``).
+    context.verify_flags |= ssl.VERIFY_X509_STRICT
 
-    ca_file_list = _as_list(options.ca_files)
+    ca_file_list = _as_list(options.ca_files, "ca_files")
     if ca_file_list:
         for ca_file in ca_file_list:
             _load(
@@ -117,7 +126,7 @@ def build_ssl_context(
     else:
         context.load_default_certs(ssl.Purpose.SERVER_AUTH)
 
-    crl_file_list = _as_list(options.crl_files)
+    crl_file_list = _as_list(options.crl_files, "crl_files")
     if crl_file_list:
         for crl_file in crl_file_list:
             _load(
@@ -135,7 +144,13 @@ def build_ssl_context(
                 context.load_cert_chain,
                 certfile=str(certfile),
                 keyfile=str(keyfile) if keyfile is not None else None,
-                password=options.key_password,
+                # Without a password an encrypted key must fail, not make
+                # OpenSSL prompt on the terminal (and block a script).
+                password=(
+                    options.key_password
+                    if options.key_password is not None
+                    else _no_password
+                ),
             ),
         )
 
@@ -149,16 +164,28 @@ def build_ssl_context(
     return context
 
 
-def _as_list(value: "Iterable[StrPath] | StrPath | None") -> "list[StrPath]":
+def _no_password() -> bytes:
+    return b""
+
+
+def _as_list(value: "Iterable[StrPath] | StrPath | None", name: str) -> "list[StrPath]":
+    """``value`` as a list; ``None`` is "not configured", but an *empty* value is an error.
+
+    An empty ``ca_files`` quietly falling back to the system trust store, or
+    an empty ``crl_files`` quietly turning revocation checking off, would
+    turn a configuration slip into a weaker setup with no message at all.
+    """
     if value is None:
         return []
-    if isinstance(value, str | os.PathLike):
-        return [value]
-    return list(value)
+    files = [value] if isinstance(value, str | os.PathLike) else list(value)
+    if not files or any(not os.fspath(f) for f in files):
+        msg = f"{name} is empty - leave it out (None) to use the default, or name at least one file"
+        raise TLSConfigError(msg)
+    return files
 
 
-class SSLContextAdapter(HTTPAdapter):
-    """A :class:`requests.adapters.HTTPAdapter` pinned to an ``SSLContext``.
+class SSLContextAdapter(DeadlineAdapter):
+    """A :class:`~webdav.deadline.DeadlineAdapter` pinned to an ``SSLContext``.
 
     Needed for mTLS with a password-protected client-certificate key, a
     custom CRL, or explicit cipher restriction - none of which
@@ -170,6 +197,27 @@ class SSLContextAdapter(HTTPAdapter):
         """Store the context; applied to both pool managers below."""
         self._ssl_context = ssl_context
         super().__init__(**kwargs)
+
+    def __getstate__(self) -> "dict[str, Any]":
+        """Refuse: an ``SSLContext`` (client key, CA set) is not something to serialise."""
+        msg = "an SSLContextAdapter holds an SSLContext and cannot be pickled or deep-copied"
+        raise TypeError(msg)
+
+    def cert_verify(self, conn: Any, url: str, verify: Any, cert: Any) -> None:
+        """Leave certificate verification to the context alone.
+
+        ``requests`` would add its own CA bundle (certifi) to the connection
+        on top of the context - so a private CA given as ``ca_files`` would
+        also trust every public CA - and would honour a per-call
+        ``verify=False``/``cert=``. This context is the whole configuration:
+        the server is always verified, against exactly the CAs it holds, and
+        the client certificate is the one it was built with.
+        """
+        conn.cert_reqs = "CERT_REQUIRED"
+        conn.ca_certs = None
+        conn.ca_cert_dir = None
+        conn.cert_file = None
+        conn.key_file = None
 
     def init_poolmanager(self, *args: Any, **kwargs: Any) -> None:
         """Inject the SSL context into the connection pool manager."""

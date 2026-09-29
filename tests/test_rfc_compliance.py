@@ -1,7 +1,7 @@
 """Regression tests for the RFC 4918/5689 conformance fixes in RFC_COMPLIANCE.md.
 
 Each test locks in one specific gap/bug found during a dedicated RFC audit
-(as opposed to tests/test_client_e2e.py's general happy-path coverage, or
+(as opposed to tests/test_session_e2e.py's general happy-path coverage, or
 tests/test_security_edge_cases.py's adversarial-server coverage).
 """
 
@@ -10,8 +10,7 @@ from xml.etree.ElementTree import Element
 
 import pytest
 
-from webdav import Client
-from webdav.client import _parse_dav_header
+from webdav import Session
 from webdav.conditional import Condition, build_if_header
 from webdav.exceptions import (
     STATUS_CODE_EXCEPTIONS,
@@ -28,6 +27,7 @@ from webdav.locks import (
 )
 from webdav.multistatus import MultiStatusResponse, Response
 from webdav.properties import DAVProperties, build_propfind_body
+from webdav.session import _parse_dav_header
 from webdav.xml_utils import parse_xml
 
 # ---------------------------------------------------------------------------
@@ -87,7 +87,9 @@ def test_multistatus_error_exposes_precondition_codes() -> None:
     result = MultiStatusResponse(xml)
     with pytest.raises(MultiStatusError) as exc_info:
         result.raise_for_status()
-    assert exc_info.value.error_codes["/locked.txt"] == frozenset({"no-conflicting-lock"})
+    assert exc_info.value.error_codes["/locked.txt"] == frozenset(
+        {"no-conflicting-lock"}
+    )
 
 
 def test_allprop_body_can_include_named_properties() -> None:
@@ -150,14 +152,14 @@ def test_lockentry_and_activelock_are_reused_by_the_property_model() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Client-level fixes - need a real server (wsgidav, via the `client` fixture)
+# Session-level fixes - need a real server (wsgidav, via the `client` fixture)
 # ---------------------------------------------------------------------------
 
 
-def test_root_depth_infinity_lock_covers_children(client: Client) -> None:
+def test_root_depth_infinity_lock_covers_children(client: Session) -> None:
     """A Depth:infinity lock on the WebDAV root must cascade to every path under it."""
     client.upload_fileobj(io.BytesIO(b"v1"), "rootlock.txt")
-    with client.lock("", scope=EXCLUSIVE, depth="infinity"):
+    with client.locked("", scope=EXCLUSIVE, depth="infinity"):
         # Must not raise - the held root lock's token must be attached.
         client.upload_fileobj(io.BytesIO(b"v2"), "rootlock.txt", overwrite=True)
     buf = io.BytesIO()
@@ -165,66 +167,71 @@ def test_root_depth_infinity_lock_covers_children(client: Client) -> None:
     assert buf.getvalue() == b"v2"
 
 
-def test_concurrent_shared_locks_on_the_same_path(client: Client) -> None:
+def test_concurrent_shared_locks_on_the_same_path(client: Session) -> None:
     """RFC 4918 §6.2 allows several shared locks on one resource to coexist."""
     client.upload_fileobj(io.BytesIO(b"v1"), "shared.txt")
-    with client.lock("shared.txt", scope=SHARED) as lock_a:
-        with client.lock("shared.txt", scope=SHARED):
+    with client.locked("shared.txt", scope=SHARED) as lock_a:
+        with client.locked("shared.txt", scope=SHARED):
             pass  # released here - must not evict lock_a's bookkeeping
         # lock_a is still held; a write through it must still carry its token.
         client.upload_fileobj(io.BytesIO(b"v2"), "shared.txt", overwrite=True)
         assert lock_a.token  # sanity: still the same object, unaffected
 
 
-def test_copy_onto_a_client_locked_destination(client: Client) -> None:
+def test_copy_onto_a_client_locked_destination(client: Session) -> None:
     """RFC 4918 §10.2: a locked destination's token MUST be submitted too."""
     client.upload_fileobj(io.BytesIO(b"source"), "xfer_src.txt")
     client.upload_fileobj(io.BytesIO(b"old dest"), "xfer_dst.txt")
-    with client.lock("xfer_dst.txt", scope=EXCLUSIVE):
-        client.copy("xfer_src.txt", "xfer_dst.txt", overwrite=True)
+    with client.locked("xfer_dst.txt", scope=EXCLUSIVE):
+        client.copy("xfer_src.txt", "xfer_dst.txt", overwrite=True).raise_for_status()
     buf = io.BytesIO()
     client.download_fileobj("xfer_dst.txt", buf)
     assert buf.getvalue() == b"source"
 
 
 def test_move_onto_a_client_locked_destination_without_the_fix_would_423(
-    client: Client,
+    client: Session,
 ) -> None:
     """Same as the COPY case, for MOVE."""
     client.upload_fileobj(io.BytesIO(b"source"), "mv_src.txt")
     client.upload_fileobj(io.BytesIO(b"old dest"), "mv_dst.txt")
-    with client.lock("mv_dst.txt", scope=EXCLUSIVE):
-        client.move("mv_src.txt", "mv_dst.txt", overwrite=True)
+    with client.locked("mv_dst.txt", scope=EXCLUSIVE):
+        client.move("mv_src.txt", "mv_dst.txt", overwrite=True).raise_for_status()
     buf = io.BytesIO()
     client.download_fileobj("mv_dst.txt", buf)
     assert buf.getvalue() == b"source"
 
 
-def test_lock_refresh(client: Client) -> None:
+def test_lock_refresh(client: Session) -> None:
     """RFC 4918 §9.10.2: a bodyless LOCK with an If header refreshes the timeout."""
     client.upload_fileobj(io.BytesIO(b"x"), "refresh.txt")
-    with client.lock("refresh.txt", scope=EXCLUSIVE, timeout=30) as active_lock:
-        refreshed = client.refresh_lock("refresh.txt", active_lock.token, timeout=60)
+    with client.locked("refresh.txt", scope=EXCLUSIVE, lock_timeout=30) as active_lock:
+        refreshed = client.refresh_lock(
+            "refresh.txt", active_lock.token, lock_timeout=60
+        )
         assert refreshed.token == active_lock.token
         # Still holding it, still usable for a write afterwards.
         client.upload_fileobj(io.BytesIO(b"y"), "refresh.txt", overwrite=True)
 
 
-def test_lock_rejects_an_invalid_depth(client: Client) -> None:
+def test_lock_rejects_an_invalid_depth(client: Session) -> None:
     """RFC 4918 §9.10.4: only '0' or 'infinity' are legal Depth values for LOCK."""
     client.upload_fileobj(io.BytesIO(b"x"), "depthlock.txt")
-    with pytest.raises(ValueError, match="Depth"), client.lock("depthlock.txt", depth="1"):
+    with (
+        pytest.raises(ValueError, match="Depth"),
+        client.locked("depthlock.txt", depth="1"),
+    ):
         pass
 
 
-def test_copy_rejects_an_invalid_depth(client: Client) -> None:
+def test_copy_rejects_an_invalid_depth(client: Session) -> None:
     """RFC 4918 §9.8.3: only '0' or 'infinity' are legal Depth values for COPY."""
     client.upload_fileobj(io.BytesIO(b"x"), "depthcopy.txt")
     with pytest.raises(ValueError, match="Depth"):
         client.copy("depthcopy.txt", "depthcopy2.txt", depth=1)
 
 
-def test_get_props_sends_depth_zero(client: Client) -> None:
+def test_get_props_sends_depth_zero(client: Session) -> None:
     """A single-resource property lookup should never trigger a full traversal."""
     client.mkdir("depthdir")
     client.upload_fileobj(io.BytesIO(b"x"), "depthdir/child.txt")
@@ -236,17 +243,17 @@ def test_get_props_sends_depth_zero(client: Client) -> None:
     assert props.collection is True
 
 
-def test_lockdiscovery_is_parsed_into_activelocks(client: Client) -> None:
+def test_lockdiscovery_is_parsed_into_activelocks(client: Session) -> None:
     """lockdiscovery's <activelock> children should reuse ActiveLock, not stay raw XML."""
     client.upload_fileobj(io.BytesIO(b"x"), "lockdisco.txt")
-    with client.lock("lockdisco.txt", scope=EXCLUSIVE) as active_lock:
+    with client.locked("lockdisco.txt", scope=EXCLUSIVE) as active_lock:
         props = client.get_props("lockdisco.txt")
         assert len(props.active_locks) == 1
         assert isinstance(props.active_locks[0], ActiveLock)
         assert props.active_locks[0].token == active_lock.token
 
 
-def test_supportedlock_is_parsed_into_lockentries(client: Client) -> None:
+def test_supportedlock_is_parsed_into_lockentries(client: Session) -> None:
     """supportedlock's <lockentry> children should reuse LockEntry, not stay raw XML."""
     client.upload_fileobj(io.BytesIO(b"x"), "supportedlock.txt")
     props = client.get_props("supportedlock.txt")

@@ -15,7 +15,26 @@ its own token). Parsing an ``If`` header sent by someone else is out of
 scope for a client library.
 """
 
+import re
 from dataclasses import dataclass
+
+#: What may sit between ``<`` and ``>``: the URI characters, nothing that closes the bracket.
+_SAFE_TOKEN = re.compile(r"[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]{1,1024}")
+
+#: RFC 9110 ``etagc``: printable ASCII except the double quote (and, for
+#: safety inside an If header, the closing bracket).
+_ETAGC = re.compile(r"[\x21\x23-\x5C\x5E-\x7E]*")
+
+
+def entity_tag(value: str) -> str:
+    """``value`` as a quoted entity-tag (``"abc"`` / ``W/"abc"``); bare values get quoted."""
+    weak = "W/" if value.startswith("W/") else ""
+    core = value.removeprefix("W/")
+    inner = core[1:-1] if len(core) >= 2 and core[0] == core[-1] == '"' else core
+    if not _ETAGC.fullmatch(inner):
+        msg = f"not a valid entity-tag: {value[:60]!r}"
+        raise ValueError(msg)
+    return f'{weak}"{inner}"'
 
 
 @dataclass(frozen=True)
@@ -48,8 +67,25 @@ class Condition:
             raise ValueError(msg)
 
     def render(self) -> str:
-        """Render as e.g. ``<lock-token>``, ``["etag"]``, or ``Not <lock-token>``."""
-        body = f"<{self.token}>" if self.token else f'["{self.etag}"]'
+        """Render as e.g. ``<lock-token>``, ``["etag"]``, or ``Not <lock-token>``.
+
+        An ``etag`` may be given the way a server reports it - with its
+        quotes, and ``W/`` if weak (``"abc"``, ``W/"abc"``) - or bare
+        (``abc``); either way it is written as the entity-tag of RFC 4918
+        Appendix C (``opaque-tag = DQUOTE *etagc DQUOTE``), never quoted twice.
+
+        Raises:
+            ValueError: A token or ETag holds a character that would end the
+                bracket it is written in.
+
+        """
+        if self.token:
+            if not _SAFE_TOKEN.fullmatch(self.token):
+                msg = f"not a valid Coded-URL for an If header: {self.token[:60]!r}"
+                raise ValueError(msg)
+            body = f"<{self.token}>"
+        else:
+            body = f"[{entity_tag(self.etag or '')}]"
         return f"Not {body}" if self.negate else body
 
 

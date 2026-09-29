@@ -4,7 +4,15 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      # A new release is only proposed after it has been out a few days: enough
+      # for a compromised or yanked one to be noticed.
+      default-days: 5
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      # A new release is only proposed after it has been out a few days: enough
+      # for a compromised or yanked one to be noticed.
+      default-days: 5

@@ -1,4 +1,4 @@
-"""fsspec-compliant filesystem over the WebDAV :class:`~webdav.client.Client`.
+"""fsspec-compliant filesystem over the WebDAV :class:`~webdav.session.Session`.
 
 fsspec (https://filesystem-spec.readthedocs.io) is the de-facto standard
 storage-backend interface in the Python data ecosystem - wrapping the
@@ -8,6 +8,7 @@ a WebDAV server without knowing anything WebDAV-specific.
 
 import errno
 import io
+import posixpath
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -28,15 +29,17 @@ from typing import (
 from fsspec import Callback
 from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 
-from webdav.client import Client
 from webdav.exceptions import (
     IsACollectionError,
     IsAResourceError,
+    PreconditionFailedError,
     ResourceAlreadyExistsError,
     ResourceConflictError,
     ResourceNotFoundError,
 )
 from webdav.fs_utils import peek_filelike_length
+from webdav.resource import Resource
+from webdav.session import Session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -46,18 +49,15 @@ if TYPE_CHECKING:
 
     from typing_extensions import Buffer
 
-    from webdav.client import AuthTypes
+    from webdav.session import AuthTypes
 
 
-#: fsspec's generic `detail=True` shape uses these keys instead of ours.
-_KEY_MAPPING = {"content_length": "size", "path": "name", "type": "type"}
-
-
-def _translate_info(item: "str | dict[str, Any]") -> "str | dict[str, Any]":
-    """Translate a `Client.ls()`/`.info()` entry into fsspec's expected shape."""
-    if isinstance(item, str):
-        return item
-    return {_KEY_MAPPING.get(key, key): value for key, value in item.items()}
+def _info(resource: Resource) -> "dict[str, Any]":
+    """A :class:`~webdav.resource.Resource` as fsspec's ``info`` dict (``name``, ``size``, ``type``, ...)."""
+    fields = resource.as_dict()
+    fields["size"] = fields.pop("size")
+    fields["type"] = "directory" if fields.pop("is_dir") else "file"
+    return fields
 
 
 @contextmanager
@@ -69,6 +69,12 @@ def _translate_exceptions() -> Iterator[None]:
         raise FileNotFoundError(
             errno.ENOENT, "No such file or directory", exc.path
         ) from exc
+    except ResourceAlreadyExistsError as exc:
+        raise FileExistsError(errno.EEXIST, "File exists", exc.path) from exc
+    except (
+        PreconditionFailedError
+    ) as exc:  # e.g. Overwrite: F onto an existing destination
+        raise FileExistsError(errno.EEXIST, "File exists", exc.path) from exc
     except IsACollectionError as exc:
         raise IsADirectoryError(errno.EISDIR, "Is a directory", exc.path) from exc
     except IsAResourceError as exc:
@@ -80,32 +86,41 @@ class WebdavFileSystem(AbstractFileSystem):
 
     protocol = ("webdav", "dav")
 
+    # fsspec keeps one instance per set of constructor arguments, keyed on their
+    # ``str`` - two credentials whose ``repr`` omits the secret (any careful auth
+    # object) would be handed the same instance, and so the same session: user B
+    # would act as user A. Every filesystem is its own.
+    cachable = False
+
     def __init__(
         self,
         base_url: str,
         auth: "AuthTypes" = None,
-        client: Client | None = None,
-        **client_opts: Any,
+        session: Session | None = None,
+        **session_opts: Any,
     ) -> None:
-        """Instantiate with ``base_url``/``auth``, or an existing ``client``.
+        """Instantiate with ``base_url``/``auth``, or an existing ``session``.
 
         Args:
             base_url: Base URL of the WebDAV server.
-            auth: Passed straight through to :class:`~webdav.client.Client`.
-            client: A pre-built client to use instead (e.g. for mocking, or
-                to reuse a client's connection pool across filesystems).
-            client_opts: Extra keyword arguments forwarded to
-                :class:`~webdav.client.Client`.
+            auth: Passed straight through to :class:`~webdav.session.Session`.
+            session: A pre-built session to use instead (e.g. for mocking,
+                or to reuse a session's connection pool across filesystems).
+            session_opts: Extra keyword arguments forwarded to
+                :class:`~webdav.session.Session`.
 
         """
         super().__init__()
-        client_opts.setdefault("chunk_size", self.blocksize)
-        self.client = client or Client(base_url, auth=auth, **client_opts)
+        session_opts.setdefault("chunk_size", self.blocksize)
+        self.session = session or Session(base_url, auth=auth, **session_opts)
 
     @classmethod
     def _strip_protocol(cls, path: str) -> str:
-        """Strip the ``webdav://``/``dav://`` protocol prefix."""
-        return cast("str", super()._strip_protocol(path))
+        """Strip the ``webdav://``/``dav://`` protocol prefix - and a leading ``/``.
+
+        Names ``ls`` returns have no leading slash; ``/d`` and ``d`` are one path.
+        """
+        return cast("str", super()._strip_protocol(path)).lstrip("/")
 
     # pylint's signature-differs check is confused by these @overload stubs
     # into comparing one of *them*, rather than the real implementation
@@ -131,10 +146,10 @@ class WebdavFileSystem(AbstractFileSystem):
         """List members of a collection. See ``fsspec.AbstractFileSystem.ls``."""
         path = self._strip_protocol(path).strip()
         with _translate_exceptions():
-            if not detail:
-                return self.client.ls(path, detail=False, allow_listing_resource=False)
-            data = self.client.ls(path, detail=True, allow_listing_resource=False)
-        return [cast("dict[str, Any]", _translate_info(item)) for item in data]
+            resources = self.session.ls(path)
+        return (
+            [str(r) for r in resources] if not detail else [_info(r) for r in resources]
+        )
 
     # pylint: enable=signature-differs
 
@@ -142,31 +157,50 @@ class WebdavFileSystem(AbstractFileSystem):
         """Return metadata about a single path."""
         path = self._strip_protocol(path)
         with _translate_exceptions():
-            data = self.client.info(path)
-        return cast("dict[str, Any]", _translate_info(data))
+            resource = self.session.info(path)
+        return _info(resource)
 
     def rm_file(self, path: str) -> None:
-        """Remove a single file (also used for an empty/recursive directory)."""
+        """Remove a file, or an *empty* directory.
+
+        ``DELETE`` on a collection removes everything below it, so a
+        directory that still has something in it is refused here (fsspec
+        calls this for ``rm(path)`` without ``recursive=True``, and the
+        local file system would refuse too). ``rm(path, recursive=True)`` is
+        the deliberate way to delete a tree.
+        """
         path = self._strip_protocol(path)
-        with _translate_exceptions():
-            self.client.remove(path)
+        if self.isdir(path):
+            self.rmdir(path)
+        else:
+            self._delete(path)
 
     _rm = rm_file
+
+    def _delete(self, path: str) -> None:
+        path = self._strip_protocol(path)
+        if posixpath.normpath("/" + path) == "/":
+            msg = "refusing to remove the root of the file system"
+            raise ValueError(msg)
+        with _translate_exceptions():
+            self.session.remove(path)
 
     def cp_file(self, path1: str, path2: str, **kwargs: Any) -> None:
         """Copy a single file/collection from ``path1`` to ``path2``."""
         path1 = self._strip_protocol(path1)
         path2 = self._strip_protocol(path2)
         with _translate_exceptions():
-            self.client.copy(path1, path2)
+            self.session.copy(path1, path2, overwrite=False).raise_for_status()
 
     def rmdir(self, path: str) -> None:
         """Remove a directory, if empty."""
         path = self._strip_protocol(path)
+        if posixpath.normpath("/" + path) == "/":
+            msg = "refusing to remove the root of the file system"
+            raise ValueError(msg)
         if self.ls(path):
             raise OSError(errno.ENOTEMPTY, "Directory not empty", path)
-        with _translate_exceptions():
-            self.client.remove(path)
+        self._delete(path)
 
     def rm(
         self, path: str, recursive: bool = False, maxdepth: int | None = None
@@ -174,7 +208,7 @@ class WebdavFileSystem(AbstractFileSystem):
         """Delete files and, optionally, directories recursively."""
         path = self._strip_protocol(path)
         if recursive and not maxdepth and self.isdir(path):
-            self.rm_file(path)
+            self._delete(path)
             return
         super().rm(path, recursive=recursive, maxdepth=maxdepth)
 
@@ -221,7 +255,7 @@ class WebdavFileSystem(AbstractFileSystem):
 
         if recursive and not maxdepth and self.isdir(path1):
             with _translate_exceptions():
-                self.client.move(path1, path2)
+                self.session.move(path1, path2, overwrite=False).raise_for_status()
             return
         if not recursive and self.isdir(path1):
             self.makedirs(path2)
@@ -238,7 +272,7 @@ class WebdavFileSystem(AbstractFileSystem):
         fsspec callers generally expect.
         """
         try:
-            self.client.mkdir(path)
+            self.session.mkdir(path)
         except ResourceAlreadyExistsError as exc:
             details = self.info(path)
             if details.get("type") == "directory" and exist_ok:
@@ -273,13 +307,13 @@ class WebdavFileSystem(AbstractFileSystem):
         """Return the ``creationdate`` property."""
         path = self._strip_protocol(path)
         with _translate_exceptions():
-            return self.client.created(path)
+            return self.session.created(path)
 
     def modified(self, path: str) -> "datetime | None":
         """Return the ``getlastmodified`` property."""
         path = self._strip_protocol(path)
         with _translate_exceptions():
-            return self.client.modified(path)
+            return self.session.modified(path)
 
     def _open(
         self,
@@ -296,10 +330,12 @@ class WebdavFileSystem(AbstractFileSystem):
             msg = "append mode is not supported"
             raise ValueError(msg)
 
-        if "x" in mode and self.exists(path):
-            raise FileExistsError(errno.EEXIST, "File exists", path)
         if set(mode) & {"w", "x"}:
-            return UploadFile(self, path=path, mode=mode, block_size=block_size)
+            # "x": created by the server only if nothing is there (atomic), not
+            # by a check here and a write there.
+            return UploadFile(
+                self, path=path, mode=mode, block_size=block_size, exclusive="x" in mode
+            )
 
         with _translate_exceptions():
             return WebdavFile(
@@ -317,13 +353,13 @@ class WebdavFileSystem(AbstractFileSystem):
         """Return the ``getetag`` property."""
         path = self._strip_protocol(path)
         with _translate_exceptions():
-            return self.client.etag(path)
+            return self.session.etag(path)
 
     def size(self, path: str) -> "int | None":
         """Return the ``getcontentlength`` property."""
         path = self._strip_protocol(path)
         with _translate_exceptions():
-            return self.client.content_length(path)
+            return self.session.content_length(path)
 
     def sign(self, path: str, expiration: int = 100, **kwargs: Any) -> NoReturn:
         """Not supported - WebDAV has no notion of a signed/pre-authorized URL."""
@@ -377,7 +413,7 @@ class WebdavFileSystem(AbstractFileSystem):
             cb.set_size(size)
 
         with _translate_exceptions():
-            self.client.upload_fileobj(
+            self.session.upload_fileobj(
                 fobj,
                 rpath,
                 overwrite=overwrite,
@@ -415,6 +451,42 @@ class WebdavFileSystem(AbstractFileSystem):
             kwargs.setdefault("size", None)
             self.upload_fileobj(fobj, rpath, callback=callback, **kwargs)
 
+    def get_file(  # pylint: disable=signature-differs
+        self,
+        rpath: str,
+        lpath: "str | PathLike[str]",
+        callback: "Callback | None" = None,
+        outfile: "BinaryIO | None" = None,
+        **kwargs: Any,
+    ) -> None:
+        """Copy a remote file to the local file system (or to ``outfile``).
+
+        A local ``lpath`` is written the way :meth:`~webdav.session.Session.download_file`
+        writes it: to a temporary file that replaces ``lpath`` only when the download
+        is complete, and never through a symlink - a failed download leaves an
+        existing ``lpath`` as it was. (Replacing an existing file *is* what
+        ``get`` means in fsspec, so ``overwrite`` is on.)
+        """
+        rpath = self._strip_protocol(rpath)
+        if hasattr(lpath, "write"):  # fsspec passes an open file as ``lpath`` too
+            outfile = cast("BinaryIO", lpath)
+        elif self.isdir(rpath):  # a collection becomes a local directory
+            Path(lpath).mkdir(parents=True, exist_ok=True)
+            return
+        cb = Callback.as_callback(callback)
+        with _translate_exceptions():
+            size = self.session.info(rpath).size
+            if size is not None:
+                cb.set_size(size)
+            if outfile is not None:
+                self.session.download_fileobj(
+                    rpath, outfile, callback=cb.relative_update
+                )
+            else:
+                self.session.download_file(
+                    rpath, lpath, overwrite=True, callback=cb.relative_update
+                )
+
 
 class WebdavFile(AbstractBufferedFile):
     """Read-only, file-like access to a remote resource."""
@@ -446,7 +518,7 @@ class WebdavFile(AbstractBufferedFile):
             **kwargs,
         )
         encoding = kwargs.get("encoding")
-        self.fobj = fs.client.open(
+        self.fobj = fs.session.open(
             self.path, mode=self.mode, encoding=encoding, chunk_size=self.blocksize
         )
         self.reader: TextIO | BinaryIO = self.fobj.__enter__()
@@ -484,7 +556,7 @@ class WebdavFile(AbstractBufferedFile):
         if self.closed:
             return
         if hasattr(self, "reader"):
-            # fs.client.open() may have raised before self.reader was set.
+            # fs.session.open() may have raised before self.reader was set.
             self.reader.close()
         self.closed = True
 
@@ -532,8 +604,11 @@ class UploadFile(tempfile.SpooledTemporaryFile):
         path: str,
         mode: str = "wb",
         block_size: "int | str | None" = None,
+        *,
+        exclusive: bool = False,
     ) -> None:
         """Set up local buffering for a deferred upload to ``path`` on ``fs``."""
+        self.exclusive = exclusive
         self.blocksize: int = (
             block_size
             if isinstance(block_size, int)
@@ -545,9 +620,16 @@ class UploadFile(tempfile.SpooledTemporaryFile):
         # commit() needs to read it back to upload it.
         super().__init__(max_size=self.blocksize, mode="wb+")
 
-    def __exit__(self, *exc: object) -> None:
-        """Commit (upload) the buffered content."""
-        self.close()
+    def __exit__(self, exc_type: object, *_exc: object) -> None:
+        """Commit (upload) the buffered content - unless the block raised: then nothing is sent.
+
+        A write that failed half way must not replace what is on the server with
+        the half that was written.
+        """
+        if exc_type is not None:
+            self.discard()
+        else:
+            self.close()
 
     def readable(self) -> bool:
         """Readable, so ``commit()`` can read the buffered content back."""
@@ -565,11 +647,11 @@ class UploadFile(tempfile.SpooledTemporaryFile):
         """Upload the buffered content - this is where the real PUT happens."""
         self.seek(0)
         with _translate_exceptions():
-            self.fs.client.upload_fileobj(
+            self.fs.session.upload_fileobj(
                 cast("BinaryIO", self),
                 self.path,
                 chunk_size=self.blocksize,
-                overwrite=True,
+                overwrite=not self.exclusive,
             )
 
     def close(self) -> None:

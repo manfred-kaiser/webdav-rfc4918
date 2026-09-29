@@ -1,7 +1,7 @@
 # CLI
 
 ```console
-$ pip install webdav-rfc4918[cli]
+$ pip install webdav-rfc4918   # the `dav` command is part of the package
 ```
 
 Every command takes one or more WebDAV URLs
@@ -26,7 +26,7 @@ both URLs to point at the same server.
 
 ## Connection options
 
-Every {class}`~webdav.client.Client` constructor option is available as a
+The commonly needed {class}`~webdav.session.Session` options are available as a
 flag on every subcommand, grouped in `--help`:
 
 ```console

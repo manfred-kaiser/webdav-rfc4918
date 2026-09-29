@@ -7,13 +7,20 @@ collection. Both shapes are parsed here.
 """
 
 import logging
+import re
 from http.client import responses as _reason_phrases
 from typing import TYPE_CHECKING
 from xml.etree.ElementTree import Element
 
 from webdav.exceptions import MalformedResponseError, MultiStatusError
 from webdav.properties import DAVProperties, PropStat
-from webdav.urls import URL, join_url_path, relative_url_to, strip_trailing_slash
+from webdav.urls import (
+    URL,
+    join_url_path,
+    path_key,
+    relative_url_to,
+    strip_trailing_slash,
+)
 from webdav.xml_utils import dav, parse_xml, split_clark
 
 if TYPE_CHECKING:
@@ -22,13 +29,44 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+#: A multistatus with more ``<d:response>`` elements than this is refused: each
+#: costs real work to build, and a server that wants a client to spend
+#: gigabytes of memory needs only a few dozen megabytes of tiny elements to do it.
+MAX_RESPONSES = 200_000
+
+#: Longest ``<d:href>`` accepted, in characters.
+MAX_HREF_LENGTH = 8192
+
+#: An encoded ``/`` in an href would turn into a path separator once decoded -
+#: the client would then request a different resource than the one the server
+#: listed. (A backslash is an ordinary character in a POSIX file name; where it
+#: separates paths, ``relative_url_to`` refuses it.)
+_ENCODED_SEPARATOR = re.compile(r"%2f", re.IGNORECASE)
+
+
 def _parse_status_code(status_line: str | None) -> int | None:
     if not status_line:
         return None
     parts = status_line.split()
-    if len(parts) < 2 or not parts[1].isdigit():
+    if len(parts) < 2 or not (parts[1].isascii() and parts[1].isdigit()):
         return None
     return int(parts[1])
+
+
+def _check_href(href: str) -> None:
+    """Refuse an href that cannot be trusted to name one resource.
+
+    Raises:
+        ValueError: The href is too long, or hides a path separator in
+            percent-encoding.
+
+    """
+    if len(href) > MAX_HREF_LENGTH:
+        msg = f"<d:href> longer than {MAX_HREF_LENGTH} characters"
+        raise ValueError(msg)
+    if _ENCODED_SEPARATOR.search(href):
+        msg = f"<d:href> {href[:80]!r} contains an encoded path separator"
+        raise ValueError(msg)
 
 
 class Response:
@@ -53,6 +91,8 @@ class Response:
         if not hrefs:
             msg = "<d:response> is missing a required <d:href>"
             raise ValueError(msg)
+        for href in hrefs:
+            _check_href(href)
         self.hrefs = hrefs
 
         parsed = URL(hrefs[0])
@@ -69,7 +109,11 @@ class Response:
         # collection operation), or one <d:status> per <d:propstat> block
         # (PROPFIND/PROPPATCH enumerating properties) - both are parsed;
         # ``status_code``/``reason_phrase`` reflect the former when present.
-        self.status_code = _parse_status_code(response_xml.findtext(dav("status")))
+        status_text = response_xml.findtext(dav("status"))
+        self.status_code = _parse_status_code(status_text)
+        if status_text and status_text.strip() and self.status_code is None:
+            msg = f"unparseable <d:status> {status_text.strip()[:60]!r}"
+            raise ValueError(msg)
         self.reason_phrase = (
             _reason_phrases.get(self.status_code) if self.status_code else None
         )
@@ -129,19 +173,29 @@ class MultiStatusResponse:
         )
 
         self.responses: dict[str, Response] = {}
-        for resp_el in tree.findall(f".//{dav('response')}"):
+        #: Every ``<d:response>``, in document order. ``responses`` is a lookup
+        #: by path - two entries for one path (or for the NFC and NFD spelling
+        #: of one name) share a key there, so anything that has to see them
+        #: all (a failure hiding behind a later success, a listing) uses this.
+        self.entries: list[Response] = []
+        for count, resp_el in enumerate(tree.findall(f".//{dav('response')}"), start=1):
+            if count > MAX_RESPONSES:
+                msg = f"multistatus has too many <d:response> elements (over {MAX_RESPONSES})"
+                raise MalformedResponseError(msg)
             try:
                 response = Response(resp_el)
-            except ValueError:
-                # One malformed <d:response> entry must not discard every
-                # other, otherwise valid, entry in the same reply.
-                logger.warning("skipping unparseable <d:response> entry", exc_info=True)
-                continue
+            except ValueError as exc:
+                # Never skipped quietly: in a DELETE/COPY/MOVE reply the entry
+                # that does not parse may be the one reporting the failure, and
+                # dropping it would turn that failure into a success.
+                msg = f"unusable <d:response> entry in the multistatus: {exc}"
+                raise MalformedResponseError(msg) from exc
+            self.entries.append(response)
             # Register under every href this response covers (usually just
-            # one - see Response.__init__ for the multi-href case).
+            # one - see Response.__init__ for the multi-href case). Keyed by
+            # ``path_key``: NFC, so either spelling of a name finds it.
             for href in response.hrefs:
-                key = strip_trailing_slash(URL(href).path)
-                self.responses[key] = response
+                self.responses[path_key(URL(href).path)] = response
 
     def get_response_for_path(self, hostname: str, path: str) -> Response:
         """Return the response for the resource at ``path``.
@@ -158,7 +212,7 @@ class MultiStatusResponse:
                 path than this client expected.
 
         """
-        key = join_url_path(hostname, path)
+        key = path_key(join_url_path(hostname, path))
         try:
             return self.responses[key]
         except KeyError:
@@ -185,17 +239,24 @@ class MultiStatusResponse:
             if codes:
                 error_codes[key] = codes
 
-        for resp in self.responses.values():
-            if (
-                resp.reason_phrase
-                and resp.status_code
-                and 400 <= resp.status_code <= 599
-            ):
-                record(resp.href, resp.reason_phrase, resp.error)
+        for resp in self.entries:
+            # RFC 4918 sec. 13: anything but a 2xx is a failure - not just the
+            # 4xx/5xx a phrase exists for (a 3xx or an unknown code is no success).
+            if resp.status_code is not None and not 200 <= resp.status_code < 300:
+                record(
+                    resp.href,
+                    _reason_phrases.get(resp.status_code, str(resp.status_code)),
+                    resp.error,
+                )
             for propstat in resp.propstats:
-                if propstat.ok or not (400 <= propstat.status_code <= 599):
+                if propstat.status_code == 0:
+                    msg = f"unparseable <d:status> in a <d:propstat> for {resp.href!r}"
+                    raise MalformedResponseError(msg)
+                if 200 <= propstat.status_code < 300:
                     continue
-                reason = _reason_phrases.get(propstat.status_code, str(propstat.status_code))
+                reason = _reason_phrases.get(
+                    propstat.status_code, str(propstat.status_code)
+                )
                 for tag in propstat.properties:
                     _, local_name = split_clark(tag)
                     record(f"{resp.href} ({local_name})", reason, propstat.error)
@@ -222,10 +283,12 @@ def parse_multistatus_response(http_response: "HTTPResponse") -> MultiStatusResp
     """Parse a 207 Multi-Status response.
 
     Raises:
-        ValueError: ``http_response`` isn't actually a 207 response.
+        MalformedResponseError: ``http_response`` isn't a 207 response (a
+            plain web server, a proxy or a captive portal answering the
+            PROPFIND) or its body is not a well-formed multistatus.
 
     """
     if http_response.status_code != 207:
-        msg = "http response is not a multistatus response"
-        raise ValueError(msg)
+        msg = f"the server answered {http_response.status_code}, not a 207 Multi-Status - is this a WebDAV server?"
+        raise MalformedResponseError(msg)
     return MultiStatusResponse(http_response.content)

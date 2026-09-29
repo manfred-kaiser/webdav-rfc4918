@@ -17,7 +17,22 @@ jobs:
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
       with:
         python-version: '3.13'
-        cache: 'pip'
+        # (no `cache: pip` here: a cache written by a pull-request run must never be
+        # able to reach the build a release is made from)
+    - name: Check the release tag matches the package version
+      env:
+        TAG: ${{ github.event.release.tag_name }}
+      run: |
+        python - <<'EOF'
+        import os, re, sys, tomllib
+        tag = os.environ["TAG"].removeprefix("v")
+        with open("pyproject.toml", "rb") as f:
+            declared = tomllib.load(f)["project"]["version"]
+        with open("src/webdav/__init__.py", encoding="utf-8") as f:
+            in_code = re.search(r'^__version__ = "([^"]+)"', f.read(), re.M).group(1)
+        if not (tag == declared == in_code):
+            sys.exit(f"tag {tag!r}, pyproject {declared!r} and __version__ {in_code!r} must agree")
+        EOF
     - name: Install build
       run: |
         python -m pip install pip==26.2.1

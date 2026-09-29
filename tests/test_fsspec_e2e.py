@@ -12,7 +12,7 @@ from webdav.fsspec import WebdavFileSystem
 def fs(server_url: str) -> Iterator[WebdavFileSystem]:
     filesystem = WebdavFileSystem(server_url, auth=AUTH)
     yield filesystem
-    filesystem.client.close()
+    filesystem.session.close()
 
 
 def test_pipe_and_cat_roundtrip(fs: WebdavFileSystem) -> None:

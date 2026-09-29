@@ -10,22 +10,23 @@ otherwise redirect a write to a different resource - or, via 307/308, to
 a completely different host while fully replaying the request body -
 with no error raised to the caller.
 
-`Client` never delegates redirect-following to `requests` itself;
-instead, {class}`~webdav.client.RedirectPolicy` decides, per client (or
-per call, on the methods that expose their own `redirect_policy`, e.g.
-{meth}`~webdav.client.Client.propfind`), which redirect targets to
-follow at all:
+{class}`~webdav.session.Session` never delegates redirect-following to
+`requests` itself (which re-sends a redirected `PROPFIND` without its
+body, or as a `GET`, and follows any origin); instead,
+{class}`~webdav.redirects.RedirectPolicy` decides, per session (or per
+call, with `redirect_policy=`), which redirect targets to follow at all.
+The policy is the same for every call made through the session:
 
 ```python
-from webdav import Client, RedirectPolicy
+from webdav import RedirectPolicy, Session
 
 # Default: only a same-origin redirect is followed automatically.
-client = Client("https://webdav.example.org")
+session = Session("https://webdav.example.org")
 
 # Additionally trust a specific origin - e.g. a signed-upload gateway.
 # This client's credentials are never forwarded there, only to its own
 # origin.
-client = Client(
+session = Session(
     "https://webdav.example.org",
     redirect_policy=RedirectPolicy.WHITELIST,
     trusted_redirect_origins=["https://storage.example.com"],
@@ -39,7 +40,7 @@ exact hostname varies per bucket/region/tenant):
 ```python
 from urllib.parse import urlsplit
 
-client = Client(
+session = Session(
     "https://webdav.example.org",
     redirect_policy=RedirectPolicy.WHITELIST,
     trusted_redirect_origins=lambda url: (
@@ -48,12 +49,44 @@ client = Client(
 )
 ```
 
+## What is and is not followed
+
+Whatever the policy:
+
+- `303 See Other` is only followed for `GET`/`HEAD` (RFC 9110 §15.4.4 says
+  to retrieve the result with `GET`; re-sending a write would be wrong,
+  and silently turning it into a `GET` would report a write as done).
+- A redirect whose body could not be sent again (a generator, a partly
+  read file) is not followed. A redirect back to a URL already visited
+  is not followed either, and a chain stops after five hops.
+- A target is only accepted if `urllib.parse` and `urllib3` agree which
+  host it names. Userinfo, control characters, backslashes and any
+  scheme but `http`/`https` are refused - an origin is scheme, host and
+  port, so `http` -> `https` on the same host is a *different* origin.
+- `https` -> `http` is never followed, not even with `ALL` - only to an
+  origin explicitly listed in `trusted_redirect_origins`.
+
+Every hop is judged against the origin the request *started at*: after
+A redirects to B, a further redirect to another path on B is still "another
+origin" as far as your credentials are concerned.
+
+A redirect to another origin (only possible with `WHITELIST`/`ALL`) is
+sent as a fresh request through a plain adapter of its own: no `auth` (and no
+netrc), no cookies (and none set by the answer are kept), no session default
+headers, no client certificate, no `If`/`Lock-Token`/`Destination`. Of the
+headers you pass to that one call only those describing the representation or
+the conditions are forwarded (`Content-Type`, `Content-Encoding`,
+`Content-Language`, `Content-MD5`, `Accept*`, `Range`, `If-Match`,
+`If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`); a signed upload
+that has to repeat others names them in
+`session.redirect_forward_headers = frozenset({"x-amz-meta-owner"})`.
+
 A redirect the active policy doesn't allow raises
 {class}`~webdav.exceptions.RedirectNotFollowedError` - the server's
 requested target is on `exc.response.headers["Location"]`.
 
 ```{eval-rst}
-.. autoclass:: webdav.client.RedirectPolicy
+.. autoclass:: webdav.redirects.RedirectPolicy
    :members:
 
 .. autoclass:: webdav.exceptions.RedirectNotFollowedError

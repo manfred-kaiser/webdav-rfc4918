@@ -3,8 +3,19 @@
 Built on :mod:`urllib.parse` only - no dependency on the HTTP transport
 library for URL handling, so this module stays reusable independent of
 what does the actual HTTP requests.
+
+The one convention everything here rests on: **a path is always the plain,
+percent-decoded path** - what a person calls the name - and is
+percent-encoded exactly once, when it becomes part of a URL. That is what
+makes a name that came back from a listing usable, unchanged, as an
+argument: ``a%20b`` is a file called "a%20b" (three characters after the
+"a"), not "a b". Unicode is never re-normalised on the way out (a server
+that stores an NFD name has to be asked for the NFD name); the NFC form
+:func:`path_key` produces exists only so two spellings of one path compare
+equal.
 """
 
+import os
 import re
 import unicodedata
 from posixpath import normpath
@@ -17,11 +28,15 @@ class URL:
     """A parsed URL with an always percent-decoded ``path``.
 
     Percent-encoding is re-applied only when the URL is turned back into a
-    string (via :func:`str`). This mirrors how a WebDAV server's ``href``
-    in a multistatus XML response must be interpreted - the path segment
-    is percent-encoded on the wire but the encoded parts (e.g. ``%2e%2e``)
-    must be decoded before it is safe to reason about ``..`` segments,
-    trailing slashes, or subpath containment.
+    string (via :func:`str`), and then to *everything* that is not an
+    unreserved character or ``/`` - including ``%``, ``?``, ``#``, ``;``
+    and ``+``, which a server (or a proxy in front of it) may otherwise
+    read as the start of a query, a fragment, path parameters or a space.
+    This mirrors how a WebDAV server's ``href`` in a multistatus XML
+    response must be interpreted - the path segment is percent-encoded on
+    the wire but the encoded parts (e.g. ``%2e%2e``) must be decoded before
+    it is safe to reason about ``..`` segments, trailing slashes, or
+    subpath containment.
     """
 
     __slots__ = ("fragment", "netloc", "path", "query", "scheme")
@@ -45,12 +60,10 @@ class URL:
         split = urlsplit(url)
         self.scheme = split.scheme
         self.netloc = split.netloc
-        # NFC-normalized so a server's href and a caller-supplied path that
-        # happen to use different (but canonically equivalent) Unicode
-        # normalization forms of the same characters - e.g. a precomposed
-        # "é" (NFC) vs. "e" + a combining acute accent (NFD), which is what
-        # macOS filesystem APIs commonly hand back - still compare equal.
-        self.path = unicodedata.normalize("NFC", unquote(split.path))
+        # Deliberately *not* Unicode-normalised: a server that stores the
+        # decomposed spelling of a name (macOS clients do) must be asked for
+        # exactly that spelling. Comparisons go through :func:`path_key`.
+        self.path = unquote(split.path)
         self.query = split.query
         self.fragment = split.fragment
 
@@ -75,7 +88,7 @@ class URL:
 
     def __str__(self) -> str:
         """Render the URL, percent-encoding the (decoded) path."""
-        encoded_path = quote(self.path, safe="/!$&'()*+,;=:@%")
+        encoded_path = quote(self.path, safe="/")
         return urlunsplit(
             (self.scheme, self.netloc, encoded_path, self.query, self.fragment),
         )
@@ -107,10 +120,10 @@ def normalize_path(path: str) -> str:
     result always agrees with what a compliant server's own request-target
     normalization, RFC 3986 sec. 6.2.2.3, would resolve the same path to -
     a client-side dict key built from the unresolved form would otherwise
-    silently disagree with the server's), NFC-normalizes Unicode (see
-    :class:`URL`), and strips a trailing slash (except for the root ``/``
-    itself). Always assumes an absolute (``/``-prefixed) input, matching
-    every call site in this codebase.
+    silently disagree with the server's), and strips a trailing slash
+    (except for the root ``/`` itself). Unicode is left as it is - see
+    :func:`path_key` for comparing. Always assumes an absolute
+    (``/``-prefixed) input, matching every call site in this codebase.
     """
     if not path:
         return path
@@ -120,8 +133,18 @@ def normalize_path(path: str) -> str:
     # it ourselves first so this always returns a normal single-slash-
     # prefixed path regardless of how many slashes ended up at the front
     # of the input (e.g. joining a root base_path with a path segment).
-    collapsed = _LEADING_SLASHES.sub("/", unicodedata.normalize("NFC", path))
+    collapsed = _LEADING_SLASHES.sub("/", path)
     return strip_trailing_slash(normpath(collapsed))
+
+
+def path_key(path: str) -> str:
+    """The form of ``path`` to compare (and use as a dict key) - never to send.
+
+    Normalised as :func:`normalize_path` does, plus NFC, so a precomposed
+    "é" and an "e" with a combining accent - the same name, differently
+    spelled - are one key.
+    """
+    return unicodedata.normalize("NFC", normalize_path("/" + path.lstrip("/")))
 
 
 def join_url_path(base_path: str, path: str) -> str:
@@ -135,11 +158,20 @@ def join_url_path(base_path: str, path: str) -> str:
             never a legitimate WebDAV request; treat it the same as any
             other caller-input error (e.g. wrap it into a
             :class:`~webdav.exceptions.ClientError` at the call site, the
-            way :meth:`~webdav.client.Client.join_url` does) rather than
+            way :meth:`~webdav.session.Session.resolve_url` does) rather than
             letting it reach a server.
 
     """
     base = normalize_path(f"/{base_path.strip('/')}")
+    depth = 0
+    for segment in path.split("/"):
+        if segment == "..":
+            depth -= 1
+            if depth < 0:
+                msg = f"{path!r} climbs out of the WebDAV root {base_path!r}"
+                raise ValueError(msg)
+        elif segment not in ("", "."):
+            depth += 1
     joined = normalize_path(f"{base}/{path.strip('/')}")
     if base not in ("/", joined) and not joined.startswith(f"{base}/"):
         msg = f"{path!r} resolves outside of the WebDAV root {base_path!r}"
@@ -159,6 +191,10 @@ def join_url(base_url: URL, path: str, add_trailing_slash: bool = False) -> URL:
 def relative_url_to(base_url: URL, rel: str) -> str:
     """Finds relative url to a base url path.
 
+    Compares segment by segment, NFC-normalised, but returns the remainder
+    exactly as ``rel`` spells it - it is a name the server gave, and has to
+    go back to the server unchanged.
+
     Raises ValueError if ``rel`` does not resolve to a path under
     ``base_url`` - a server response should never point outside of what
     was requested. Also rejects embedded NUL bytes and backslashes, which
@@ -166,22 +202,27 @@ def relative_url_to(base_url: URL, rel: str) -> str:
     downstream consumer joining this onto a real filesystem path (e.g. on
     Windows) might.
     """
-    if "\x00" in rel or "\\" in rel:
+    if "\x00" in rel or (os.name == "nt" and "\\" in rel):
         msg = f"{rel!r} contains an unexpected NUL byte or backslash"
         raise ValueError(msg)
 
-    base = normpath(f"/{base_url.path.strip('/')}").strip("/")
-    rel = normpath(f"/{rel.strip('/')}").strip("/")
+    base_segments = [
+        seg for seg in normpath(f"/{base_url.path.strip('/')}").split("/") if seg
+    ]
+    rel_segments = [seg for seg in normpath(f"/{rel.strip('/')}").split("/") if seg]
 
-    if base == rel or not rel:
+    if rel_segments == base_segments or not rel_segments:
         return "/"
 
-    if not base and rel:
-        return rel
-
-    if not rel.startswith(f"{base}/"):
-        msg = f"{rel!r} is not a subpath of {base!r}"
+    head = rel_segments[: len(base_segments)]
+    if len(rel_segments) <= len(base_segments) or [_nfc(s) for s in head] != [
+        _nfc(s) for s in base_segments
+    ]:
+        msg = f"{'/'.join(rel_segments)!r} is not a subpath of {'/'.join(base_segments)!r}"
         raise ValueError(msg)
 
-    index = len(base) + 1
-    return rel[index:]
+    return "/".join(rel_segments[len(base_segments) :])
+
+
+def _nfc(segment: str) -> str:
+    return unicodedata.normalize("NFC", segment)
