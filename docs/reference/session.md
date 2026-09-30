@@ -105,7 +105,10 @@ methods only: `GET`, `HEAD`, `OPTIONS`, `PROPFIND`. Never for a write: if the
 server acted before the connection broke, the retry finds the work done and
 reports the opposite (`mkdir` "exists", `remove` "not found"), and a lost `LOCK`
 reply would leave an orphaned lock. When the attempts run out, the last response is
-returned, as `requests` would. `Session(retry=False)` turns it off.
+returned, as `requests` would. A `Retry-After` header (RFC 9110 §10.2.3, seconds
+or an HTTP-date) is waited for when it is longer than the backoff - but a server
+that asks for more than 30 s is not waited for: the failure is returned instead.
+`Session(retry=False)` turns it off.
 
 ## Pickling and copying
 
@@ -114,7 +117,11 @@ TLS adapter - the last of these rebuilt from the constructor arguments you
 gave, including `tls=TLSOptions(...)` (mTLS with a client certificate can be
 pickled too, unlike a raw `ssl.SSLContext`). Its `auth`, headers and cookies
 are copied *as they are*: a pickled session contains its credentials in clear
-text - do not write it to disk or send it anywhere untrusted.
+text - do not write it to disk or send it anywhere untrusted. (Pickling is
+supported because tools such as `fsspec` and `multiprocessing` need it; like
+them, it serialises the options you configured.) A callable you passed -
+`trusted_redirect_origins=` or `retry=` as a function - has to be picklable
+too: a module-level function, not a lambda.
 
 ## A note on `requests.Session`
 
