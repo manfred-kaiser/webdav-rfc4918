@@ -83,6 +83,28 @@ class RedirectPolicy(Enum):
     ALL = "all"
 
 
+def check_redirect_policy(policy: RedirectPolicy, *, trusted: bool) -> RedirectPolicy:
+    """Return ``policy`` if a session with (or without) trusted origins can use it.
+
+    Raises:
+        TypeError: ``policy`` is not a :class:`RedirectPolicy` - a string
+            such as ``"all"`` would match none of the tiers and be treated as
+            the strictest one without a word.
+        ValueError: ``WHITELIST`` without trusted origins.
+
+    """
+    if not isinstance(policy, RedirectPolicy):
+        msg = f"redirect_policy must be a RedirectPolicy, got {policy!r}"
+        raise TypeError(msg)
+    if policy == RedirectPolicy.WHITELIST and not trusted:
+        msg = (
+            "redirect_policy=RedirectPolicy.WHITELIST requires "
+            "trusted_redirect_origins to be set"
+        )
+        raise ValueError(msg)
+    return policy
+
+
 def validate_policy(
     policy: RedirectPolicy,
     trusted_redirect_origins: "Iterable[str] | Callable[[str], bool] | None",
@@ -90,17 +112,13 @@ def validate_policy(
     """Reject an inconsistent ``policy`` / ``trusted_redirect_origins`` pair.
 
     Raises:
+        TypeError: ``policy`` is not a :class:`RedirectPolicy`.
         ValueError: ``WHITELIST`` without trusted origins, or trusted
             origins under any other policy - almost certainly a mistake,
             and silently doing nothing would be the unsafe way to fail.
 
     """
-    if policy == RedirectPolicy.WHITELIST and trusted_redirect_origins is None:
-        msg = (
-            "redirect_policy=RedirectPolicy.WHITELIST requires "
-            "trusted_redirect_origins to be set"
-        )
-        raise ValueError(msg)
+    check_redirect_policy(policy, trusted=trusted_redirect_origins is not None)
     if policy != RedirectPolicy.WHITELIST and trusted_redirect_origins is not None:
         msg = (
             "trusted_redirect_origins has no effect without "

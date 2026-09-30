@@ -42,9 +42,11 @@ $ dav ls --help
 **Redirects** (see {doc}`redirects`)
 : `--redirect-policy {never,same-origin,whitelist,all}` (default:
   `same-origin`), `--trusted-redirect-origin` (repeatable; requires
-  `--redirect-policy whitelist`).
+  `--redirect-policy whitelist`), `--max-redirects` (redirects in a row
+  before a request is refused as a loop; default: 5).
 
 **Connection tuning**
 : `--max-response-size` (bytes, or `none` to disable the cap; default:
-  64 MiB), `--chunk-size` (bytes; default: 4 MiB), `--no-retry` (don't
+  64 MiB), `--max-response-time` (seconds for the whole request, or `none`;
+  default: 300), `--chunk-size` (bytes; default: 4 MiB), `--no-retry` (don't
   automatically retry a transient failure).

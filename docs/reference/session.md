@@ -64,7 +64,8 @@ The `Session` verbs take the same keyword arguments as `requests.Session.request
 `lock_timeout=` (not `timeout=`, which stays the network timeout). Headers
 you pass yourself always win over these conveniences. The session-level
 options - `redirect_policy`, `trusted_redirect_origins`,
-`max_response_size`, `retry`, `chunk_size`, `raise_on_error` - are
+`max_response_size`, `max_response_time`, `max_redirects`, `retry`, `chunk_size`,
+`raise_on_error` - are
 arguments of `Session(...)` and `FileSystem(...)` alike, and of the
 module-level file-system functions.
 

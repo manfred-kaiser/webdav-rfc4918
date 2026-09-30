@@ -78,19 +78,8 @@ class _UploadOptions(_BaseOptions, total=False):
 
 
 def _new_filesystem(session_options: "dict[str, Any]") -> FileSystem:
-    """A ``FileSystem`` (owning its own session) from the (already split off) session options.
-
-    ``max_response_time`` is an attribute of the session, not a constructor
-    argument, so it is set after construction.
-    """
-    max_response_time = session_options.pop("max_response_time", None)
-    filesystem = FileSystem(**session_options)
-    if max_response_time is not None:
-        # FileSystem *is* the internal API Session's file-system layer composes against.
-        # pylint: disable-next=protected-access
-        session = filesystem._session  # noqa: SLF001
-        session.max_response_time = max_response_time
-    return filesystem
+    """A ``FileSystem`` (owning its own session) from the (already split off) session options."""
+    return FileSystem(**session_options)
 
 
 def _run(

@@ -121,13 +121,14 @@ ignore = [
 ]
 
 [tool.ruff.lint.pylint]
-# Session.__init__ has 13 independent configuration params (base_url plus
-# 12 keyword-only: auth/headers/cert/verify/tls/timeout/redirect_policy/
-# trusted_redirect_origins/max_response_size/retry/chunk_size/
-# raise_on_error) - each is independently meaningful and none group
-# naturally beyond what TLSOptions already bundles (the TLS-internals
-# subset). Kept in sync with [tool.pylint.design].max-args below.
-max-args = 13
+# Session.__init__ has 15 independent configuration params (base_url plus
+# 14 keyword-only: auth/headers/cert/verify/tls/timeout/redirect_policy/
+# trusted_redirect_origins/max_response_size/max_response_time/
+# max_redirects/retry/chunk_size/raise_on_error) - each is independently
+# meaningful and none group naturally beyond what TLSOptions already
+# bundles (the TLS-internals subset). Kept in sync with
+# [tool.pylint.design].max-args below.
+max-args = 15
 
 [tool.ruff.lint.per-file-ignores]
 "docs/**" = [ "INP001" ]
@@ -170,16 +171,18 @@ disable = [
 
 [tool.pylint.design]
 # Kept in sync with [tool.ruff.lint.pylint].max-args - see its comment.
-max-args = 13
+max-args = 15
 max-parents = 8  # the exception hierarchy is deliberately fine-grained
+# Session.__init__: every keyword-only argument counts as a local (see max-args).
+max-locals = 16
 max-positional-arguments = 9
 # Session is the single entry point for the HTTP/WebDAV verbs, like
 # requests.Session is for HTTP, and forwards the requests attributes
 # (headers, auth, verify, ... - each a getter/setter pair) - splitting it
 # into several classes purely to satisfy this metric would work against the
 # one-object API this project explicitly aims for. A little headroom over
-# its current size (37).
-max-public-methods = 40
+# its current size (41).
+max-public-methods = 44
 
 [tool.pylint.MASTER]
 load-plugins = "pylint.extensions.docparams"

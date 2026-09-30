@@ -98,17 +98,15 @@ _SESSION_ALL = ["DEFAULT_MAX_RESPONSE_SIZE", "DEFAULT_TIMEOUT", "Method", "Sessi
 
 #: Attributes ``Session()`` carries on the instance.
 _SESSION_INSTANCE_ATTRIBUTES = [
-    "base_url",
     "locks",
     "raise_on_error",
-    "redirect_policy",
-    "timeout",
     "with_retry",
 ]
 
 #: The properties ``Session`` forwards to (or derives from) its transport.
 _SESSION_PROPERTIES = [
     "auth",
+    "base_url",
     "cert",
     "chunk_size",
     "cookies",
@@ -120,8 +118,11 @@ _SESSION_PROPERTIES = [
     "params",
     "proxies",
     "redirect_forward_headers",
+    "redirect_policy",
     "stream",
+    "timeout",
     "trust_env",
+    "trusted_redirect_origins",
     "verify",
 ]
 

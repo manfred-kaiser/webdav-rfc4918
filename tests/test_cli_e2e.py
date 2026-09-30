@@ -67,3 +67,32 @@ def test_invalid_redirect_policy_is_a_clean_argparse_error(
         cli.main(["ls", _url(server_url, ""), "--redirect-policy", "bogus"])
     assert exc_info.value.code == 2
     assert "invalid" in capsys.readouterr().err.lower()
+
+
+def test_max_response_time_and_max_redirects_are_taken(
+    server_url: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = ["ls", _url(server_url, "")]
+    assert cli.main([*args, "--max-response-time", "30", "--max-redirects", "0"]) == 0
+    assert cli.main([*args, "--max-response-time", "none"]) == 0
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--max-response-time", "0"],
+        ["--max-response-time", "inf"],
+        ["--max-response-time", "soon"],
+        ["--max-redirects", "-1"],
+        ["--max-redirects", "many"],
+        ["--timeout", "nan"],
+    ],
+)
+def test_a_limit_that_cannot_work_is_a_clean_argparse_error(
+    server_url: str, capsys: pytest.CaptureFixture[str], flags: list[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["ls", _url(server_url, ""), *flags])
+    assert exc_info.value.code == 2
+    capsys.readouterr()

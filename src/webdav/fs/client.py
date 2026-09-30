@@ -80,7 +80,8 @@ from webdav.resource import Resource
 from webdav.session import (
     Session,
 )
-from webdav.transport.streaming import IterStream, SizedIterator, check_chunk_size
+from webdav.transport.limits import check_chunk_size
+from webdav.transport.streaming import IterStream, SizedIterator
 from webdav.url_safety import display_url, redact_url
 
 if TYPE_CHECKING:

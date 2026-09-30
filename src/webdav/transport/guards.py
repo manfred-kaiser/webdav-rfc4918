@@ -84,6 +84,30 @@ def require_full_url(url: str, *, has_base_url: bool) -> None:
         raise ClientError(msg)
 
 
+def check_base_url(value: "str | None") -> "str | None":
+    """Return ``value`` if it can be the ``base_url`` of a session.
+
+    Raises:
+        ValueError: It is neither ``None`` nor one full ``http(s)`` URL
+            without credentials, a query or a fragment.
+
+    """
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or effective_origin(value) is None
+        or urlsplit(value).query
+        or urlsplit(value).fragment
+    ):
+        msg = (
+            "base_url must be a full http(s) URL without credentials, query or "
+            f"fragment, got {redact_url(str(value))!r}"
+        )
+        raise ValueError(msg)
+    return value
+
+
 def check_verify(verify: object) -> None:
     """Warn loudly when talking to a server whose certificate will not be checked.
 
@@ -183,6 +207,7 @@ class CleartextWarner:
 __all__ = [
     "NO_AUTH",
     "CleartextWarner",
+    "check_base_url",
     "check_verify",
     "require_full_url",
     "split_url",

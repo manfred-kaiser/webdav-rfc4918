@@ -65,18 +65,22 @@ from webdav.exceptions import (
 )
 from webdav.methods import RETRYABLE_METHODS, Method
 from webdav.response import Response
-from webdav.transport.body import (
-    check_max_size,
-    check_max_time,
-    read_bounded,
-    read_response,
-)
+from webdav.transport.body import read_bounded, read_response
 from webdav.transport.deadline import DeadlineAdapter, enforce
 from webdav.transport.guards import (
     NO_AUTH,
     CleartextWarner,
+    check_base_url,
     check_verify,
     require_full_url,
+)
+from webdav.transport.limits import (
+    DEFAULT_CHUNK_SIZE,
+    check_chunk_size,
+    check_max_redirects,
+    check_max_size,
+    check_max_time,
+    check_timeout,
 )
 from webdav.transport.redirects import (
     MAX_REDIRECT_BODY,
@@ -84,6 +88,7 @@ from webdav.transport.redirects import (
     RedirectPolicy,
     Refuse,
     build_trust_check,
+    check_redirect_policy,
     cross_origin_headers,
     has_replayable_body,
     plan_hop,
@@ -91,7 +96,6 @@ from webdav.transport.redirects import (
     validate_policy,
 )
 from webdav.transport.retry import retry as _retry
-from webdav.transport.streaming import DEFAULT_CHUNK_SIZE, check_chunk_size
 from webdav.transport.tls import (
     configure_tls,
 )
@@ -162,6 +166,7 @@ _PICKLED = (
     "raise_on_error",
     "chunk_size",
     "max_response_time",
+    "max_redirects",
     "redirect_forward_headers",
     "_retry_arg",
     "_trusted_arg",
@@ -186,7 +191,6 @@ _TRANSPORT_PICKLED = (
     "params",
     "stream",
     "trust_env",
-    "max_redirects",
 )
 
 
@@ -227,7 +231,7 @@ class Session:
 
     Not a :class:`requests.Session` subclass - it holds one (``auth``,
     ``headers``, ``cookies``, ``verify``, ``cert``, ``proxies``, ``hooks``,
-    ``params``, ``stream``, ``trust_env``, ``max_redirects`` all work exactly
+    ``params``, ``stream`` and ``trust_env`` all work exactly
     as documented in ``requests``, forwarded to it) rather than *being* one.
     That is deliberate: ``requests.Session``'s own redirect-following and
     response construction are exactly what this class needs to replace, not
@@ -253,6 +257,8 @@ class Session:
         redirect_policy: RedirectPolicy = RedirectPolicy.SAME_ORIGIN,
         trusted_redirect_origins: "Iterable[str] | Callable[[str], bool] | None" = None,
         max_response_size: "int | None" = DEFAULT_MAX_RESPONSE_SIZE,
+        max_response_time: "float | None" = DEFAULT_MAX_RESPONSE_TIME,
+        max_redirects: int = MAX_REDIRECTS,
         retry: "RetryFunc | bool" = True,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         raise_on_error: bool = False,
@@ -307,9 +313,16 @@ class Session:
                 (``"https://host"``) or a ``Callable[[str], bool]`` given
                 the full target URL. Required with ``WHITELIST`` and
                 rejected with any other policy.
-            max_response_size: Reject a non-streamed response whose
-                (truthful) ``Content-Length`` exceeds this many bytes.
-                ``None`` disables the check.
+            max_response_size: Reject a non-streamed response whose body
+                exceeds this many bytes (declared ``Content-Length``, and the
+                bytes actually read after decoding). ``None`` disables the
+                check.
+            max_response_time: Deadline, in seconds, for the whole exchange
+                of a request that is not streamed - every redirect hop, the
+                headers, the body. ``timeout`` only limits each single read.
+                ``None`` disables the deadline.
+            max_redirects: How many redirects in a row one request follows
+                before it is refused as a loop.
             retry: Retry transient failures (429, 5xx,
                 timeouts, dropped connections) of the safe and idempotent
                 methods - or pass a callable implementing
@@ -320,8 +333,13 @@ class Session:
                 raises for a status code unless asked to).
 
         Raises:
+            TypeError: ``redirect_policy`` is not a
+                :class:`~webdav.transport.redirects.RedirectPolicy`.
             ValueError: ``trusted_redirect_origins`` and ``redirect_policy``
-                disagree - see :func:`~webdav.transport.redirects.validate_policy`.
+                disagree - see :func:`~webdav.transport.redirects.validate_policy` -
+                or ``base_url``, ``timeout``, ``max_response_size``,
+                ``max_response_time``, ``max_redirects`` or ``chunk_size`` is
+                not a usable value.
 
         """
         validate_policy(redirect_policy, trusted_redirect_origins)
@@ -329,9 +347,14 @@ class Session:
         self.auth = auth
         if headers:
             self.headers.update(headers)
+        self._trusted_arg = trusted_redirect_origins
+        self._base_url: str | None = None
         self.base_url = base_url
+        self._timeout: float | tuple[float | None, float | None] | None = None
         self.timeout = timeout
-        self.redirect_policy = redirect_policy
+        self._redirect_policy = redirect_policy
+        self._max_redirects = MAX_REDIRECTS
+        self.max_redirects = max_redirects
         self._max_response_size: int | None = None
         self.max_response_size = max_response_size
         self.raise_on_error = raise_on_error
@@ -340,14 +363,13 @@ class Session:
         #: Deadline, in seconds, for the whole body of a response that is not
         #: streamed (``None``: none). ``timeout`` only limits each single read.
         self._max_response_time: float | None = None
-        self.max_response_time = DEFAULT_MAX_RESPONSE_TIME
+        self.max_response_time = max_response_time
         #: Names (lower case) of extra per-call headers a redirect to a
         #: trusted *other* origin may carry, beyond the representation and
         #: conditional headers it always keeps - e.g. ``{"x-amz-meta-owner"}``
         #: for a signed upload that has to repeat them.
         self._redirect_forward_headers: frozenset[str] = frozenset()
         self._retry_arg = retry
-        self._trusted_arg = trusted_redirect_origins
         self._cert_arg = cert
         self._verify_arg = verify
         self._tls_arg = tls
@@ -479,15 +501,6 @@ class Session:
     def trust_env(self, value: bool) -> None:
         self._transport.trust_env = value
 
-    @property
-    def max_redirects(self) -> int:
-        """See :attr:`requests.Session.max_redirects` - unused: this class never delegates redirect-following to it."""
-        return self._transport.max_redirects
-
-    @max_redirects.setter
-    def max_redirects(self, value: int) -> None:
-        self._transport.max_redirects = value
-
     def mount(self, prefix: str, adapter: requests.adapters.BaseAdapter) -> None:
         """Mount a transport adapter - see :meth:`requests.Session.mount`."""
         self._transport.mount(prefix, adapter)
@@ -499,6 +512,77 @@ class Session:
     def get_redirect_target(self, response: requests.Response) -> "str | None":
         """The ``Location`` header's value, decoded - see :meth:`requests.Session.get_redirect_target`."""
         return self._transport.get_redirect_target(response)
+
+    @property
+    def base_url(self) -> "str | None":
+        """The URL that request paths are relative to (``None``: every URL is a full one).
+
+        Raises:
+            ValueError: When set to anything but ``None`` or one full
+                ``http(s)`` URL without credentials, a query or a fragment.
+
+        """
+        return self._base_url
+
+    @base_url.setter
+    def base_url(self, url: "str | None") -> None:
+        self._base_url = check_base_url(url)
+
+    @property
+    def timeout(self) -> "float | tuple[float | None, float | None] | None":
+        """Default ``timeout`` of a request that does not set its own - see :data:`DEFAULT_TIMEOUT`.
+
+        Raises:
+            ValueError: When set to anything but ``None``, a positive number
+                of seconds, or a ``(connect, read)`` pair of those.
+
+        """
+        return self._timeout
+
+    @timeout.setter
+    def timeout(
+        self, value: "float | tuple[float | None, float | None] | None"
+    ) -> None:
+        self._timeout = check_timeout(value)
+
+    @property
+    def redirect_policy(self) -> RedirectPolicy:
+        """Which redirects to follow - see :class:`~webdav.transport.redirects.RedirectPolicy`.
+
+        Raises:
+            TypeError: When set to anything but a ``RedirectPolicy``.
+            ValueError: When set to ``WHITELIST`` and the session has no
+                ``trusted_redirect_origins``.
+
+        """
+        return self._redirect_policy
+
+    @redirect_policy.setter
+    def redirect_policy(self, policy: RedirectPolicy) -> None:
+        self._redirect_policy = check_redirect_policy(
+            policy, trusted=self._trusted_arg is not None
+        )
+
+    @property
+    def trusted_redirect_origins(
+        self,
+    ) -> "Iterable[str] | Callable[[str], bool] | None":
+        """The redirect targets :data:`RedirectPolicy.WHITELIST` follows - as given to the constructor."""
+        return self._trusted_arg
+
+    @property
+    def max_redirects(self) -> int:
+        """How many redirects in a row one request follows before it is refused as a loop.
+
+        Raises:
+            ValueError: When set to anything but an integer of at least 0.
+
+        """
+        return self._max_redirects
+
+    @max_redirects.setter
+    def max_redirects(self, count: int) -> None:
+        self._max_redirects = check_max_redirects(count)
 
     @property
     def chunk_size(self) -> int:
@@ -608,8 +692,9 @@ class Session:
         (locks, caches, adapters) are rebuilt fresh - see :meth:`_init_derived`.
         """
         self._transport = requests.Session()
-        for name, value in state.items():
-            setattr(self, name, value)
+        # The private arguments first: a setter (``redirect_policy``) may need one.
+        for name in sorted(state, key=lambda n: not n.startswith("_")):
+            setattr(self, name, state[name])
         self._init_derived()
 
     # -- URL handling ---------------------------------------------------
@@ -697,12 +782,7 @@ class Session:
         kwargs["data"], kwargs["headers"] = prepare_body(
             method, kwargs.get("data"), kwargs.get("headers")
         )
-        allow = kwargs.pop("allow_redirects", None)
-        policy = (
-            RedirectPolicy.NEVER
-            if allow is not None and not allow
-            else (redirect_policy or self.redirect_policy)
-        )
+        policy = self._policy_for(kwargs.pop("allow_redirects", None), redirect_policy)
         kwargs.setdefault("timeout", self.timeout)
         self._require_verification(kwargs.get("verify"))
 
@@ -724,6 +804,16 @@ class Session:
         except HTTPStatusError as exc:
             # Out of attempts: hand back the last response, as ``requests`` would.
             return cast("Response", exc.response)
+
+    def _policy_for(
+        self, allow_redirects: object, override: "RedirectPolicy | None"
+    ) -> RedirectPolicy:
+        """The redirect policy one request runs under: ``allow_redirects=False`` is "never", then the call's own, then the session's."""
+        if allow_redirects is not None and not allow_redirects:
+            return RedirectPolicy.NEVER
+        if override is None:
+            return self.redirect_policy
+        return check_redirect_policy(override, trusted=self._trusted_arg is not None)
 
     def _require_verification(self, verify: object) -> None:
         """Check (and warn about) the certificate verification a request will use."""
@@ -912,8 +1002,8 @@ class Session:
             if policy == RedirectPolicy.NEVER:
                 refuse(response, "redirects are disabled for this request")
                 break
-            if hops >= MAX_REDIRECTS:
-                refuse(response, f"more than {MAX_REDIRECTS} redirects in a row")
+            if hops >= self.max_redirects:
+                refuse(response, f"more than {self.max_redirects} redirects in a row")
                 break
             decision = plan_hop(
                 response,
