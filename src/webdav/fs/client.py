@@ -75,11 +75,11 @@ from webdav.exceptions import (
     ResourceNotFoundError,
 )
 from webdav.fs._remote import Remote
+from webdav.fs.streams import IterStream, SizedIterator
 from webdav.methods import Method
 from webdav.resource import Resource
 from webdav.session import Session, SessionOptions
 from webdav.transport.limits import check_chunk_size
-from webdav.transport.streaming import IterStream, SizedIterator
 from webdav.url_safety import display_url, redact_url
 
 if TYPE_CHECKING:

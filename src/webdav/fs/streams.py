@@ -1,4 +1,4 @@
-"""Resumable streaming downloads.
+"""Streaming file objects over a session: resumable downloads, and uploads of a known size.
 
 A network hiccup mid-download reopens the connection with a ``Range``
 request instead of failing the whole transfer - but only after verifying
