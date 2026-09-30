@@ -26,6 +26,7 @@ automatic ``If`` headers for locks the session holds, retries of transient
 failures, and a cap on how large a response body may be declared.
 """
 
+import difflib
 import threading
 import time
 from contextlib import suppress
@@ -187,6 +188,38 @@ _TRANSPORT_PICKLED = (
     "trust_env",
     "max_redirects",
 )
+
+
+def _merge_arguments(args: "tuple[Any, ...]", kwargs: "dict[str, Any]") -> None:
+    """Fold the positional arguments of ``request()`` into ``kwargs``, and refuse any name it does not know.
+
+    ``requests`` refuses an unknown keyword argument; so does this. Silently
+    ignoring one would turn a typo in an option that matters
+    (``allow_redirect=False``, ``verfiy=True``, ``timout=5``) into a request
+    that quietly does the opposite of what was asked.
+
+    Raises:
+        TypeError: Too many positional arguments, one given twice, or an
+            unknown keyword argument.
+
+    """
+    if len(args) > len(_REQUEST_PARAMS):
+        msg = f"request() takes at most {len(_REQUEST_PARAMS) + 2} positional arguments"
+        raise TypeError(msg)
+    for name, value in zip(_REQUEST_PARAMS, args, strict=False):
+        if name in kwargs:
+            msg = f"request() got multiple values for argument {name!r}"
+            raise TypeError(msg)
+        kwargs[name] = value
+    for name in kwargs:
+        if name not in _REQUEST_PARAMS:
+            msg = f"request() got an unexpected keyword argument {name!r}"
+            close = difflib.get_close_matches(
+                name, [*_REQUEST_PARAMS, "redirect_policy", "raise_on_error"], n=1
+            )
+            if close:
+                msg += f". Did you mean {close[0]!r}?"
+            raise TypeError(msg)
 
 
 class Session:
@@ -658,15 +691,7 @@ class Session:
         **kwargs: Any,
     ) -> Response:
         """:meth:`request` without the ``raise_on_error`` step."""
-        if len(args) > len(_REQUEST_PARAMS):
-            msg = f"request() takes at most {len(_REQUEST_PARAMS) + 2} positional arguments"
-            raise TypeError(msg)
-        for name, value in zip(_REQUEST_PARAMS, args, strict=False):
-            if name in kwargs:
-                msg = f"request() got multiple values for argument {name!r}"
-                raise TypeError(msg)
-            kwargs[name] = value
-
+        _merge_arguments(args, kwargs)
         url = self.resolve_url(url)
         require_full_url(url, has_base_url=self.base_url is not None)
         kwargs["data"], kwargs["headers"] = prepare_body(
@@ -675,7 +700,7 @@ class Session:
         allow = kwargs.pop("allow_redirects", None)
         policy = (
             RedirectPolicy.NEVER
-            if allow is False
+            if allow is not None and not allow
             else (redirect_policy or self.redirect_policy)
         )
         kwargs.setdefault("timeout", self.timeout)

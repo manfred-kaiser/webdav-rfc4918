@@ -6,6 +6,7 @@ import contextlib
 import copy
 import warnings
 from pathlib import Path
+from typing import Any
 
 import pytest
 import requests
@@ -244,3 +245,53 @@ def test_raise_on_error_can_be_overridden_for_one_call() -> None:
             lax.get(f"{url}/x", raise_on_error=True)
         with pytest.raises(ResourceNotFoundError):
             lax.request("GET", f"{url}/x", raise_on_error=True)
+
+
+# ---------------------------------------------------------------------------
+# A typo in an option is an error, never a request that does the opposite
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("typo", "meant"),
+    [
+        ("allow_redirect", "allow_redirects"),
+        ("verfiy", "verify"),
+        ("timout", "timeout"),
+        ("raise_on_eror", "raise_on_error"),
+        ("redirect_polcy", "redirect_policy"),
+    ],
+)
+def test_an_unknown_keyword_argument_is_refused_and_nothing_is_sent(
+    typo: str, meant: str
+) -> None:
+    options: dict[str, Any] = {typo: False}
+    with scripted_server(always(OK)) as (url, rec):
+        session = Session(retry=False)
+        with pytest.raises(
+            TypeError, match=f"unexpected keyword argument '{typo}'.*{meant}"
+        ):
+            session.get(f"{url}/x", **options)
+        with pytest.raises(TypeError, match="unexpected keyword argument"):
+            session.put(f"{url}/x", data=b"x", **options)
+        with pytest.raises(TypeError, match="unexpected keyword argument"):
+            session.request("PROPFIND", f"{url}/x", **options)
+    assert rec.requests == []
+
+
+def test_a_name_that_resembles_nothing_is_refused_without_a_suggestion() -> None:
+    with pytest.raises(TypeError, match="unexpected keyword argument 'zzz'$"):
+        Session("http://dav.example").get("/x", zzz=1)
+
+
+@pytest.mark.parametrize("falsy", [False, 0, None])
+def test_any_false_allow_redirects_means_never(falsy: object) -> None:
+    with scripted_server(always(OK)) as (b_url, b_rec):
+        with scripted_server(lambda _r: redirect(307, f"{b_url}/x")) as (a_url, _a):
+            session = Session(retry=False, redirect_policy=RedirectPolicy.ALL)
+            response = session.get(f"{a_url}/x", allow_redirects=falsy)
+    if falsy is None:  # not given: the session's policy applies
+        assert b_rec.requests
+    else:
+        assert response.status_code == 307
+        assert b_rec.requests == []
