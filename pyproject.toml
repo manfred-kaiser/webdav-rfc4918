@@ -94,7 +94,7 @@ per-file-ignores = [ "src/webdav/__init__.py:F401" ]
 # operator-wrap style conflicts with pycodestyle's). E704 joins them for
 # the same reason: black's "dummy implementations" style collapses a
 # trivial `def foo(): ...` body onto one line (the `@overload` stubs in
-# session.py's `open()`) - exactly what E704 flags.
+# fs/client.py's `open()`) - exactly what E704 flags.
 ignore = [ "E203", "E501", "E704", "W503" ]
 
 [tool.black]
@@ -133,9 +133,6 @@ max-args = 13
 "docs/**" = [ "INP001" ]
 "tools/**" = [ "INP001", "S603" ] # standalone scripts, not a package
 "src/webdav/cli.py" = [ "T201" ] # it's a CLI, printing to stdout is the point
-"src/webdav/fs/client.py" = [
-  "SLF001", # FileSystem *is* the internal API Session's file-system layer composes against
-]
 "tests/**" = [
   "ANN",    # return/argument types not required on test functions
   "D",      # test names are self-documenting, no docstring convention here
@@ -176,13 +173,13 @@ disable = [
 max-args = 13
 max-parents = 8  # the exception hierarchy is deliberately fine-grained
 max-positional-arguments = 9
-# Session is the single entry point: the HTTP/WebDAV verbs plus the
-# file-system operations (ls/info/exists/mkdir/open/upload/download/props/
-# ...), like requests.Session is for HTTP - splitting it into several
-# classes purely to satisfy this metric would work against the
+# Session is the single entry point for the HTTP/WebDAV verbs, like
+# requests.Session is for HTTP, and forwards the requests attributes
+# (headers, auth, verify, ... - each a getter/setter pair) - splitting it
+# into several classes purely to satisfy this metric would work against the
 # one-object API this project explicitly aims for. A little headroom over
-# its current size (43).
-max-public-methods = 46
+# its current size (37).
+max-public-methods = 40
 
 [tool.pylint.MASTER]
 load-plugins = "pylint.extensions.docparams"

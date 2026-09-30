@@ -74,6 +74,7 @@ from webdav.exceptions import (
     ResourceAlreadyExistsError,
     ResourceNotFoundError,
 )
+from webdav.fs._remote import Remote
 from webdav.methods import Method
 from webdav.resource import Resource
 from webdav.session import (
@@ -216,6 +217,7 @@ class FileSystem:
 
     _session: Session
     _owns_session: bool
+    _remote: Remote
 
     def __init__(self, base_url: "str | None" = None, **kwargs: Any) -> None:
         """Open a private :class:`~webdav.session.Session` for this ``FileSystem`` alone.
@@ -226,6 +228,7 @@ class FileSystem:
         verbs directly.
         """
         self._session = Session(base_url, **kwargs)
+        self._remote = Remote(self._session)
         self._owns_session = True
 
     @classmethod
@@ -239,6 +242,7 @@ class FileSystem:
         """
         self = cls.__new__(cls)
         self._session = session
+        self._remote = Remote(session)
         self._owns_session = False
         return self
 
@@ -259,7 +263,9 @@ class FileSystem:
 
     def dav_compliance(self, path: str = "") -> set[str]:
         """Return the ``DAV:`` compliance classes the server advertises."""
-        response = self._session._fetch(Method.OPTIONS, self._session._locate(path)[0])
+        response = self._session.request(
+            Method.OPTIONS, self._remote.locate(path).url, raise_on_error=False
+        )
         return set(FeatureDetection.from_response(response).dav_compliances)
 
     def get_props(
@@ -283,13 +289,13 @@ class FileSystem:
                 :func:`~webdav.dav.properties.build_propfind_body`.
 
         """
-        _url, base, rel = self._session._locate(path)
+        _url, base, rel = self._remote.locate(path)
         data = build_propfind_body(
             names, all_prop=all_prop or not names, include=include
         )
         # Depth: 0 - this is a single-resource lookup, not a traversal.
         headers = {"Content-Type": "application/xml; charset=utf-8", "Depth": "0"}
-        result = self._session._propfind_parsed(path, headers=headers, data=data)
+        result = self._remote.propfind(path, headers=headers, data=data)
         return result.get_response_for_path(base.path, rel).properties
 
     def set_props(
@@ -302,7 +308,7 @@ class FileSystem:
         """Set and/or remove properties via PROPPATCH (RFC 4918 sec. 9.2)."""
         data = build_proppatch_body(set_props, remove_props)
         headers = {"Content-Type": "application/xml; charset=utf-8"}
-        self._session._send(Method.PROPPATCH, path, data=data, headers=headers)
+        self._remote.send(Method.PROPPATCH, path, data=data, headers=headers)
 
     def content_length(self, path: str) -> "int | None":
         """Return the ``getcontentlength`` property."""
@@ -374,8 +380,8 @@ class FileSystem:
         }
         # The URL that is locked - fixed now, so that whatever happens to the
         # session (a changed base_url, ...) the UNLOCK goes to the same place.
-        url = self._session._locate(path)[0]
-        response = self._session._send(
+        url = self._remote.locate(path).url
+        response = self._remote.send(
             Method.LOCK,
             path,
             multistatus=False,
@@ -406,8 +412,11 @@ class FileSystem:
     def _unlock_quietly(self, url: str, token: str) -> None:
         """Release the lock ``token`` on ``url``, never raising (and never hiding that it failed)."""
         try:
-            self._session._fetch(
-                Method.UNLOCK, url, absolute=True, headers={"Lock-Token": f"<{token}>"}
+            self._session.request(
+                Method.UNLOCK,
+                url,
+                raise_on_error=False,
+                headers={"Lock-Token": f"<{token}>"},
             )
         except requests.RequestException as exc:
             # A failed UNLOCK (a dropped connection, a refusal) must not
@@ -444,7 +453,7 @@ class FileSystem:
             "If": token_condition(token),
             "Timeout": format_timeout(lock_timeout),
         }
-        response = self._session._send(
+        response = self._remote.send(
             Method.LOCK, path, multistatus=False, headers=headers
         )
         active_lock = parse_lock_response(response, expected_token=token)
@@ -465,7 +474,7 @@ class FileSystem:
         """
         headers = {"Content-Type": "application/xml; charset=utf-8"} if data else None
         try:
-            response = self._session._send(
+            response = self._remote.send(
                 Method.MKCOL, path, add_trailing_slash=True, data=data, headers=headers
             )
         except HTTPStatusError as exc:
@@ -486,11 +495,11 @@ class FileSystem:
                 empty string should be able to do.
 
         """
-        url, base, _rel = self._session._locate(path)
+        url, base, _rel = self._remote.locate(path)
         if path_key(URL(url).path) == path_key(base.path):
             msg = "refusing to remove the root of the session (its base_url): name what to remove"
             raise ClientError(msg)
-        self._session._send(Method.DELETE, path)
+        self._remote.send(Method.DELETE, path)
 
     def copy(
         self,
@@ -533,8 +542,8 @@ class FileSystem:
             ResourceNotFoundError: There is nothing at ``path``.
 
         """
-        url, base, _rel = self._session._locate(path)
-        result = self._session._propfind_parsed(path, headers={"Depth": "1"})
+        url, base, _rel = self._remote.locate(path)
+        result = self._remote.propfind(path, headers={"Depth": "1"})
         responses = result.responses
 
         own_key = path_key(URL(url).path)
@@ -558,14 +567,14 @@ class FileSystem:
 
         The same :class:`~webdav.resource.Resource` :meth:`ls` returns for each member.
         """
-        _url, base, rel = self._session._locate(path)
-        result = self._session._propfind_parsed(path, headers={"Depth": "0"})
+        _url, base, rel = self._remote.locate(path)
+        result = self._remote.propfind(path, headers={"Depth": "0"})
         return _resource(result.get_response_for_path(base.path, rel), base)
 
     def exists(self, path: str) -> bool:
         """Check whether a resource exists."""
         try:
-            self._session._propfind_parsed(path, headers={"Depth": "0"})
+            self._remote.propfind(path, headers={"Depth": "0"})
         except ResourceNotFoundError:
             return False
         return True
@@ -644,7 +653,7 @@ class FileSystem:
 
         with IterStream(
             self._session,
-            self._session._locate(path)[0],
+            self._remote.locate(path).url,
             chunk_size=chunk_size or self._session.chunk_size,
         ) as buffer:
             buff = cast("BinaryIO", buffer)
@@ -704,7 +713,7 @@ class FileSystem:
         stack: list[tuple[str, int]] = [(path, 0)]
         while stack:
             current, depth = stack.pop()
-            key = path_key(URL(self._session._locate(current)[0]).path)
+            key = path_key(URL(self._remote.locate(current).url).path)
             if key in seen:
                 continue
             if depth > _WALK_MAX_DEPTH or len(seen) >= _WALK_MAX_DIRS:
@@ -910,7 +919,7 @@ class FileSystem:
             SizedIterator(chunks, size) if size is not None else chunks
         )
         try:
-            self._session._send(
+            self._remote.send(
                 Method.PUT, path, data=body, headers=headers, error_path=path
             )
         except PreconditionFailedError as exc:

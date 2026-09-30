@@ -1,4 +1,4 @@
-# pylint: disable=too-many-lines  # Session is a requests.Session subclass with every verb on it; see pyproject
+# pylint: disable=too-many-lines  # one documented entry point: about a quarter of this file is docstrings
 """A :class:`requests.Session` that speaks WebDAV verbs directly.
 
 Everything ``requests.Session`` does keeps working exactly as documented
@@ -30,7 +30,6 @@ import threading
 import time
 from contextlib import suppress
 from datetime import timedelta
-from http import HTTPStatus
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -56,14 +55,12 @@ from webdav.dav.locks import (
     check_token,
     format_timeout,
 )
-from webdav.dav.multistatus import parse_multistatus_response
 from webdav.dav.properties import build_propfind_body, build_proppatch_body
-from webdav.dav.urls import URL, join_url, relative_url_to
+from webdav.dav.urls import URL, join_url
 from webdav.exceptions import (
     STATUS_CODE_EXCEPTIONS,
     ClientError,
     HTTPStatusError,
-    raise_for_status,
 )
 from webdav.methods import RETRYABLE_METHODS, Method
 from webdav.response import Response
@@ -97,7 +94,7 @@ from webdav.transport.streaming import DEFAULT_CHUNK_SIZE, check_chunk_size
 from webdav.transport.tls import (
     configure_tls,
 )
-from webdav.url_safety import display_url, effective_origin, is_url, redact_url
+from webdav.url_safety import effective_origin, is_url, redact_url
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, MutableMapping
@@ -108,7 +105,6 @@ if TYPE_CHECKING:
     from requests.cookies import RequestsCookieJar
     from requests.structures import CaseInsensitiveDict
 
-    from webdav.dav.multistatus import MultiStatusResponse
     from webdav.dav.properties import PropName
     from webdav.transport.retry import RetryFunc
     from webdav.transport.tls import CertTypes, TLSOptions
@@ -630,6 +626,7 @@ class Session:
         url: str,
         *args: Any,
         redirect_policy: "RedirectPolicy | None" = None,
+        raise_on_error: "bool | None" = None,
         **kwargs: Any,
     ) -> Response:
         """Send a request, exactly like :meth:`requests.Session.request`.
@@ -639,13 +636,16 @@ class Session:
         (``allow_redirects=False`` still disables them, and
         ``redirect_policy=`` overrides the policy for this one call); a
         held lock's token is attached as an ``If`` header; transient
-        failures of safe/idempotent methods are retried; and the default
-        ``timeout`` and ``max_response_size`` apply.
+        failures of safe/idempotent methods are retried; the default
+        ``timeout`` and ``max_response_size`` apply; and
+        :meth:`Response.raise_for_status` is called on the response if the
+        session's ``raise_on_error`` says so (``raise_on_error=`` overrides
+        that for this one call).
         """
         response = self._fetch(
             method, url, *args, redirect_policy=redirect_policy, **kwargs
         )
-        if self.raise_on_error:
+        if self.raise_on_error if raise_on_error is None else raise_on_error:
             response.raise_for_status()
         return response
 
@@ -655,14 +655,9 @@ class Session:
         url: str,
         *args: Any,
         redirect_policy: "RedirectPolicy | None" = None,
-        absolute: bool = False,
         **kwargs: Any,
     ) -> Response:
-        """:meth:`request` without the ``raise_on_error`` step.
-
-        ``absolute`` says ``url`` is already a full URL the library itself worked
-        out (not something to resolve against ``base_url`` again).
-        """
+        """:meth:`request` without the ``raise_on_error`` step."""
         if len(args) > len(_REQUEST_PARAMS):
             msg = f"request() takes at most {len(_REQUEST_PARAMS) + 2} positional arguments"
             raise TypeError(msg)
@@ -672,8 +667,7 @@ class Session:
                 raise TypeError(msg)
             kwargs[name] = value
 
-        if not absolute:
-            url = self.resolve_url(url)
+        url = self.resolve_url(url)
         require_full_url(url, has_base_url=self.base_url is not None)
         kwargs["data"], kwargs["headers"] = prepare_body(
             method, kwargs.get("data"), kwargs.get("headers")
@@ -1241,80 +1235,10 @@ class Session:
             Method.UNLOCK, url, kwargs, {"Lock-Token": f"<{token.strip('<>')}>"}
         )
 
-    # -- file-system operations: plain values, errors raised -----------------
-    #
-    # ``path`` is relative to ``base_url``; without a ``base_url`` it is a
-    # full URL. Every operation raises a WebDAVError on failure, with the
-    # ``path`` in its message.
-
-    def _locate(
-        self, path: str, add_trailing_slash: bool = False
-    ) -> "tuple[str, URL, str]":
-        """Resolve ``path`` to ``(full URL, base URL, path relative to that base)``."""
-        if self.base_url is not None:
-            url = self.resolve_url(path, add_trailing_slash=add_trailing_slash)
-            base = URL(self.base_url)
-            if is_url(path):
-                try:
-                    return url, base, relative_url_to(base, URL(url).path)
-                except ValueError as exc:
-                    raise ClientError(str(exc)) from exc
-            return url, base, path
-        parsed = URL(path)
-        if not parsed.is_absolute_url:
-            msg = f"{path!r} is not a full http(s) URL and this session has no base_url"
-            raise ClientError(msg)
-        base = parsed.copy_with(path="/", query="")
-        suffix = "/" if add_trailing_slash and not parsed.path.endswith("/") else ""
-        return str(parsed.copy_with(path=parsed.path + suffix)), base, parsed.path
-
-    def _send(
-        self,
-        method: str,
-        path: str,
-        *,
-        add_trailing_slash: bool = False,
-        error_path: "str | None" = None,
-        multistatus: bool = True,
-        **kwargs: Any,
-    ) -> Response:
-        """Send ``method`` for ``path``, raising the matching exception on failure.
-
-        With ``multistatus`` (the default) a ``207`` reporting a failure
-        for any individual resource raises too; a ``PROPFIND`` turns
-        that off, since a per-property 404 there is just data.
-        """
-        url = self._locate(path, add_trailing_slash)[0]
-        response = self._fetch(method, url, **kwargs)
-        raise_for_status(response, path=display_url(error_path or path))
-        if multistatus and response.status_code == HTTPStatus.MULTI_STATUS:
-            parse_multistatus_response(response).raise_for_status()
-        return response
-
-    def _propfind_parsed(
-        self,
-        path: str,
-        data: "str | None" = None,
-        headers: "dict[str, str] | None" = None,
-        redirect_policy: "RedirectPolicy | None" = None,
-    ) -> "MultiStatusResponse":
-        """Send a ``PROPFIND`` and parse the multistatus response."""
-        extra: dict[str, Any] = {}
-        if redirect_policy is not None:
-            extra["redirect_policy"] = redirect_policy
-        response = self._send(
-            Method.PROPFIND,
-            path,
-            multistatus=False,
-            data=data,
-            headers=headers,
-            **extra,
-        )
-        return parse_multistatus_response(response)
-
     def features_for(self, path: str = "") -> FeatureDetection:
         """Features of the server ``path`` is on (cached per origin once a probe has answered)."""
-        url = self._locate(path)[0]
+        url = self.resolve_url(path)
+        require_full_url(url, has_base_url=self.base_url is not None)
         key: Origin | str = effective_origin(url) or url
         with self._features_lock:
             cached = self._features.get(key)

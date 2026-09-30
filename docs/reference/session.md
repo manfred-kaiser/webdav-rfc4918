@@ -59,7 +59,7 @@ passed unchanged to `info`, `remove`, `download_file`, ...; `.is_dir`, `.size`, 
 
 The `Session` verbs take the same keyword arguments as `requests.Session.request`
 (`auth=`, `headers=`, `timeout=`, `verify=`, `cert=`, `stream=`, ...) plus
-`redirect_policy=` for one call. A `copy`/`move` takes
+`redirect_policy=` and `raise_on_error=` for one call. A `copy`/`move` takes
 `destination=`/`overwrite=`; a `PROPFIND` takes `depth=`; a `LOCK` takes
 `lock_timeout=` (not `timeout=`, which stays the network timeout). Headers
 you pass yourself always win over these conveniences. The session-level

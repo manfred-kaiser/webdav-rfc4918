@@ -15,6 +15,7 @@ from webdav import FileSystem, RedirectPolicy, Session
 from webdav.exceptions import (
     ClientError,
     InsecureTransportWarning,
+    ResourceNotFoundError,
     TLSHardeningDisabledWarning,
 )
 
@@ -217,3 +218,29 @@ def test_a_copy_of_a_session_does_not_share_what_was_warned_about() -> None:
             with contextlib.suppress(requests.RequestException):
                 each.get("http://192.0.2.1:9/x")
         assert [w.category for w in caught] == [InsecureTransportWarning]
+
+
+def test_features_of_a_url_that_cannot_be_requested_are_an_error_not_unknown() -> None:
+    with pytest.raises(ClientError, match="no base_url"):
+        Session(retry=False).features_for("/relative")
+    with pytest.raises(ClientError, match="not a valid URL"):
+        Session(retry=False).features_for("http://[bad")
+
+
+# ---------------------------------------------------------------------------
+# raise_on_error per call
+# ---------------------------------------------------------------------------
+
+
+def test_raise_on_error_can_be_overridden_for_one_call() -> None:
+    with scripted_server(always((404, {}, b""))) as (url, _rec):
+        strict = Session(retry=False, raise_on_error=True)
+        lax = Session(retry=False)
+        with pytest.raises(ResourceNotFoundError):
+            strict.get(f"{url}/x")
+        assert strict.get(f"{url}/x", raise_on_error=False).status_code == 404
+        assert lax.get(f"{url}/x").status_code == 404
+        with pytest.raises(ResourceNotFoundError):
+            lax.get(f"{url}/x", raise_on_error=True)
+        with pytest.raises(ResourceNotFoundError):
+            lax.request("GET", f"{url}/x", raise_on_error=True)

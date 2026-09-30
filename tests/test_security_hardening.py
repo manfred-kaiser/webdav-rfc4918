@@ -521,10 +521,10 @@ def test_a_shared_lock_response_selects_the_lock_that_was_asked_about() -> None:
 
 def test_a_412_is_a_precondition_failure_not_necessarily_an_existing_resource() -> None:
     with scripted_server(always((412, {}, b""))) as (url, _rec):
-        session = Session(retry=False)
+        session = Session(retry=False, raise_on_error=True)
         fs = FileSystem.from_session(session)
         with pytest.raises(exceptions.PreconditionFailedError) as excinfo:
-            session._send("PUT", f"{url}/a", data=b"x")
+            session.put(f"{url}/a", data=b"x")
         assert not isinstance(excinfo.value, exceptions.ResourceAlreadyExistsError)
         assert "already exists" not in str(excinfo.value)
         # ...while an upload that asked for "create only" knows what a 412 means:

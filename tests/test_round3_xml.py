@@ -195,15 +195,22 @@ def test_a_lock_the_client_cannot_use_is_released_anyway() -> None:
     assert rec.requests[1].headers["lock-token"] == "<opaquelocktoken:abc>"
 
 
-def test_unlock_goes_to_the_url_that_was_locked() -> None:
+def test_a_lock_is_not_released_elsewhere_when_the_base_url_changed_meanwhile(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The UNLOCK would carry the session's *current* credentials to a server the
+    # session was not pointed at any more: it is refused (and said so), not sent -
+    # neither to the server that was locked nor to the one the session points at now.
     with scripted_server(_lock_server("opaquelocktoken:abc")) as (url_a, rec_a):
         with scripted_server(always(OK)) as (url_b, rec_b):
             session = Session(url_a, retry=False)
             fs = FileSystem.from_session(session)
-            with fs.locked("f"):
-                session.base_url = url_b
-    assert [r.method for r in rec_a.requests] == ["LOCK", "UNLOCK"]
+            with caplog.at_level("WARNING", logger="webdav"):
+                with fs.locked("f"):
+                    session.base_url = url_b
+    assert [r.method for r in rec_a.requests] == ["LOCK"]
     assert rec_b.requests == []
+    assert "could not release the lock" in caplog.text
 
 
 def test_a_tag_url_is_always_a_valid_uri() -> None:

@@ -146,7 +146,7 @@ _SESSION_METHODS = {
     "propfind": "(self:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD, data:POSITIONAL_OR_KEYWORD=None, depth:KEYWORD_ONLY, props:KEYWORD_ONLY=None, all_prop:KEYWORD_ONLY=False, include:KEYWORD_ONLY=None, kwargs:VAR_KEYWORD)",
     "proppatch": "(self:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD, data:POSITIONAL_OR_KEYWORD=None, set_props:KEYWORD_ONLY=None, remove_props:KEYWORD_ONLY=None, kwargs:VAR_KEYWORD)",
     "put": "(self:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD, data:POSITIONAL_OR_KEYWORD=None, if_match:KEYWORD_ONLY=None, overwrite:KEYWORD_ONLY=None, kwargs:VAR_KEYWORD)",
-    "request": "(self:POSITIONAL_OR_KEYWORD, method:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD, args:VAR_POSITIONAL, redirect_policy:KEYWORD_ONLY=None, kwargs:VAR_KEYWORD)",
+    "request": "(self:POSITIONAL_OR_KEYWORD, method:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD, args:VAR_POSITIONAL, redirect_policy:KEYWORD_ONLY=None, raise_on_error:KEYWORD_ONLY=None, kwargs:VAR_KEYWORD)",
     "resolve_url": "(self:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD, add_trailing_slash:POSITIONAL_OR_KEYWORD=False)",
     "send": "(self:POSITIONAL_OR_KEYWORD, request:POSITIONAL_OR_KEYWORD, kwargs:VAR_KEYWORD)",
     "unlock": "(self:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD, token:POSITIONAL_OR_KEYWORD, kwargs:VAR_KEYWORD)",
