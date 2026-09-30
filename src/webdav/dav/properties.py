@@ -14,7 +14,6 @@ from xml.etree.ElementTree import Element
 
 from webdav.dav.date_utils import from_rfc1123, fromisoformat
 from webdav.dav.locks import ActiveLock, LockEntry
-from webdav.dav.parse_utils import parse_uint
 from webdav.dav.xml_utils import (
     DAV_NAMESPACE,
     clark,
@@ -24,6 +23,7 @@ from webdav.dav.xml_utils import (
     to_xml_string,
 )
 from webdav.exceptions import MalformedResponseError
+from webdav.transport.parse_utils import parse_uint
 
 if TYPE_CHECKING:
     from collections.abc import Iterable

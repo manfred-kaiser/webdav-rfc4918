@@ -18,7 +18,6 @@ from webdav.dav.conditional import (
     merge_if_headers,
     token_condition,
 )
-from webdav.dav.parse_utils import parse_uint
 from webdav.dav.urls import URL, path_key
 from webdav.dav.xml_utils import (
     dav,
@@ -28,6 +27,7 @@ from webdav.dav.xml_utils import (
     to_xml_string,
 )
 from webdav.exceptions import ClientError, MalformedResponseError
+from webdav.transport.parse_utils import parse_uint
 from webdav.url_safety import effective_origin
 
 #: What a lock token may look like. A token is a Coded-URL (RFC 4918 sec.

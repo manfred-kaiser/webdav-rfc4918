@@ -66,7 +66,6 @@ from webdav.dav.locks import (
     format_timeout,
 )
 from webdav.dav.multistatus import parse_multistatus_response
-from webdav.dav.parse_utils import parse_uint
 from webdav.dav.properties import build_propfind_body, build_proppatch_body
 from webdav.dav.urls import URL, join_url, relative_url_to
 from webdav.exceptions import (
@@ -79,6 +78,7 @@ from webdav.exceptions import (
 from webdav.methods import RETRYABLE_METHODS, WRITE_METHODS, XML_BODY_METHODS, Method
 from webdav.response import Response
 from webdav.transport.deadline import DeadlineAdapter, watch
+from webdav.transport.parse_utils import parse_uint
 from webdav.transport.redirects import (
     MAX_REDIRECTS,
     RedirectPolicy,
