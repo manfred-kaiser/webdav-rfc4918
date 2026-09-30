@@ -26,14 +26,10 @@ automatic ``If`` headers for locks the session holds, retries of transient
 failures, and a cap on how large a response body may be declared.
 """
 
-import ipaddress
 import logging
-import os
-import pathlib
 import re
 import threading
 import time
-import warnings
 from contextlib import suppress
 from datetime import timedelta
 from http import HTTPStatus
@@ -68,7 +64,6 @@ from webdav.exceptions import (
     STATUS_CODE_EXCEPTIONS,
     ClientError,
     HTTPStatusError,
-    InsecureTransportWarning,
     raise_for_status,
 )
 from webdav.methods import RETRYABLE_METHODS, WRITE_METHODS, XML_BODY_METHODS, Method
@@ -80,6 +75,13 @@ from webdav.transport.body import (
     read_response,
 )
 from webdav.transport.deadline import DeadlineAdapter, enforce
+from webdav.transport.guards import (
+    NO_AUTH,
+    CleartextWarner,
+    check_verify,
+    require_full_url,
+    split_url,
+)
 from webdav.transport.redirects import (
     MAX_REDIRECT_BODY,
     MAX_REDIRECTS,
@@ -92,13 +94,10 @@ from webdav.transport.retry import retry as _retry
 from webdav.transport.streaming import DEFAULT_CHUNK_SIZE, check_chunk_size
 from webdav.transport.tls import (
     configure_tls,
-    verification_on,
-    warn_hardening_disabled,
 )
 from webdav.url_safety import display_url, effective_origin, is_url, redact_url
 
 if TYPE_CHECKING:
-    import urllib.parse
     from collections.abc import Callable, Iterable, Mapping, MutableMapping
     from typing import Self
     from xml.etree.ElementTree import Element
@@ -191,20 +190,6 @@ _FORWARD_HEADERS = frozenset(
 )
 
 
-class _NoAuth(requests.auth.AuthBase):
-    """Authentication that adds nothing.
-
-    Passing this as ``auth`` when the caller gave none stops ``requests``
-    from looking the host up in ``~/.netrc`` and silently authenticating with
-    whatever it finds there: credentials are only ever the ones asked for.
-    """
-
-    def __call__(self, r: requests.PreparedRequest) -> requests.PreparedRequest:
-        return r
-
-
-_NO_AUTH = _NoAuth()
-
 #: Marks a reason string (rather than a URL) returned by ``Session._hop_target``.
 _REASON_PREFIX = "\x00reason:"
 
@@ -257,8 +242,6 @@ def _check_depth(depth: "int | str", allowed: "Iterable[str]", method: str) -> s
     return value
 
 
-_LOOPBACK_NAMES = frozenset({"localhost", "localhost.localdomain"})
-
 _LOGGER = logging.getLogger("webdav")
 
 
@@ -308,15 +291,6 @@ def _prepare_xml_body(kwargs: dict[str, Any]) -> None:
     kwargs["headers"] = dict(headers)
 
 
-def _split(url: str) -> "urllib.parse.SplitResult":
-    """``urlsplit`` that reports an unparseable URL as the library's own error."""
-    try:
-        return urlsplit(url)
-    except ValueError as exc:
-        msg = f"not a valid URL: {redact_url(url)!r}"
-        raise ClientError(msg) from exc
-
-
 def _strong_etag(value: str) -> str:
     """``value`` as the entity-tag ``If-Match`` needs (RFC 9110 sec. 13.1.1: strong comparison only).
 
@@ -334,15 +308,6 @@ def _strong_etag(value: str) -> str:
         )
         raise ValueError(msg)
     return value if value == "*" else entity_tag(value)
-
-
-def _is_loopback(host: str) -> bool:
-    if host.lower() in _LOOPBACK_NAMES:
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
 
 
 class FeatureDetection:
@@ -555,7 +520,7 @@ class Session:
         self._is_trusted_redirect_target = build_trust_check(self._trusted_arg)
         self._features: dict[Origin | str, FeatureDetection] = {}
         self._features_lock = threading.RLock()
-        self._insecure_warned: set[str] = set()
+        self._cleartext = CleartextWarner()
         # What a redirect to another origin is sent through: a plain adapter,
         # so that neither a client certificate (mTLS) nor any transport
         # setting meant for *this* server goes with it.
@@ -877,7 +842,7 @@ class Session:
 
         if not absolute:
             url = self.resolve_url(url)
-        self._require_full_url(url)
+        require_full_url(url, has_base_url=self.base_url is not None)
         _prepare_body(method, kwargs)
         allow = kwargs.pop("allow_redirects", None)
         policy = (
@@ -907,45 +872,9 @@ class Session:
             # Out of attempts: hand back the last response, as ``requests`` would.
             return cast("Response", exc.response)
 
-    def _require_full_url(self, url: str) -> None:
-        """Refuse a URL that is not one full, credential-free ``http(s)`` URL - with one error of ours.
-
-        Unparseable, not http(s), ambiguous, or relative without a ``base_url``: not
-        whichever error ``requests`` (or ``urlsplit``) would raise. Credentials
-        belong in ``auth=``, not in a URL, which ends up in logs and messages.
-        """
-        if is_url(url) and urlsplit(url).username is not None:
-            msg = "a URL with credentials in it is refused: pass auth=(user, password) instead"
-            raise ClientError(msg)
-        if effective_origin(url) is None:
-            msg = f"not a full http(s) URL: {redact_url(url)!r}" + (
-                "" if self.base_url is not None else " (this session has no base_url)"
-            )
-            raise ClientError(msg)
-
     def _require_verification(self, verify: object) -> None:
-        """Warn loudly when talking to a server whose certificate will not be checked.
-
-        ``requests`` reads any falsy ``verify`` as "do not check", per call and
-        as a session attribute. An explicit choice, not refused - see
-        :class:`~webdav.exceptions.TLSHardeningDisabledWarning` - but a session
-        that talks to a server it does not authenticate hands the password to
-        whoever answers, so every occurrence is loud and logged. Prefer naming
-        the CA that signed the server's certificate (``verify="ca.pem"``)
-        over disabling verification when it's just not in the system trust store.
-        """
-        effective = self.verify if verify is None else verify
-        if not verification_on(effective):
-            warn_hardening_disabled(
-                f"TLS server certificate verification is off (verify={effective!r})"
-            )
-            return
-        if (
-            isinstance(effective, str | os.PathLike)
-            and not pathlib.Path(effective).exists()
-        ):
-            msg = f"the CA bundle {os.fspath(effective)!r} (verify=) does not exist"
-            raise ClientError(msg)
+        """Check (and warn about) the certificate verification a request will use."""
+        check_verify(self.verify if verify is None else verify)
 
     def _headers_with_locks(
         self, method: str, url: str, caller_headers: "dict[str, str]"
@@ -999,10 +928,10 @@ class Session:
         """Prepare ``request``; with no credentials configured, none are looked up.
 
         ``requests`` would otherwise search ``~/.netrc`` for the host and
-        authenticate with whatever it finds (see :class:`_NoAuth`).
+        authenticate with whatever it finds (see :data:`~webdav.transport.guards.NO_AUTH`).
         """
         if request.auth is None and self.auth is None:
-            request.auth = _NO_AUTH
+            request.auth = NO_AUTH
         return self._transport.prepare_request(request)
 
     def _dispatch(self, method: str, url: str, **kwargs: Any) -> Response:
@@ -1100,40 +1029,13 @@ class Session:
 
     def _warn_if_insecure(self, url: str, kwargs: dict[str, Any]) -> None:
         """Warn (once per host) when credentials are about to go out over plain ``http``."""
-        parts = _split(url)
-        if (
-            parts.scheme.lower() != "http"
-            or not parts.hostname
-            or _is_loopback(parts.hostname)
-        ):
-            return
-        credential_headers = {"authorization", "proxy-authorization", "cookie"}
-        names = {k.lower() for k in (kwargs.get("headers") or {})} | {
-            k.lower() for k in self.headers
-        }
         per_call_auth = kwargs.get("auth")
-        if not (
-            (per_call_auth is not None and per_call_auth is not _NO_AUTH)
-            or self.auth
-            or parts.username is not None
-            or names & credential_headers
-        ):
-            return
-        # Host and port only: the netloc may carry the very password being warned about.
-        host = (
-            f"{parts.hostname.lower()}:{parts.port}"
-            if parts.port
-            else parts.hostname.lower()
-        )
-        with self._features_lock:
-            if host in self._insecure_warned:
-                return
-            self._insecure_warned.add(host)
-        warnings.warn(
-            f"sending credentials to {host} over plain http - anyone on the network "
-            "path can read them; use an https URL",
-            InsecureTransportWarning,
-            stacklevel=6,
+        self._cleartext.check(
+            url,
+            call_headers=kwargs.get("headers"),
+            session_headers=self.headers,
+            has_auth=(per_call_auth is not None and per_call_auth is not NO_AUTH)
+            or bool(self.auth),
         )
 
     # -- redirects ------------------------------------------------------
@@ -1746,7 +1648,7 @@ class Session:
             msg = "a scheme-relative Destination is not allowed (RFC 4918 sec. 10.3)"
             raise ClientError(msg)
         if is_url(destination):
-            parts = _split(destination)
+            parts = split_url(destination)
             if parts.query or parts.fragment or "\\" in destination:
                 # Not part of a resource's address here - and exactly where a
                 # parser that reads the URL differently would find another host.

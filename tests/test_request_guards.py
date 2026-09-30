@@ -2,14 +2,21 @@
 
 # ruff: noqa: SIM117
 
+import contextlib
+import copy
 import warnings
 from pathlib import Path
 
 import pytest
+import requests
 
 from tests.scripted_server import OK, always, redirect, scripted_server
 from webdav import FileSystem, RedirectPolicy, Session
-from webdav.exceptions import ClientError, TLSHardeningDisabledWarning
+from webdav.exceptions import (
+    ClientError,
+    InsecureTransportWarning,
+    TLSHardeningDisabledWarning,
+)
 
 # ---------------------------------------------------------------------------
 # Only full http(s) URLs are ever requested
@@ -21,6 +28,12 @@ from webdav.exceptions import ClientError, TLSHardeningDisabledWarning
 )
 def test_a_url_that_is_not_http_is_refused_with_our_own_error(url: str) -> None:
     with pytest.raises(ClientError, match="not a full http"):
+        Session(retry=False).get(url)
+
+
+@pytest.mark.parametrize("url", ["http://[bad", "http://[bad/x", "https://u:p@[bad"])
+def test_an_unparseable_url_is_our_own_error_not_a_bare_valueerror(url: str) -> None:
+    with pytest.raises(ClientError, match="not a valid URL"):
         Session(retry=False).get(url)
 
 
@@ -180,3 +193,27 @@ def test_the_warnings_of_a_disabled_certificate_check_point_at_the_caller() -> N
     ours = [w for w in caught if issubclass(w.category, TLSHardeningDisabledWarning)]
     assert len(ours) >= 4  # one for the session, and every request repeats it
     assert all(_is_this_file(w) for w in ours)
+
+
+def test_the_cleartext_credentials_warning_points_at_the_caller() -> None:
+    session = Session(auth=("user", "secret"), retry=False, timeout=(0.05, 0.05))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with contextlib.suppress(requests.RequestException):
+            session.get("http://192.0.2.1:9/x")
+        with contextlib.suppress(requests.RequestException):
+            session.put("http://192.0.2.2:9/x", data=b"x")
+    ours = [w for w in caught if issubclass(w.category, InsecureTransportWarning)]
+    assert len(ours) == 2  # once per host
+    assert all(_is_this_file(w) for w in ours)
+
+
+def test_a_copy_of_a_session_does_not_share_what_was_warned_about() -> None:
+    session = Session(auth=("user", "secret"), retry=False, timeout=(0.05, 0.05))
+    duplicate = copy.copy(session)
+    for each in (session, duplicate):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with contextlib.suppress(requests.RequestException):
+                each.get("http://192.0.2.1:9/x")
+        assert [w.category for w in caught] == [InsecureTransportWarning]
