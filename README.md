@@ -160,7 +160,7 @@ Build the docs yourself with `hatch run docs:build`.
 
 ```sh
 hatch run lint:check
-hatch run hatch-test:run
+hatch test
 ```
 
 See [CHANGELOG.md](CHANGELOG.md) for the release history. Licensed under the [MIT License](LICENSE).

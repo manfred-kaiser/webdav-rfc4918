@@ -71,6 +71,6 @@ $ /usr/sbin/httpd -f /tmp/apache-webdav-test/httpd.conf -k start
 $ WEBDAV_TEST_APACHE_URL=http://127.0.0.1:8765 \
   WEBDAV_TEST_APACHE_USER=testuser \
   WEBDAV_TEST_APACHE_PASSWORD=testpass123 \
-  hatch run hatch-test:run tests/test_apache_compliance.py -v
+  hatch test tests/test_apache_compliance.py -v
 $ /usr/sbin/httpd -f /tmp/apache-webdav-test/httpd.conf -k stop
 ```

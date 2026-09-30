@@ -525,8 +525,15 @@ def test_walk_members_are_what_ls_returns(server_url: str) -> None:
         fs.mkdir("/a/b")
         (path, dirs, files), *_ = fs.walk("/a")
         listed = fs.ls("/a")
-        assert (path, dirs + files) == ("/a", listed)
-        assert [r.as_dict() for r in dirs + files] == [r.as_dict() for r in listed]
+        # walk groups directories and files; the order ls lists them in is the
+        # server's (the order of its file system), so compare by name.
+        walked = sorted(dirs + files, key=str)
+        assert (path, walked) == ("/a", sorted(listed, key=str))
+        assert [r.as_dict() for r in walked] == [
+            r.as_dict() for r in sorted(listed, key=str)
+        ]
+        assert [str(d) for d in dirs] == ["a/b"]
+        assert [str(f) for f in files] == ["a/one.txt"]
 
 
 def test_walk_with_full_urls(server_url: str) -> None:

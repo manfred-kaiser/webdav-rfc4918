@@ -48,7 +48,7 @@ jobs:
         python -m pip install pip==26.2.1
         python -m pip install hatch==1.18.0
     - name: Run tests (against a real wsgidav server, see tests/server.py)
-      run: hatch run +py=${{ matrix.python-version }} hatch-test:run
+      run: hatch test -i py=${{ matrix.python-version }}
 
   # The declared lower bounds (pyproject.toml) actually work - and are ones without a
   # known vulnerability (they were raised past requests CVE-2024-35195/-47081 and
