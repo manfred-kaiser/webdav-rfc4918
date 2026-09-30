@@ -447,7 +447,11 @@ class FileSystem:
             # replace whatever the ``with`` body raised - nor hide that the
             # lock is still there: say so, and go on.
             _LOGGER.warning(
-                "could not release the lock on %s: %s", redact_url(url), exc
+                "could not release the lock on %s: %s - it stays on the server "
+                "until it times out, unless it is released with a session "
+                "configured for that server",
+                redact_url(url),
+                exc,
             )
             return
         status = response.status_code

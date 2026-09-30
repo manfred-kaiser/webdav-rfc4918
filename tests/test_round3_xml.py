@@ -211,6 +211,10 @@ def test_a_lock_is_not_released_elsewhere_when_the_base_url_changed_meanwhile(
     assert [r.method for r in rec_a.requests] == ["LOCK"]
     assert rec_b.requests == []
     assert "could not release the lock" in caplog.text
+    assert "until it times out" in caplog.text
+    assert (
+        "opaquelocktoken:abc" not in caplog.text
+    )  # the token is a capability: never logged
 
 
 def test_a_tag_url_is_always_a_valid_uri() -> None:

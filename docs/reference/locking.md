@@ -59,7 +59,12 @@ with fs.locked("Documents/report.docx", lock_timeout=60) as active_lock:
   header - at the URL that was locked. `204` is the normal answer; `403` means
   you may not remove it; `409` that the resource was not locked (or the URL is
   outside the lock). `FileSystem.locked()` logs what it could not release
-  instead of hiding it or replacing the error your block raised.
+  instead of hiding it or replacing the error your block raised. If the
+  session's `base_url` was pointed at another server inside the block, the
+  release is refused - it would send the session's current credentials to a
+  server it is no longer configured for - and the lock stays on the old server
+  until it times out; release it with a `Session` for that server:
+  `Session(old_base_url, auth=...).unlock(url, token)`.
 - **At the protocol level** (`Session.lock()` / `unlock()`) a granted lock is
   recorded in `session.locks` - under the URL you asked for, never under a
   `lockroot` the server names - so your writes carry its token; `unlock()` drops
