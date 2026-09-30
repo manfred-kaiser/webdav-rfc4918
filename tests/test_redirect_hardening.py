@@ -1,7 +1,7 @@
 """Redirect handling in ``webdav.Session``: what is followed, and what never leaves.
 
 Every test here pins a decision of the redirect handling in ``Session`` (see
-``webdav/redirects.py``), against
+``webdav/transport/redirects.py``), against
 servers that answer exactly what a hostile or merely odd server might.
 """
 
@@ -23,6 +23,17 @@ from webdav import (
 )
 from webdav.dav.locks import LockRegistry
 from webdav.exceptions import ClientError
+from webdav.response import Response
+from webdav.transport.redirects import (
+    NEVER_FORWARD,
+    Follow,
+    Refuse,
+    build_trust_check,
+    cross_origin_headers,
+    has_replayable_body,
+    plan_hop,
+    refuse,
+)
 from webdav.url_safety import effective_origin, redact_url
 
 # ---------------------------------------------------------------------------
@@ -274,55 +285,180 @@ def _redirect_response(url: str, location: str, status: int = 307) -> requests.R
     return response
 
 
+def _plan(
+    response: requests.Response,
+    method: str,
+    policy: RedirectPolicy,
+    *,
+    kwargs: "dict[str, object] | None" = None,
+    seen: "set[str] | None" = None,
+    trusted: "list[str] | None" = None,
+) -> "Follow | Refuse":
+    return plan_hop(
+        response,
+        method,
+        policy,
+        body_replayable=has_replayable_body(kwargs or {}),
+        seen=seen if seen is not None else set(),
+        is_trusted=build_trust_check(trusted),
+        get_location=Session().get_redirect_target,
+    )
+
+
 @pytest.mark.parametrize("policy", [RedirectPolicy.ALL, RedirectPolicy.SAME_ORIGIN])
 def test_https_to_http_downgrade_is_never_followed(policy: RedirectPolicy) -> None:
-    session = Session(redirect_policy=policy)
     response = _redirect_response("https://dav.example/f", "http://dav.example/f")
-    hop = session._plan_hop(response, "PUT", policy, {"data": b"x"}, set())
-    assert isinstance(hop, str)
-    assert "downgrade" in hop
+    hop = _plan(response, "PUT", policy, kwargs={"data": b"x"})
+    assert isinstance(hop, Refuse)
+    assert "downgrade" in hop.reason
 
 
 def test_https_to_http_downgrade_is_never_followed_even_whitelisted() -> None:
     """Trusting an origin with credentials is a different question from accepting
     that the same bytes cross the network in clear text - no policy allows it."""
-    session = Session(
-        redirect_policy=RedirectPolicy.WHITELIST,
-        trusted_redirect_origins=["http://gateway.example"],
-    )
     response = _redirect_response("https://dav.example/f", "http://gateway.example/f")
-    hop = session._plan_hop(
-        response, "PUT", RedirectPolicy.WHITELIST, {"data": b"x"}, set()
+    hop = _plan(
+        response,
+        "PUT",
+        RedirectPolicy.WHITELIST,
+        kwargs={"data": b"x"},
+        trusted=["http://gateway.example"],
     )
-    assert isinstance(hop, str)
-    assert "downgrade" in hop
+    assert isinstance(hop, Refuse)
+    assert "downgrade" in hop.reason
 
 
 def test_http_to_https_upgrade_on_the_same_host_is_a_different_origin() -> None:
     """Refused by default: the credentials already went out over plain http."""
-    session = Session()
     response = _redirect_response("http://dav.example/f", "https://dav.example/f", 301)
-    hop = session._plan_hop(response, "PROPFIND", RedirectPolicy.SAME_ORIGIN, {}, set())
-    assert isinstance(hop, str)
-    assert "another origin" in hop
+    hop = _plan(response, "PROPFIND", RedirectPolicy.SAME_ORIGIN)
+    assert isinstance(hop, Refuse)
+    assert "another origin" in hop.reason
 
 
 def test_a_different_port_is_a_different_origin() -> None:
-    session = Session()
     response = _redirect_response("https://dav.example/f", "https://dav.example:8443/f")
-    hop = session._plan_hop(response, "GET", RedirectPolicy.SAME_ORIGIN, {}, set())
-    assert isinstance(hop, str)
+    assert isinstance(_plan(response, "GET", RedirectPolicy.SAME_ORIGIN), Refuse)
 
 
 def test_an_explicit_default_port_is_the_same_origin() -> None:
-    session = Session()
     response = _redirect_response("https://dav.example/f", "https://DAV.example:443/g")
-    assert session._plan_hop(
-        response, "GET", RedirectPolicy.SAME_ORIGIN, {}, set()
-    ) == (
-        "https://DAV.example:443/g",
-        True,
+    assert _plan(response, "GET", RedirectPolicy.SAME_ORIGIN) == Follow(
+        "https://DAV.example:443/g", same_origin=True
     )
+
+
+def test_a_whitelisted_other_origin_is_followed_as_another_origin() -> None:
+    response = _redirect_response("https://dav.example/f", "https://store.example/f")
+    assert _plan(
+        response,
+        "PUT",
+        RedirectPolicy.WHITELIST,
+        kwargs={"data": b"x"},
+        trusted=["https://store.example"],
+    ) == Follow("https://store.example/f", same_origin=False)
+
+
+def test_a_redirect_is_judged_against_where_the_request_started() -> None:
+    response = _redirect_response("https://b.example/x", "https://b.example/y")
+    decision = plan_hop(
+        response,
+        "GET",
+        RedirectPolicy.SAME_ORIGIN,
+        body_replayable=True,
+        seen=set(),
+        origin_url="https://a.example/start",
+        is_trusted=build_trust_check(None),
+        get_location=Session().get_redirect_target,
+    )
+    assert isinstance(decision, Refuse)
+    assert "another origin" in decision.reason
+
+
+@pytest.mark.parametrize(
+    ("status", "method", "refused"),
+    [
+        (303, "PUT", True),
+        (303, "PROPFIND", True),
+        (303, "GET", False),
+        (303, "HEAD", False),
+        (307, "PUT", False),
+    ],
+)
+def test_a_303_is_only_followed_for_get_and_head(
+    status: int, method: str, refused: bool
+) -> None:
+    response = _redirect_response("https://dav.example/f", "/g", status)
+    hop = _plan(response, method, RedirectPolicy.SAME_ORIGIN, kwargs={"data": b"x"})
+    assert isinstance(hop, Refuse) is refused
+
+
+def test_a_redirect_without_a_location_or_with_a_broken_one_is_refused() -> None:
+    bare = requests.Response()
+    bare.status_code, bare.url = 301, "https://dav.example/f"
+    hop = _plan(bare, "GET", RedirectPolicy.SAME_ORIGIN)
+    assert hop == Refuse("the redirect has no Location")
+
+    def broken(_response: requests.Response) -> "str | None":
+        raise UnicodeError
+
+    assert plan_hop(
+        _redirect_response("https://dav.example/f", "/g"),
+        "GET",
+        RedirectPolicy.SAME_ORIGIN,
+        body_replayable=True,
+        seen=set(),
+        is_trusted=build_trust_check(None),
+        get_location=broken,
+    ) == Refuse("the Location header is malformed")
+
+
+def test_a_loop_and_a_body_that_cannot_be_replayed_are_refused() -> None:
+    response = _redirect_response("https://dav.example/f", "/g")
+    looped = _plan(
+        response, "GET", RedirectPolicy.SAME_ORIGIN, seen={"https://dav.example/g"}
+    )
+    assert isinstance(looped, Refuse)
+    assert "loop" in looped.reason
+    stream = _plan(
+        response, "PUT", RedirectPolicy.SAME_ORIGIN, kwargs={"data": iter([b"x"])}
+    )
+    assert isinstance(stream, Refuse)
+    assert "second time" in stream.reason
+
+
+# ---------------------------------------------------------------------------
+# What may go along to another origin
+# ---------------------------------------------------------------------------
+
+
+def test_only_representation_and_condition_headers_go_to_another_origin() -> None:
+    sent = cross_origin_headers(
+        {
+            "Content-Type": "text/plain",
+            "If-Match": '"e"',
+            "X-Api-Key": "SECRET",
+            "Authorization": "B",
+        }
+    )
+    assert sent == {"Content-Type": "text/plain", "If-Match": '"e"'}
+
+
+def test_an_extra_allowed_header_goes_along_in_any_case() -> None:
+    sent = cross_origin_headers({"X-Amz-Meta-Owner": "me"}, ["x-AMZ-meta-owner"])
+    assert sent == {"X-Amz-Meta-Owner": "me"}
+
+
+def test_what_is_never_forwarded_stays_home_even_when_named_as_allowed() -> None:
+    headers = {name: "v" for name in NEVER_FORWARD}
+    assert cross_origin_headers(headers, NEVER_FORWARD) == {}
+    assert cross_origin_headers(None) == {}
+
+
+def test_a_refusal_is_recorded_on_the_response() -> None:
+    response = Response.adopt(_redirect_response("https://dav.example/f", "/g"))
+    refuse(response, "because")
+    assert response.redirect_refusal == "because"
 
 
 # ---------------------------------------------------------------------------

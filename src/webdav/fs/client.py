@@ -26,6 +26,7 @@ For the module-level functions that mirror this class one-to-one
 # pylint: disable=redefined-builtin,protected-access
 import codecs
 import errno
+import logging
 import os
 import pathlib
 import secrets
@@ -76,7 +77,6 @@ from webdav.exceptions import (
 from webdav.methods import Method
 from webdav.resource import Resource
 from webdav.session import (
-    _LOGGER,
     Session,
 )
 from webdav.transport.streaming import IterStream, SizedIterator, check_chunk_size
@@ -91,6 +91,8 @@ if TYPE_CHECKING:
 
     from webdav.dav.multistatus import Response as ResourceResponse
     from webdav.dav.properties import DAVProperties, PropName
+
+_LOGGER = logging.getLogger("webdav")
 
 #: The modes :meth:`FileSystem.open` understands.
 _OPEN_MODES = frozenset({"r", "rt", "rb", "w", "wt", "wb", "x", "xt", "xb"})

@@ -12,13 +12,23 @@ followed (the URL checks behind it are in :mod:`webdav.url_safety`);
 :class:`webdav.session.Session` does the following itself.
 """
 
+import logging
+from dataclasses import dataclass
 from enum import Enum
+from http import HTTPStatus
 from typing import TYPE_CHECKING
+from urllib.parse import urljoin
 
-from webdav.url_safety import effective_origin
+from webdav.methods import Method
+from webdav.response import Response
+from webdav.url_safety import effective_origin, redact_url
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Mapping
+
+    import requests
+
+_LOGGER = logging.getLogger("webdav")
 
 #: How many redirects a single request will follow automatically before
 #: giving up - guards against a redirect loop between trusted origins.
@@ -131,3 +141,200 @@ def has_replayable_body(kwargs: "dict[str, object]") -> bool:
     return kwargs.get("files") is None and (
         data is None or isinstance(data, str | bytes)
     )
+
+
+@dataclass(frozen=True, slots=True)
+class Follow:
+    """A redirect that may be followed."""
+
+    #: The absolute URL it leads to.
+    target: str
+    #: Whether it stays on the origin the request started at. If not, nothing
+    #: that belongs to this session may go along (see :func:`cross_origin_headers`).
+    same_origin: bool
+
+
+@dataclass(frozen=True, slots=True)
+class Refuse:
+    """A redirect that may not be followed, and why."""
+
+    reason: str
+
+
+#: What the decision about one redirect is. Two distinct types rather than a
+#: flag or a string that means "no": a caller has to look at which one it got.
+Decision = Follow | Refuse
+
+
+def may_follow(
+    source: str,
+    target: str,
+    policy: RedirectPolicy,
+    *,
+    is_trusted: "Callable[[str], bool]",
+) -> Decision:
+    """Whether ``policy`` lets a request for ``source`` be redirected to ``target``.
+
+    Args:
+        source: The URL the request started at.
+        target: Where the redirect leads.
+        policy: What the session allows.
+        is_trusted: Whether a target on another origin is one the session
+            trusts (see :func:`build_trust_check`); asked under ``WHITELIST`` only.
+
+    """
+    source_origin = effective_origin(source)
+    target_origin = effective_origin(target)
+    if source_origin is None or target_origin is None:
+        return Refuse("the target is not one unambiguous http(s) URL")
+    if source_origin == target_origin:
+        return Follow(target, same_origin=True)
+    # Never step down from https to http on the strength of a policy
+    # alone - not even a whitelisted target, not even ALL: trusting a
+    # target with credentials is a different question from accepting
+    # that the same bytes cross the network in clear text, and there is
+    # no legitimate reason to want the latter. No browser allows it either.
+    if source_origin[0] == "https" and target_origin[0] == "http":
+        return Refuse("the redirect would downgrade https to http")
+    if policy == RedirectPolicy.ALL or (
+        policy == RedirectPolicy.WHITELIST and is_trusted(target)
+    ):
+        return Follow(target, same_origin=False)
+    return Refuse(
+        "the target is on another origin and redirect_policy does not allow that"
+    )
+
+
+def hop_target(
+    response: "requests.Response",
+    method: str,
+    *,
+    get_location: "Callable[[requests.Response], str | None]",
+) -> "str | Refuse":
+    """The absolute URL ``response`` redirects to - or why that is unusable.
+
+    Args:
+        response: A 3xx response.
+        method: The method of the request it answers.
+        get_location: Reads the ``Location`` header (decoded) off a response.
+
+    """
+    # RFC 9110 sec. 15.4.4: 303 means "retrieve the result with GET".
+    # Re-sending a write (or a PROPFIND) to it would be wrong, and
+    # silently turning it into a GET would report a write as done.
+    if response.status_code == HTTPStatus.SEE_OTHER and method not in (
+        Method.GET,
+        Method.HEAD,
+    ):
+        return Refuse("a 303 is only followed for GET/HEAD (RFC 9110 sec. 15.4.4)")
+    try:
+        location = get_location(response)
+        target = urljoin(response.url, location) if location else ""
+    except (UnicodeError, ValueError):
+        return Refuse("the Location header is malformed")
+    return target or Refuse("the redirect has no Location")
+
+
+def plan_hop(
+    response: "requests.Response",
+    method: str,
+    policy: RedirectPolicy,
+    *,
+    body_replayable: bool,
+    seen: "set[str]",
+    origin_url: "str | None" = None,
+    is_trusted: "Callable[[str], bool]",
+    get_location: "Callable[[requests.Response], str | None]",
+) -> Decision:
+    """Decide whether ``response``'s redirect may be followed.
+
+    Args:
+        response: A 3xx response.
+        method: The method of the request it answers.
+        policy: What the session allows.
+        body_replayable: The request body can be sent a second time
+            (see :func:`has_replayable_body`).
+        seen: URLs this request has already been at; one of them again is a loop.
+        origin_url: Where the request *started* (every hop is judged against
+            that, not against the page that redirected); ``response.url`` if not given.
+        is_trusted: See :func:`may_follow`.
+        get_location: See :func:`hop_target`.
+
+    """
+    target = hop_target(response, method, get_location=get_location)
+    if isinstance(target, Refuse):
+        return target
+    if target in seen:
+        return Refuse("the redirect leads back to a URL already visited (a loop)")
+    if not body_replayable:
+        return Refuse("the request body cannot be sent a second time")
+    return may_follow(origin_url or response.url, target, policy, is_trusted=is_trusted)
+
+
+def refuse(response: "requests.Response", reason: str) -> None:
+    """Record (and log) why a redirect was not followed."""
+    if isinstance(response, Response):
+        response.redirect_refusal = reason
+    _LOGGER.warning(
+        "not following the %s redirect from %s to %s: %s",
+        response.status_code,
+        redact_url(response.url),
+        redact_url(response.headers.get("Location", "")),
+        reason,
+    )
+
+
+#: Headers that are credentials or capabilities of *this* server and so
+#: must never be forwarded to another origin a redirect lands on: login
+#: credentials, session cookies, a lock token (``If``/``Lock-Token``, a
+#: bearer capability for one resource), and ``Destination`` (which names
+#: a resource on the *original* server).
+NEVER_FORWARD = frozenset(
+    {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "if",
+        "lock-token",
+        "destination",
+    }
+)
+
+#: The only per-call headers a cross-origin redirect keeps: the ones that
+#: describe the representation being sent or the conditions of the request.
+#: Everything else - a custom ``X-Api-Key``, a bearer token in a header the
+#: library cannot recognise as one - is dropped, because a whitelisted
+#: origin is trusted with the *body*, not with whatever else the caller
+#: attached. Extend with ``Session.redirect_forward_headers``.
+FORWARD_HEADERS = frozenset(
+    {
+        "content-type",
+        "content-encoding",
+        "content-language",
+        "content-md5",
+        "accept",
+        "accept-language",
+        "range",
+        "if-match",
+        "if-none-match",
+        "if-modified-since",
+        "if-unmodified-since",
+    }
+)
+
+
+def cross_origin_headers(
+    headers: "Mapping[str, str] | None", extra_allowed: "Iterable[str]" = ()
+) -> dict[str, str]:
+    """The per-call ``headers`` a request to *another* origin may carry.
+
+    Only those in :data:`FORWARD_HEADERS` and ``extra_allowed`` (names in any
+    case) - and never one in :data:`NEVER_FORWARD`, which wins over
+    ``extra_allowed``: naming ``authorization`` there does not send it.
+    """
+    allowed = (FORWARD_HEADERS | {n.lower() for n in extra_allowed}) - NEVER_FORWARD
+    return {
+        name: value
+        for name, value in (headers or {}).items()
+        if name.lower() in allowed
+    }

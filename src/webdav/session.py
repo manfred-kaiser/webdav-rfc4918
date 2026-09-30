@@ -26,7 +26,6 @@ automatic ``If`` headers for locks the session holds, retries of transient
 failures, and a cap on how large a response body may be declared.
 """
 
-import logging
 import threading
 import time
 from contextlib import suppress
@@ -85,8 +84,12 @@ from webdav.transport.redirects import (
     MAX_REDIRECT_BODY,
     MAX_REDIRECTS,
     RedirectPolicy,
+    Refuse,
     build_trust_check,
+    cross_origin_headers,
     has_replayable_body,
+    plan_hop,
+    refuse,
     validate_policy,
 )
 from webdav.transport.retry import retry as _retry
@@ -151,48 +154,6 @@ _REQUEST_PARAMS = (
     "json",
 )
 
-#: Headers that are credentials or capabilities of *this* server and so
-#: must never be forwarded to another origin a redirect lands on: login
-#: credentials, session cookies, a lock token (``If``/``Lock-Token``, a
-#: bearer capability for one resource), and ``Destination`` (which names
-#: a resource on the *original* server).
-_NEVER_FORWARD = frozenset(
-    {
-        "authorization",
-        "proxy-authorization",
-        "cookie",
-        "if",
-        "lock-token",
-        "destination",
-    }
-)
-
-#: The only per-call headers a cross-origin redirect keeps: the ones that
-#: describe the representation being sent or the conditions of the request.
-#: Everything else - a custom ``X-Api-Key``, a bearer token in a header the
-#: library cannot recognise as one - is dropped, because a whitelisted
-#: origin is trusted with the *body*, not with whatever else the caller
-#: attached. Extend with ``Session.redirect_forward_headers``.
-_FORWARD_HEADERS = frozenset(
-    {
-        "content-type",
-        "content-encoding",
-        "content-language",
-        "content-md5",
-        "accept",
-        "accept-language",
-        "range",
-        "if-match",
-        "if-none-match",
-        "if-modified-since",
-        "if-unmodified-since",
-    }
-)
-
-
-#: Marks a reason string (rather than a URL) returned by ``Session._hop_target``.
-_REASON_PREFIX = "\x00reason:"
-
 #: The WebDAV-specific attributes a pickled session keeps, beyond the plain
 #: ``requests`` ones in ``_TRANSPORT_PICKLED`` below; see
 #: ``Session._init_derived`` for what is rebuilt fresh instead.
@@ -230,21 +191,6 @@ _TRANSPORT_PICKLED = (
     "trust_env",
     "max_redirects",
 )
-
-_LOGGER = logging.getLogger("webdav")
-
-
-def _refuse(response: requests.Response, reason: str) -> None:
-    """Record (and log) why a redirect was not followed."""
-    if isinstance(response, Response):
-        response.redirect_refusal = reason
-    _LOGGER.warning(
-        "not following the %s redirect from %s to %s: %s",
-        response.status_code,
-        redact_url(response.url),
-        redact_url(response.headers.get("Location", "")),
-        reason,
-    )
 
 
 class Session:
@@ -897,7 +843,7 @@ class Session:
         # a DeadlineAdapter, whose build_response() constructs one directly.
         result = cast("Response", response)
         if allow_redirects and (result.is_redirect or result.is_permanent_redirect):
-            _refuse(
+            refuse(
                 result,
                 "send() sends one request and never follows redirects; use request()",
             )
@@ -945,16 +891,25 @@ class Session:
         hops = 0
         while response.is_redirect or response.is_permanent_redirect:
             if policy == RedirectPolicy.NEVER:
-                _refuse(response, "redirects are disabled for this request")
+                refuse(response, "redirects are disabled for this request")
                 break
             if hops >= MAX_REDIRECTS:
-                _refuse(response, f"more than {MAX_REDIRECTS} redirects in a row")
+                refuse(response, f"more than {MAX_REDIRECTS} redirects in a row")
                 break
-            hop = self._plan_hop(response, method, policy, kwargs, seen, origin_url)
-            if isinstance(hop, str):
-                _refuse(response, hop)
+            decision = plan_hop(
+                response,
+                method,
+                policy,
+                body_replayable=has_replayable_body(kwargs),
+                seen=seen,
+                origin_url=origin_url,
+                is_trusted=self._is_trusted_redirect_target,
+                get_location=self.get_redirect_target,
+            )
+            if isinstance(decision, Refuse):
+                refuse(response, decision.reason)
                 break
-            target, same_origin = hop
+            target, same_origin = decision.target, decision.same_origin
             previous = response
             # Keep the (small) body of a redirect for ``history``, but never
             # let it be an unbounded read.
@@ -984,81 +939,6 @@ class Session:
             response.history = [*previous.history, previous]
         return response
 
-    def _plan_hop(
-        self,
-        response: requests.Response,
-        method: str,
-        policy: RedirectPolicy,
-        kwargs: dict[str, Any],
-        seen: "set[str]",
-        origin_url: "str | None" = None,
-    ) -> "tuple[str, bool] | str":
-        """Decide whether ``response``'s redirect may be followed.
-
-        Returns ``(target URL, stays on the origin the request started at)``,
-        or - if it may not be followed - a sentence saying why.
-        """
-        target = self._hop_target(response, method)
-        if target.startswith(_REASON_PREFIX):
-            return target.removeprefix(_REASON_PREFIX)
-        if target in seen:
-            return "the redirect leads back to a URL already visited (a loop)"
-        if not has_replayable_body(kwargs):
-            return "the request body cannot be sent a second time"
-        same_origin = self._may_follow(origin_url or response.url, target, policy)
-        if isinstance(same_origin, str):
-            return same_origin
-        return target, same_origin
-
-    def _hop_target(self, response: requests.Response, method: str) -> str:
-        """The absolute URL ``response`` redirects to - or ``_REASON_PREFIX`` plus why it can't be used."""
-        # RFC 9110 sec. 15.4.4: 303 means "retrieve the result with GET".
-        # Re-sending a write (or a PROPFIND) to it would be wrong, and
-        # silently turning it into a GET would report a write as done.
-        if response.status_code == requests.codes.see_other and method not in (
-            Method.GET,
-            Method.HEAD,
-        ):
-            return (
-                _REASON_PREFIX
-                + "a 303 is only followed for GET/HEAD (RFC 9110 sec. 15.4.4)"
-            )
-        try:
-            location = self.get_redirect_target(response)
-            target = urljoin(response.url, location) if location else ""
-        except (UnicodeError, ValueError):
-            return _REASON_PREFIX + "the Location header is malformed"
-        return target or _REASON_PREFIX + "the redirect has no Location"
-
-    def _may_follow(
-        self, source: str, target: str, policy: RedirectPolicy
-    ) -> "bool | str":
-        """Whether ``policy`` lets a request for ``source`` be redirected to ``target``.
-
-        ``True``: yes, same origin. ``False``: yes, but to another origin
-        (so nothing of ours may go along). A string: no, and why.
-        """
-        source_origin = effective_origin(source)
-        target_origin = effective_origin(target)
-        if source_origin is None or target_origin is None:
-            return "the target is not one unambiguous http(s) URL"
-        if source_origin == target_origin:
-            return True
-        trusted = (
-            policy == RedirectPolicy.WHITELIST
-            and self._is_trusted_redirect_target(target)
-        )
-        # Never step down from https to http on the strength of a policy
-        # alone - not even a whitelisted target, not even ALL: trusting a
-        # target with credentials is a different question from accepting
-        # that the same bytes cross the network in clear text, and there is
-        # no legitimate reason to want the latter. No browser allows it either.
-        if source_origin[0] == "https" and target_origin[0] == "http":
-            return "the redirect would downgrade https to http"
-        if policy == RedirectPolicy.ALL or trusted:
-            return False
-        return "the target is on another origin and redirect_policy does not allow that"
-
     def _send_stripped(self, method: str, url: str, kwargs: dict[str, Any]) -> Response:
         """Send one request to another origin, carrying nothing that is ours.
 
@@ -1068,13 +948,12 @@ class Session:
         may include a custom API-key header this can't recognise as a
         credential), no client certificate, no hooks. Of the caller's own
         per-call headers only the representation/conditional ones in
-        :data:`_FORWARD_HEADERS` (plus ``redirect_forward_headers``) are kept.
+        :data:`~webdav.transport.redirects.FORWARD_HEADERS` (plus ``redirect_forward_headers``) are kept.
         """
-        allowed = (_FORWARD_HEADERS | self._redirect_forward_headers) - _NEVER_FORWARD
         headers = default_headers()
-        for name, value in (kwargs.get("headers") or {}).items():
-            if name.lower() in allowed:
-                headers[name] = value
+        headers.update(
+            cross_origin_headers(kwargs.get("headers"), self._redirect_forward_headers)
+        )
         prepared = requests.PreparedRequest()
         prepared.prepare(
             method=method,
