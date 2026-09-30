@@ -76,7 +76,7 @@ from webdav.exceptions import (
     InsecureTransportWarning,
     raise_for_status,
 )
-from webdav.methods import Method
+from webdav.methods import RETRYABLE_METHODS, WRITE_METHODS, XML_BODY_METHODS, Method
 from webdav.response import Response
 from webdav.transport.deadline import DeadlineAdapter, watch
 from webdav.transport.redirects import (
@@ -183,27 +183,6 @@ _FORWARD_HEADERS = frozenset(
         "if-modified-since",
         "if-unmodified-since",
     }
-)
-
-#: Methods that change something: only these carry the ``If`` header of a held
-#: lock. A read has no use for a lock token, and sending one anyway would
-#: only put a capability on the wire for nothing.
-_WRITE_METHODS = frozenset(
-    {
-        Method.PUT,
-        Method.DELETE,
-        Method.PROPPATCH,
-        Method.MKCOL,
-        Method.COPY,
-        Method.MOVE,
-        Method.POST,
-        Method.PATCH,
-    }
-)
-
-#: Methods whose request body is an XML document (RFC 4918).
-_XML_BODY_METHODS = frozenset(
-    {Method.PROPFIND, Method.PROPPATCH, Method.MKCOL, Method.LOCK}
 )
 
 
@@ -413,7 +392,7 @@ def _read_response(
 
 def _prepare_body(method: str, kwargs: dict[str, Any]) -> None:
     """Give a request body its final form: XML gets its type, text becomes UTF-8 bytes."""
-    if method in _XML_BODY_METHODS and kwargs.get("data") is not None:
+    if method in XML_BODY_METHODS and kwargs.get("data") is not None:
         _prepare_xml_body(kwargs)
     if isinstance(kwargs.get("data"), str):
         # Text is sent as UTF-8 whatever ``requests`` version is installed
@@ -593,16 +572,6 @@ def _configure_tls(
         options=tls,
         verify=verification_on,
     )
-
-
-#: Methods a transient failure (429, 5xx, a dropped connection) is retried
-#: for: the *safe* ones (RFC 9110 sec. 9.2.1) - ``PROPFIND`` is a read. Never a
-#: write: when the connection drops after the server acted, the retry finds
-#: the work already done and reports the opposite of what happened (MKCOL
-#: "exists", DELETE "not found", COPY "precondition failed"), and a lost
-#: LOCK reply would leave an orphaned lock. Whoever knows a particular
-#: write is safe to repeat can repeat it.
-_RETRY_METHODS = frozenset({Method.GET, Method.HEAD, Method.OPTIONS, Method.PROPFIND})
 
 
 class Session:
@@ -1083,7 +1052,7 @@ class Session:
         def attempt() -> Response:
             return self._fetch_once(method, url, policy, dict(kwargs))
 
-        if method not in _RETRY_METHODS or not has_replayable_body(kwargs):
+        if method not in RETRYABLE_METHODS or not has_replayable_body(kwargs):
             return attempt()
 
         def checked() -> Response:
@@ -1143,7 +1112,7 @@ class Session:
         self, method: str, url: str, caller_headers: "dict[str, str]"
     ) -> "dict[str, str]":
         """``caller_headers`` plus the ``If`` header of any held lock a write to ``url`` needs."""
-        if method not in _WRITE_METHODS or any(
+        if method not in WRITE_METHODS or any(
             k.lower() == "if" for k in caller_headers
         ):
             return dict(caller_headers)
