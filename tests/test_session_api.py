@@ -11,8 +11,8 @@ import pytest
 import requests
 
 import webdav
+from tests.credentials import AUTH
 from tests.scripted_server import NO_CONTENT_LENGTH, OK, Seen, always, scripted_server
-from tests.server import AUTH
 from webdav import (
     FileSystem,
     RedirectPolicy,

@@ -4,7 +4,7 @@ import io
 
 import pytest
 
-from tests.server import AUTH
+from tests.credentials import AUTH
 from webdav import (
     FileSystem,
     ResourceAlreadyExistsError,

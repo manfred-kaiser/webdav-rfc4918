@@ -13,8 +13,8 @@ import pytest
 import requests
 
 import webdav
+from tests.credentials import AUTH
 from tests.scripted_server import OK, redirect, scripted_server
-from tests.server import AUTH
 from webdav import FileSystem, RedirectPolicy, Session
 
 # ---------------------------------------------------------------------------

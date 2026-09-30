@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import requests
 
+from tests.credentials import AUTH
 from tests.scripted_server import (
     NO_CONTENT_LENGTH,
     OK,
@@ -15,7 +16,6 @@ from tests.scripted_server import (
     redirect,
     scripted_server,
 )
-from tests.server import AUTH
 from webdav import FileSystem, RedirectPolicy, Session, exceptions
 from webdav.exceptions import ClientError, MalformedResponseError, WebDAVError
 

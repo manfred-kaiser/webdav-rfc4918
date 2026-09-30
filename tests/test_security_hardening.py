@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 import requests
 
-from tests.mtls_server import Certificates
+from tests.certificates import Certificates
 from tests.scripted_server import OK, Seen, always, redirect, scripted_server
 from webdav import FileSystem, RedirectPolicy, Session, exceptions
 from webdav.dav.conditional import Condition, build_if_header_single
