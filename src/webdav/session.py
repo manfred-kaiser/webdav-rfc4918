@@ -31,6 +31,7 @@ import threading
 import time
 from contextlib import suppress
 from datetime import timedelta
+from http import HTTPStatus
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -948,9 +949,9 @@ class Session:
                 )
             response = dispatch_hook("response", request.hooks, response, **kwargs)  # type: ignore[no-untyped-call]
             extract_cookies_to_jar(self.cookies, request, response.raw)  # type: ignore[no-untyped-call]
-        # Already a webdav.Response: every adapter this library ever uses is
-        # a DeadlineAdapter, whose build_response() constructs one directly.
-        result = cast("Response", response)
+        # Nearly always a webdav.Response already (the adapters this library
+        # mounts build one); an adapter a caller mounted may not have.
+        result = Response.adopt(response)
         if allow_redirects and (result.is_redirect or result.is_permanent_redirect):
             refuse(
                 result,
@@ -1344,11 +1345,20 @@ class Session:
         )
 
     def unlock(self, url: str, token: str, **kwargs: Any) -> Response:
-        """Send an ``UNLOCK`` for ``token`` (RFC 4918 sec. 9.11)."""
-        check_token(token.strip("<>"))
-        return self._with_headers(
-            Method.UNLOCK, url, kwargs, {"Lock-Token": f"<{token.strip('<>')}>"}
+        """Send an ``UNLOCK`` for ``token`` (RFC 4918 sec. 9.11).
+
+        A token in :attr:`locks` is dropped from it once the server has
+        released the lock: a released token must not go on being attached to
+        the writes that follow.
+        """
+        token = token.strip("<>")
+        check_token(token)
+        response = self._with_headers(
+            Method.UNLOCK, url, kwargs, {"Lock-Token": f"<{token}>"}
         )
+        if HTTPStatus.OK <= response.status_code < HTTPStatus.MULTIPLE_CHOICES:
+            self.locks.discard_token(token)
+        return response
 
     def features_for(self, path: str = "") -> FeatureDetection:
         """Features of the server ``path`` is on (cached per origin once a probe has answered)."""

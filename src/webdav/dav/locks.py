@@ -349,6 +349,15 @@ class LockRegistry:
             if not entries:
                 del self._held[key]
 
+    def discard_token(self, token: str) -> None:
+        """Forget every held lock with this ``token``, wherever it was recorded; a no-op if there is none."""
+        with self._mutex:
+            for key in list(self._held):
+                entries = self._held[key]
+                entries[:] = [e for e in entries if e.token != token]
+                if not entries:
+                    del self._held[key]
+
     def replace_token(self, old: str, new: str) -> None:
         """Swap a token after a refresh (RFC 4918 sec. 9.10.2)."""
         check_token(new)

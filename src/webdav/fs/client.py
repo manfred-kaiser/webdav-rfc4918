@@ -413,12 +413,7 @@ class FileSystem:
     def _unlock_quietly(self, url: str, token: str) -> None:
         """Release the lock ``token`` on ``url``, never raising (and never hiding that it failed)."""
         try:
-            self._session.request(
-                Method.UNLOCK,
-                url,
-                raise_on_error=False,
-                headers={"Lock-Token": f"<{token}>"},
-            )
+            self._session.unlock(url, token, raise_on_error=False)
         except requests.RequestException as exc:
             # A failed UNLOCK (a dropped connection, a refusal) must not
             # replace whatever the ``with`` body raised - nor hide that the

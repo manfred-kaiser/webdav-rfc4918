@@ -17,6 +17,7 @@ import inspect
 import warnings
 import xml.etree.ElementTree as ET
 from http import HTTPStatus
+from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar
 
 import requests.exceptions
@@ -25,6 +26,7 @@ from webdav.url_safety import redact_url
 
 if TYPE_CHECKING:
     import types
+    from collections.abc import Mapping
 
     from requests import Response
 
@@ -215,12 +217,20 @@ def _phrase_for(status_code: int) -> str:
         return ""
 
 
-STATUS_CODE_EXCEPTIONS: dict[int, type[HTTPStatusError]] = {}
+_STATUS_CODE_EXCEPTIONS: dict[int, type[HTTPStatusError]] = {}
+
+#: Which exception a status code raises (see :func:`raise_for_status`) - also
+#: which ones a retry repeats (``retryable``). Read-only: a mapping that any
+#: import could add to would let it change what every session in the process
+#: raises and retries.
+STATUS_CODE_EXCEPTIONS: "Mapping[int, type[HTTPStatusError]]" = MappingProxyType(
+    _STATUS_CODE_EXCEPTIONS
+)
 
 
 def _register(exc_cls: type[HTTPStatusError]) -> type[HTTPStatusError]:
     assert exc_cls.default_status_code is not None
-    STATUS_CODE_EXCEPTIONS[exc_cls.default_status_code] = exc_cls
+    _STATUS_CODE_EXCEPTIONS[exc_cls.default_status_code] = exc_cls
     return exc_cls
 
 
