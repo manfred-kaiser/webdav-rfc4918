@@ -6,6 +6,7 @@ for as long as it likes. Everything here reads a streamed response under
 explicit limits instead.
 """
 
+import math
 import time
 from typing import TYPE_CHECKING
 
@@ -51,10 +52,45 @@ def _iter_body(response: requests.Response) -> "Iterator[bytes]":
         raise requests.exceptions.SSLError(exc, response=response) from exc
 
 
+def check_max_size(value: "int | None") -> "int | None":
+    """Return ``value`` if it is a usable size limit.
+
+    Raises:
+        ValueError: It is neither ``None`` (no limit) nor a positive integer.
+
+    """
+    if value is not None and (
+        isinstance(value, bool) or not isinstance(value, int) or value <= 0
+    ):
+        msg = f"max_response_size must be a positive integer or None, got {value!r}"
+        raise ValueError(msg)
+    return value
+
+
+def check_max_time(seconds: "float | None") -> "float | None":
+    """Return ``seconds`` if it is a usable time limit.
+
+    Raises:
+        ValueError: It is neither ``None`` (no limit) nor a positive, finite
+            number of seconds.
+
+    """
+    if seconds is not None and (
+        isinstance(seconds, bool)
+        or not isinstance(seconds, int | float)
+        or not math.isfinite(seconds)
+        or seconds <= 0
+    ):
+        msg = f"max_response_time must be a positive number of seconds or None, got {seconds!r}"
+        raise ValueError(msg)
+    return seconds
+
+
 def read_bounded(
     response: requests.Response,
+    *,
     max_size: "int | None",
-    max_time: "float | None" = None,
+    max_time: "float | None",
 ) -> None:
     """Read the body of a streamed ``response`` into memory - within a size and a time budget.
 
@@ -64,7 +100,8 @@ def read_bounded(
     is rejected without reading anything. ``max_time`` is a deadline for the
     *whole* body: the timeouts of ``requests`` apply to each single read, so
     on their own they let a server that drips one byte at a time keep a
-    request alive indefinitely. ``None`` for either means no limit.
+    request alive indefinitely. ``None`` for either means no limit - which
+    therefore has to be asked for: both limits are required arguments.
 
     Raises:
         ClientError: The body is larger than ``max_size`` or takes longer
@@ -121,6 +158,7 @@ def _set_body(response: requests.Response, body: bytes) -> None:
 def read_response(
     response: requests.Response,
     method: str,
+    *,
     max_size: "int | None",
     max_time: "float | None",
 ) -> None:
@@ -135,7 +173,7 @@ def read_response(
         _set_body(response, b"")
         response.close()
         return
-    read_bounded(response, max_size, max_time)
+    read_bounded(response, max_size=max_size, max_time=max_time)
 
 
-__all__ = ["read_bounded", "read_response"]
+__all__ = ["check_max_size", "check_max_time", "read_bounded", "read_response"]

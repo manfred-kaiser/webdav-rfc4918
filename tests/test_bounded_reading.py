@@ -19,6 +19,7 @@ from tests.scripted_server import (
 )
 from webdav import Session
 from webdav.exceptions import ClientError
+from webdav.session import DEFAULT_MAX_RESPONSE_SIZE
 from webdav.transport.body import _iter_body, read_bounded
 
 if TYPE_CHECKING:
@@ -35,7 +36,7 @@ def test_a_body_that_drips_past_the_time_budget_is_cut_off() -> None:
         prepared = session.prepare_request(requests.Request("GET", f"{url}/slow"))
         response = session.send(prepared, stream=True)
         with pytest.raises(ClientError, match="did not arrive within"):
-            read_bounded(response, None, 0.3)
+            read_bounded(response, max_size=None, max_time=0.3)
 
 
 # ---------------------------------------------------------------------------
@@ -128,3 +129,30 @@ def test_send_never_hands_back_a_body_cut_short_by_the_deadline_as_complete() ->
         prepared = session.prepare_request(requests.Request("GET", f"{url}/x"))
         with pytest.raises(ClientError, match="did not complete within"):
             session.send(prepared)
+
+
+def test_the_limits_of_read_bounded_have_to_be_asked_for_by_name() -> None:
+    response = requests.Response()
+    response.raw = io.BytesIO(b"abc")
+    with pytest.raises(TypeError):
+        read_bounded(response)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        read_bounded(response, 10, 10)  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("size", [0, -1, 1.5, True, "big"])
+def test_a_size_limit_that_is_no_positive_integer_is_refused_when_it_is_set(
+    size: object,
+) -> None:
+    session = Session()
+    with pytest.raises(ValueError, match="max_response_size"):
+        session.max_response_size = size  # type: ignore[assignment]
+    assert session.max_response_size == DEFAULT_MAX_RESPONSE_SIZE
+
+
+def test_the_size_limit_can_be_lifted_and_set_again() -> None:
+    session = Session()
+    session.max_response_size = None
+    assert session.max_response_size is None
+    session.max_response_size = 10
+    assert session.max_response_size == 10

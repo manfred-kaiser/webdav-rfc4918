@@ -29,7 +29,6 @@ failures, and a cap on how large a response body may be declared.
 import dataclasses
 import ipaddress
 import logging
-import math
 import os
 import pathlib
 import re
@@ -75,7 +74,12 @@ from webdav.exceptions import (
 )
 from webdav.methods import RETRYABLE_METHODS, WRITE_METHODS, XML_BODY_METHODS, Method
 from webdav.response import Response
-from webdav.transport.body import read_bounded, read_response
+from webdav.transport.body import (
+    check_max_size,
+    check_max_time,
+    read_bounded,
+    read_response,
+)
 from webdav.transport.deadline import DeadlineAdapter, watch
 from webdav.transport.redirects import (
     MAX_REDIRECT_BODY,
@@ -557,13 +561,6 @@ class Session:
         """
         validate_policy(redirect_policy, trusted_redirect_origins)
         _check_chunk_size(chunk_size)
-        if max_response_size is not None and (
-            isinstance(max_response_size, bool)
-            or not isinstance(max_response_size, int)
-            or max_response_size <= 0
-        ):
-            msg = f"max_response_size must be a positive integer or None, got {max_response_size!r}"
-            raise ValueError(msg)
         self._transport = requests.Session()
         self.auth = auth
         if headers:
@@ -571,6 +568,7 @@ class Session:
         self.base_url = base_url
         self.timeout = timeout
         self.redirect_policy = redirect_policy
+        self._max_response_size: int | None = None
         self.max_response_size = max_response_size
         self.raise_on_error = raise_on_error
         self.chunk_size = chunk_size
@@ -738,6 +736,23 @@ class Session:
         return self._transport.get_redirect_target(response)
 
     @property
+    def max_response_size(self) -> "int | None":
+        """Reject a non-streamed response whose body is larger than this many bytes (``None``: no limit).
+
+        Checked against the declared ``Content-Length`` and, for a body that
+        arrives in pieces, against the bytes actually read after decoding.
+
+        Raises:
+            ValueError: When set to anything but ``None`` or a positive integer.
+
+        """
+        return self._max_response_size
+
+    @max_response_size.setter
+    def max_response_size(self, size: "int | None") -> None:
+        self._max_response_size = check_max_size(size)
+
+    @property
     def max_response_time(self) -> "float | None":
         """Deadline in seconds for the whole body of a non-streamed response (``None``: none).
 
@@ -750,15 +765,7 @@ class Session:
 
     @max_response_time.setter
     def max_response_time(self, seconds: "float | None") -> None:
-        if seconds is not None and (
-            isinstance(seconds, bool)
-            or not isinstance(seconds, int | float)
-            or not math.isfinite(seconds)
-            or seconds <= 0
-        ):
-            msg = f"max_response_time must be a positive number of seconds or None, got {seconds!r}"
-            raise ValueError(msg)
-        self._max_response_time = seconds
+        self._max_response_time = check_max_time(seconds)
 
     @property
     def redirect_forward_headers(self) -> "frozenset[str]":
@@ -1032,7 +1039,9 @@ class Session:
                     response, method, policy, kwargs, kwargs_for
                 )
                 if not caller_streams:
-                    read_response(response, method, self.max_response_size, None)
+                    read_response(
+                        response, method, max_size=self.max_response_size, max_time=None
+                    )
             except BaseException:
                 if watcher is not None and watcher.expired.is_set():
                     raise _deadline_error(budget) from None
@@ -1134,7 +1143,9 @@ class Session:
                 if not kwargs["stream"] or (
                     hooks and response.status_code in (401, 407)
                 ):
-                    read_response(response, method, self.max_response_size, None)
+                    read_response(
+                        response, method, max_size=self.max_response_size, max_time=None
+                    )
                 response = dispatch_hook("response", request.hooks, response, **kwargs)  # type: ignore[no-untyped-call]
                 extract_cookies_to_jar(self.cookies, request, response.raw)  # type: ignore[no-untyped-call]
             except BaseException:
@@ -1236,7 +1247,11 @@ class Session:
             # Keep the (small) body of a redirect for ``history``, but never
             # let it be an unbounded read.
             with suppress(ClientError):
-                read_bounded(previous, MAX_REDIRECT_BODY, self.max_response_time)
+                read_bounded(
+                    previous,
+                    max_size=MAX_REDIRECT_BODY,
+                    max_time=self.max_response_time,
+                )
             previous.close()
             hops += 1
             seen.add(target)
