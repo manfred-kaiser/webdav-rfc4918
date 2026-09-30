@@ -24,14 +24,17 @@ notice one.
 import logging
 import os
 import ssl
-import warnings
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import requests
 
-from webdav.exceptions import TLSConfigError, TLSHardeningDisabledWarning
+from webdav.exceptions import (
+    TLSConfigError,
+    TLSHardeningDisabledWarning,
+    warn_at_caller,
+)
 from webdav.transport.deadline import DeadlineAdapter
 
 if TYPE_CHECKING:
@@ -53,9 +56,7 @@ _LOGGER = logging.getLogger("webdav")
 def warn_hardening_disabled(reason: str) -> None:
     """Raise :class:`TLSHardeningDisabledWarning` and log it - see the module docstring."""
     _LOGGER.warning("TLS hardening disabled: %s", reason)
-    warnings.warn(
-        f"TLS hardening disabled: {reason}", TLSHardeningDisabledWarning, stacklevel=3
-    )
+    warn_at_caller(f"TLS hardening disabled: {reason}", TLSHardeningDisabledWarning)
 
 
 @dataclass(frozen=True)

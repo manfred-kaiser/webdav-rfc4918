@@ -2,11 +2,14 @@
 
 # ruff: noqa: SIM117
 
+import warnings
+from pathlib import Path
+
 import pytest
 
 from tests.scripted_server import OK, always, redirect, scripted_server
 from webdav import FileSystem, RedirectPolicy, Session
-from webdav.exceptions import ClientError
+from webdav.exceptions import ClientError, TLSHardeningDisabledWarning
 
 # ---------------------------------------------------------------------------
 # Only full http(s) URLs are ever requested
@@ -155,3 +158,25 @@ def test_a_failed_feature_probe_gives_empty_features_and_is_not_remembered() -> 
     assert features.supports_ranges is False
     assert features.dav_compliances == set()
     assert session._features == {}
+
+
+# ---------------------------------------------------------------------------
+# Warnings point at the code that made the call
+# ---------------------------------------------------------------------------
+
+
+def _is_this_file(warning: warnings.WarningMessage) -> bool:
+    return Path(warning.filename).resolve() == Path(__file__).resolve()
+
+
+def test_the_warnings_of_a_disabled_certificate_check_point_at_the_caller() -> None:
+    with scripted_server(always(OK)) as (url, _rec):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            session = Session(verify=False, retry=False)
+            session.get(f"{url}/a")
+            session.put(f"{url}/b", data=b"x")
+            FileSystem.from_session(session).remove(f"{url}/c")
+    ours = [w for w in caught if issubclass(w.category, TLSHardeningDisabledWarning)]
+    assert len(ours) >= 4  # one for the session, and every request repeats it
+    assert all(_is_this_file(w) for w in ours)
