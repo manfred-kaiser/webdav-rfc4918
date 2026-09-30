@@ -24,6 +24,9 @@ if TYPE_CHECKING:
 #: giving up - guards against a redirect loop between trusted origins.
 MAX_REDIRECTS = 5
 
+#: How much of a redirect's own body is kept for ``response.history``.
+MAX_REDIRECT_BODY = 1024 * 1024
+
 
 class RedirectPolicy(Enum):
     """How a :class:`~webdav.session.Session` decides whether to follow a 3xx redirect.

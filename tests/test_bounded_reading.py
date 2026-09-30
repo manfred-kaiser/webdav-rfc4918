@@ -19,7 +19,7 @@ from tests.scripted_server import (
 )
 from webdav import Session
 from webdav.exceptions import ClientError
-from webdav.session import _iter_body, _read_bounded
+from webdav.transport.body import _iter_body, read_bounded
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -35,7 +35,7 @@ def test_a_body_that_drips_past_the_time_budget_is_cut_off() -> None:
         prepared = session.prepare_request(requests.Request("GET", f"{url}/slow"))
         response = session.send(prepared, stream=True)
         with pytest.raises(ClientError, match="did not arrive within"):
-            _read_bounded(response, None, 0.3)
+            read_bounded(response, None, 0.3)
 
 
 # ---------------------------------------------------------------------------

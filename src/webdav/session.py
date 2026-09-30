@@ -49,8 +49,6 @@ from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 import requests
 import requests.adapters
 import requests.auth
-import urllib3.exceptions
-import urllib3.response
 from requests.cookies import extract_cookies_to_jar
 from requests.hooks import dispatch_hook
 from requests.structures import CaseInsensitiveDict
@@ -77,9 +75,10 @@ from webdav.exceptions import (
 )
 from webdav.methods import RETRYABLE_METHODS, WRITE_METHODS, XML_BODY_METHODS, Method
 from webdav.response import Response
+from webdav.transport.body import read_bounded, read_response
 from webdav.transport.deadline import DeadlineAdapter, watch
-from webdav.transport.parse_utils import parse_uint
 from webdav.transport.redirects import (
+    MAX_REDIRECT_BODY,
     MAX_REDIRECTS,
     RedirectPolicy,
     build_trust_check,
@@ -93,7 +92,7 @@ from webdav.url_safety import display_url, effective_origin, is_url, redact_url
 
 if TYPE_CHECKING:
     import urllib.parse
-    from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping
+    from collections.abc import Callable, Iterable, Mapping, MutableMapping
     from typing import Self
     from xml.etree.ElementTree import Element
 
@@ -252,12 +251,6 @@ def _check_depth(depth: "int | str", allowed: "Iterable[str]", method: str) -> s
     return value
 
 
-#: How much of a redirect's own body is kept for ``response.history``.
-_MAX_REDIRECT_BODY = 1024 * 1024
-
-#: Read granularity of :func:`_read_bounded`.
-_READ_CHUNK = 64 * 1024
-
 _LOOPBACK_NAMES = frozenset({"localhost", "localhost.localdomain"})
 
 _LOGGER = logging.getLogger("webdav")
@@ -274,120 +267,6 @@ def _refuse(response: requests.Response, reason: str) -> None:
         redact_url(response.headers.get("Location", "")),
         reason,
     )
-
-
-def _iter_body(response: requests.Response) -> "Iterator[bytes]":
-    """Yield a streamed body in whatever pieces arrive, without waiting to fill a buffer.
-
-    ``iter_content(n)`` blocks until ``n`` bytes have arrived, so a server
-    sending one byte just inside the read timeout keeps it waiting for days;
-    ``read1`` hands back what is there, and gives the caller a chance to look
-    at the clock after every read.
-    """
-    raw = response.raw
-    read1 = getattr(raw, "read1", None)
-    if not isinstance(raw, urllib3.response.BaseHTTPResponse) or read1 is None:
-        # A body that is not urllib3's (a custom adapter's, a test double).
-        yield from response.iter_content(chunk_size=_READ_CHUNK)
-        return
-    try:
-        while chunk := read1(_READ_CHUNK, decode_content=True):
-            yield chunk
-    except urllib3.exceptions.ProtocolError as exc:
-        raise requests.exceptions.ChunkedEncodingError(exc, response=response) from exc
-    except urllib3.exceptions.DecodeError as exc:
-        raise requests.exceptions.ContentDecodingError(exc) from exc
-    except urllib3.exceptions.ReadTimeoutError as exc:
-        raise requests.exceptions.ConnectionError(exc, response=response) from exc
-    except urllib3.exceptions.SSLError as exc:
-        raise requests.exceptions.SSLError(exc, response=response) from exc
-
-
-def _read_bounded(
-    response: requests.Response,
-    max_size: "int | None",
-    max_time: "float | None" = None,
-) -> None:
-    """Read the body of a streamed ``response`` into memory - within a size and a time budget.
-
-    Counts the bytes *after* decoding (``Content-Encoding``), so a small
-    gzip body that inflates to gigabytes is stopped as surely as a chunked
-    response that never ends; a declared ``Content-Length`` over the cap
-    is rejected without reading anything. ``max_time`` is a deadline for the
-    *whole* body: the timeouts of ``requests`` apply to each single read, so
-    on their own they let a server that drips one byte at a time keep a
-    request alive indefinitely. ``None`` for either means no limit.
-
-    Raises:
-        ClientError: The body is larger than ``max_size`` or takes longer
-            than ``max_time`` seconds.
-
-    """
-    if max_size is None and max_time is None:
-        _ = response.content
-        return
-    codings = [
-        c for c in response.headers.get("Content-Encoding", "").split(",") if c.strip()
-    ]
-    if len(codings) > 1:
-        # ``gzip, gzip, gzip``: each layer multiplies what a few kilobytes
-        # inflate to, and (before urllib3 2.6) is undone in one piece before
-        # the size cap can look at it. No legitimate server stacks codings.
-        response.close()
-        msg = f"refusing a response with stacked content-codings ({', '.join(c.strip() for c in codings)})"
-        raise ClientError(msg)
-    declared = parse_uint(response.headers.get("Content-Length"))
-    if max_size is not None and declared is not None and declared > max_size:
-        response.close()
-        msg = (
-            f"response declared Content-Length {declared} bytes, "
-            f"exceeding the configured limit of {max_size} bytes"
-        )
-        raise ClientError(msg)
-    deadline = None if max_time is None else time.monotonic() + max_time
-    chunks: list[bytes] = []
-    total = 0
-    for chunk in _iter_body(response):
-        total += len(chunk)
-        if max_size is not None and total > max_size:
-            response.close()
-            msg = f"response body exceeds the configured limit of {max_size} bytes"
-            raise ClientError(msg)
-        if deadline is not None and time.monotonic() > deadline:
-            response.close()
-            msg = f"response body did not arrive within the configured time of {max_time} seconds"
-            raise ClientError(msg)
-        chunks.append(chunk)
-    # What ``response.content`` would have stored, minus the unbounded read.
-    body = b"".join(chunks)
-    _set_body(response, body)
-
-
-def _set_body(response: requests.Response, body: bytes) -> None:
-    """Store ``body`` as what ``response.content`` returns (requests has no public way)."""
-    # pylint: disable=protected-access
-    response._content = body  # noqa: SLF001
-    response._content_consumed = True  # type: ignore[attr-defined]  # noqa: SLF001
-
-
-def _read_response(
-    response: requests.Response,
-    method: str,
-    max_size: "int | None",
-    max_time: "float | None",
-) -> None:
-    """Read the body of a streamed ``response`` - if it has one - within the size and time budget.
-
-    A ``HEAD`` reply, a ``1xx``/``204``/``304`` carries no body whatever its
-    ``Content-Length`` says (the length of what a ``GET`` would have sent):
-    nothing is read, and that length is no reason to refuse it.
-    """
-    status = response.status_code
-    if method.upper() == Method.HEAD or status in (204, 304) or 100 <= status < 200:
-        _set_body(response, b"")
-        response.close()
-        return
-    _read_bounded(response, max_size, max_time)
 
 
 def _prepare_body(method: str, kwargs: dict[str, Any]) -> None:
@@ -1153,7 +1032,7 @@ class Session:
                     response, method, policy, kwargs, kwargs_for
                 )
                 if not caller_streams:
-                    _read_response(response, method, self.max_response_size, None)
+                    read_response(response, method, self.max_response_size, None)
             except BaseException:
                 if watcher is not None and watcher.expired.is_set():
                     raise _deadline_error(budget) from None
@@ -1255,7 +1134,7 @@ class Session:
                 if not kwargs["stream"] or (
                     hooks and response.status_code in (401, 407)
                 ):
-                    _read_response(response, method, self.max_response_size, None)
+                    read_response(response, method, self.max_response_size, None)
                 response = dispatch_hook("response", request.hooks, response, **kwargs)  # type: ignore[no-untyped-call]
                 extract_cookies_to_jar(self.cookies, request, response.raw)  # type: ignore[no-untyped-call]
             except BaseException:
@@ -1357,7 +1236,7 @@ class Session:
             # Keep the (small) body of a redirect for ``history``, but never
             # let it be an unbounded read.
             with suppress(ClientError):
-                _read_bounded(previous, _MAX_REDIRECT_BODY, self.max_response_time)
+                read_bounded(previous, MAX_REDIRECT_BODY, self.max_response_time)
             previous.close()
             hops += 1
             seen.add(target)
