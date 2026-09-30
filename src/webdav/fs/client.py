@@ -274,7 +274,13 @@ class FileSystem:
     # -- properties/compliance -------------------------------------------
 
     def dav_compliance(self, path: str = "") -> set[str]:
-        """Return the ``DAV:`` compliance classes the server advertises."""
+        """Return the ``DAV:`` compliance classes the server advertises.
+
+        Asks the server every time (an ``OPTIONS`` request) and raises if it
+        cannot be reached; :meth:`Session.features_for
+        <webdav.session.Session.features_for>` is the cached variant, for
+        which a server that does not answer is "nothing known".
+        """
         response = self._session.request(
             Method.OPTIONS, self._remote.locate(path).url, raise_on_error=False
         )

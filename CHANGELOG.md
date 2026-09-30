@@ -31,6 +31,8 @@ The first release.
     `set_props`, `mkdir`, `remove`, `open` (read and write), `walk`, `upload_file`, `download_file`,
     `upload_fileobj`, `download_fileobj`, `locked`, `refresh_lock`, ...) return plain values and raise
     a `WebDAVError` on failure;
+  - `request()` (and so every verb) takes `raise_on_error=` for a single call; `propfind(prop_name=True)`
+    asks for property names only (RFC 4918 §9.1);
   - `Session(base_url)` takes paths, without one every call takes a full URL. Paths are plain names,
     percent-encoded exactly once, and what `ls` returns can be passed straight back.
 - Class 2 locking (`FileSystem.locked()`, `refresh_lock()`): a held lock's token is attached to writes
@@ -70,10 +72,17 @@ they were fixed):
   treatment. `REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` never replace the configured CA, and a private CA
   given as `ca_files` is not widened by the public ones; `key_password` is hidden from `repr`.
 - **Credentials in a URL are refused** (`https://user:pw@host/`): pass `auth=`. A pickled `Session`
-  carries its credentials in clear - treat it like a password file.
+  carries its credentials in clear - treat it like a password file. (Pickling and copying are supported
+  because `fsspec` and `multiprocessing` need them; a callable you pass has to be picklable too.)
+- **A mistake fails loudly instead of doing the opposite**: an unknown keyword argument (`allow_redirect=False`,
+  `verfiy=True`, `timout=5`) is a `TypeError` like in `requests`, not silently ignored; every limit and
+  setting (`timeout`, `base_url`, `redirect_policy`, `max_response_size`, `max_response_time`,
+  `max_redirects`, `chunk_size`, `retry`) is checked when it is set, in the constructor and later;
+  `RedirectPolicy.WHITELIST` needs trusted origins also when set later or for one call.
 - **Credentials do not leak**: not into exception messages, warnings or logs (URL userinfo and the query
   of a signed URL are redacted); an `InsecureTransportWarning` names host and port only.
-- **Limits on what a server can make the client do**: `max_response_size` (after decompression; stacked
+- **Limits on what a server can make the client do**: `max_redirects` (5 in a row), `Retry-After` is waited
+  for but never longer than 30 s, `max_response_size` (after decompression; stacked
   content-codings are refused), `max_response_time` (a deadline for the whole request, headers, trailers and interim responses
   included; streamed bodies are bounded per read, not in size), 200 000
   `<response>` elements per multistatus, hrefs of at most 8192 characters, `walk` limits, a positive
@@ -82,7 +91,8 @@ they were fixed):
   declarations, dates, lock tokens (a token that could close its `<...>` in an `If` header is refused),
   hrefs (an encoded `/` is refused; a listing entry outside the listed collection is refused; an
   unparseable or duplicate `<response>` can no longer hide a failure), 416 handling in resumed
-  downloads. Nothing escapes as a bare `ValueError`.
+  downloads. Nothing escapes as a bare `ValueError`. `Session.unlock()` drops a released token from
+  `session.locks`; the table of status-code exceptions (what a retry repeats) is read-only.
 - **The local side**: `download_file` writes a temporary file and moves it into place when complete
   (`overwrite=False` by default, atomic no-clobber, never through a symlink, permissions of a replaced
   file kept, no process-wide `umask` change); `dav rm` refuses a non-empty collection

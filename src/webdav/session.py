@@ -1425,7 +1425,14 @@ class Session:
         return response
 
     def features_for(self, path: str = "") -> FeatureDetection:
-        """Features of the server ``path`` is on (cached per origin once a probe has answered)."""
+        """Features of the server ``path`` is on (cached per origin once a probe has answered).
+
+        A server that cannot be reached - or that does not answer ``OPTIONS`` -
+        is "nothing known" (``FeatureDetection()``), not an error, and is not
+        remembered; a ``path`` that cannot be requested at all *is* an error.
+        :meth:`FileSystem.dav_compliance <webdav.fs.client.FileSystem.dav_compliance>`
+        asks afresh and raises instead.
+        """
         url = self.resolve_url(path)
         require_full_url(url, has_base_url=self.base_url is not None)
         key: Origin | str = effective_origin(url) or url
