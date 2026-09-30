@@ -13,7 +13,14 @@ import requests
 import webdav
 from tests.scripted_server import NO_CONTENT_LENGTH, OK, Seen, always, scripted_server
 from tests.server import AUTH
-from webdav import RedirectPolicy, Resource, ResourceNotFoundError, Response, Session
+from webdav import (
+    FileSystem,
+    RedirectPolicy,
+    Resource,
+    ResourceNotFoundError,
+    Response,
+    Session,
+)
 from webdav.exceptions import InsecureTransportWarning, MultiStatusError
 
 
@@ -28,20 +35,23 @@ def test_module_level_verbs_roundtrip(server_url: str) -> None:
         webdav.head(f"{server_url}/docs/a.txt", **auth).headers["Content-Length"] == "5"
     )
 
-    moved = webdav.move(
+    # `move`/`copy` have no module-level *verb* one-off (webdav.move/.copy are
+    # the raising file-system operations instead, see webdav.fs) - a Session
+    # is what gives you the raw Response for these two.
+    verbs = Session(**auth)
+    moved = verbs.move(
         f"{server_url}/docs/a.txt",
         destination=f"{server_url}/docs/b.txt",
         overwrite=False,
-        **auth,
     )
     assert moved.status_code == 201
-    copied = webdav.copy(
+    copied = verbs.copy(
         f"{server_url}/docs/b.txt",
         destination=f"{server_url}/docs/c.txt",
         depth=0,
-        **auth,
     )
     assert copied.status_code == 201
+    verbs.close()
 
     listing = webdav.propfind(f"{server_url}/docs/", depth=1, **auth)
     assert listing.status_code == 207
@@ -300,27 +310,33 @@ def test_exists_and_info_send_depth_zero() -> None:
         b"</d:response></d:multistatus>"
     )
     with scripted_server(always((207, {}, body))) as (url, rec):
-        session = Session()
-        assert session.exists(f"{url}/dir/")
-        session.info(f"{url}/dir/")
-        session.get_props(f"{url}/dir/")
+        fs = FileSystem()
+        assert fs.exists(f"{url}/dir/")
+        fs.info(f"{url}/dir/")
+        fs.get_props(f"{url}/dir/")
 
     assert [r.headers["depth"] for r in rec.requests] == ["0", "0", "0"]
 
 
 def test_operations_take_full_urls_without_a_base_url(server_url: str) -> None:
-    with Session(auth=AUTH) as session:
-        session.mkdir(f"{server_url}/docs")
-        assert session.isdir(f"{server_url}/docs")
-        assert session.ls(f"{server_url}/docs") == []
+    with FileSystem(auth=AUTH) as fs:
+        fs.mkdir(f"{server_url}/docs")
+        assert fs.isdir(f"{server_url}/docs")
+        assert fs.ls(f"{server_url}/docs") == []
         with pytest.raises(webdav.ClientError, match="full http"):
-            session.exists("docs")
+            fs.exists("docs")
 
 
 def test_base_url_and_full_url_give_the_same_names(server_url: str) -> None:
-    with Session(auth=AUTH) as plain, Session(server_url, auth=AUTH) as based:
+    with (
+        Session(auth=AUTH) as plain_session,
+        Session(server_url, auth=AUTH) as based_session,
+    ):
+        plain, based = FileSystem.from_session(plain_session), FileSystem.from_session(
+            based_session
+        )
         plain.mkdir(f"{server_url}/docs")
-        plain.put(f"{server_url}/docs/a.txt", data=b"x")
+        plain_session.put(f"{server_url}/docs/a.txt", data=b"x")
         assert plain.ls(f"{server_url}/docs") == ["docs/a.txt"]
         assert based.ls("docs") == ["docs/a.txt"]
         assert based.ls(f"{server_url}/docs") == ["docs/a.txt"]
@@ -474,19 +490,20 @@ def test_a_session_survives_pickling_and_copying() -> None:
 def test_a_pickled_session_still_works(server_url: str) -> None:
     clone = pickle.loads(pickle.dumps(Session(server_url, auth=AUTH)))  # noqa: S301
     assert clone.put("/a.txt", b"x").status_code == 201
-    assert clone.ls("/") == ["a.txt"]
+    assert FileSystem.from_session(clone).ls("/") == ["a.txt"]
 
 
 def test_walk(server_url: str) -> None:
     with Session(server_url, auth=AUTH) as session:
-        session.mkdir("a")
-        session.mkdir("a/b")
-        session.mkdir("c")
+        fs = FileSystem.from_session(session)
+        fs.mkdir("a")
+        fs.mkdir("a/b")
+        fs.mkdir("c")
         session.put("/top.txt", b"x")
         session.put("/a/one.txt", b"x")
         session.put("/a/b/two.txt", b"x")
 
-        walked = {p: (sorted(d), sorted(f)) for p, d, f in session.walk("/")}
+        walked = {p: (sorted(d), sorted(f)) for p, d, f in fs.walk("/")}
         assert walked == {
             "/": (["a", "c"], ["top.txt"]),
             "a": (["a/b"], ["a/one.txt"]),
@@ -494,10 +511,10 @@ def test_walk(server_url: str) -> None:
             "c": ([], []),
         }
 
-        assert [p for p, _d, _f in session.walk("/", max_depth=0)] == ["/"]
+        assert [p for p, _d, _f in fs.walk("/", max_depth=0)] == ["/"]
 
         pruned = []
-        for path, dirs, _files in session.walk("/"):
+        for path, dirs, _files in fs.walk("/"):
             pruned.append(path)
             dirs[:] = [d for d in dirs if d != "a"]
             assert all(isinstance(d, Resource) for d in dirs)
@@ -506,47 +523,50 @@ def test_walk(server_url: str) -> None:
 
 def test_walk_members_are_what_ls_returns(server_url: str) -> None:
     with Session(server_url, auth=AUTH) as session:
-        session.mkdir("/a")
+        fs = FileSystem.from_session(session)
+        fs.mkdir("/a")
         session.put("/a/one.txt", b"x")
-        session.mkdir("/a/b")
-        (path, dirs, files), *_ = session.walk("/a")
-        listed = session.ls("/a")
+        fs.mkdir("/a/b")
+        (path, dirs, files), *_ = fs.walk("/a")
+        listed = fs.ls("/a")
         assert (path, dirs + files) == ("/a", listed)
         assert [r.as_dict() for r in dirs + files] == [r.as_dict() for r in listed]
 
 
 def test_walk_with_full_urls(server_url: str) -> None:
     with Session(auth=AUTH) as session:
-        session.mkdir(f"{server_url}/a")
+        fs = FileSystem.from_session(session)
+        fs.mkdir(f"{server_url}/a")
         session.put(f"{server_url}/a/one.txt", b"x")
-        paths = [p for p, _d, _f in session.walk(server_url)]
+        paths = [p for p, _d, _f in fs.walk(server_url)]
         assert paths == [server_url, f"{server_url}/a"]
 
 
 def test_open_for_writing(server_url: str) -> None:
     with Session(server_url, auth=AUTH) as session:
-        with session.open("t.txt", "w") as fobj:
+        fs = FileSystem.from_session(session)
+        with fs.open("t.txt", "w") as fobj:
             fobj.write("héllo ")
             fobj.write("wörld")
-        with session.open("b.bin", "wb") as bobj:
+        with fs.open("b.bin", "wb") as bobj:
             bobj.write(b"\x00\x01")
         assert session.get("/t.txt").content == "héllo wörld".encode()
         assert session.get("/b.bin").content == b"\x00\x01"
 
         with (
             pytest.raises(webdav.ResourceAlreadyExistsError),
-            session.open("t.txt", "x") as fobj,
+            fs.open("t.txt", "x") as fobj,
         ):
             fobj.write("nope")
         assert session.get("/t.txt").content == "héllo wörld".encode()
 
-        with session.open("new.txt", "xb") as bobj:
+        with fs.open("new.txt", "xb") as bobj:
             bobj.write(b"fresh")
         assert session.get("/new.txt").content == b"fresh"
 
 
-def _write_then_fail(session: Session) -> None:
-    with session.open("keep.txt", "wb") as bobj:
+def _write_then_fail(fs: FileSystem) -> None:
+    with fs.open("keep.txt", "wb") as bobj:
         bobj.write(b"half")
         raise RuntimeError
 
@@ -555,28 +575,29 @@ def test_a_failed_write_does_not_replace_the_resource(server_url: str) -> None:
     with Session(server_url, auth=AUTH) as session:
         session.put("/keep.txt", b"original")
         with pytest.raises(RuntimeError):
-            _write_then_fail(session)
+            _write_then_fail(FileSystem.from_session(session))
         assert session.get("/keep.txt").content == b"original"
 
 
 def test_open_rejects_unknown_modes() -> None:
-    session = Session("http://x.invalid")
+    fs = FileSystem("http://x.invalid")
     with (
         pytest.raises(ValueError, match="unsupported mode"),
-        session.open("a", "rw"),  # type: ignore[call-overload]
+        fs.open("a", "rw"),  # type: ignore[call-overload]
     ):
         pass
 
 
 def test_ls_entries_have_the_documented_keys(server_url: str) -> None:
     with Session(server_url, auth=AUTH) as session:
+        fs = FileSystem.from_session(session)
         session.put("/a.txt", b"12345")
-        (entry,) = session.ls("/")
+        (entry,) = fs.ls("/")
         assert entry == "a.txt"
         assert entry.name == "a.txt"
         assert entry.size == 5
         assert entry.is_dir is False
-        assert session.info("a.txt").as_dict() == entry.as_dict()
+        assert fs.info("a.txt").as_dict() == entry.as_dict()
 
 
 def test_credentials_over_plain_http_to_a_remote_host_warn_once() -> None:
@@ -679,21 +700,21 @@ def test_a_lock_is_finite_unless_you_ask_for_infinite() -> None:
 
 def test_secondary_parameters_must_be_named() -> None:
     """A bare ``True``/``False`` (or a number) in a call says nothing: name it."""
-    session = Session("http://unused.invalid")
+    fs = FileSystem("http://unused.invalid")
     with pytest.raises(TypeError):
-        session.ls("/", False)  # type: ignore[call-arg]
+        fs.ls("/", False)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
-        session.upload_file("a", "b", True)  # type: ignore[misc]
+        fs.upload_file("a", "b", True)  # type: ignore[misc]
     with pytest.raises(TypeError):
-        session.upload_fileobj(None, "b", True)  # type: ignore[arg-type,misc]
+        fs.upload_fileobj(None, "b", True)  # type: ignore[arg-type,misc]
     with pytest.raises(TypeError):
-        session.locked("/a", "shared")  # type: ignore[misc]
+        fs.locked("/a", "shared")  # type: ignore[misc]
     with pytest.raises(TypeError):
-        session.refresh_lock("/a", "tok", 30)  # type: ignore[misc]
+        fs.refresh_lock("/a", "tok", 30)  # type: ignore[misc]
     with pytest.raises(TypeError):
-        list(session.walk("/", 1))  # type: ignore[misc]
+        list(fs.walk("/", 1))  # type: ignore[misc]
     with pytest.raises(TypeError):
-        session.get_props("/a", None, True)  # type: ignore[misc]
+        fs.get_props("/a", None, True)  # type: ignore[misc]
 
 
 def test_certificate_verification_cannot_be_switched_off_by_the_constructor() -> None:

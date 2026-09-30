@@ -1,23 +1,23 @@
-# pylint: disable=too-many-lines  # one Session class is the single entry point; see pyproject
-"""A :class:`requests.Session` that speaks WebDAV.
+# pylint: disable=too-many-lines  # Session is a requests.Session subclass with every verb on it; see pyproject
+"""A :class:`requests.Session` that speaks WebDAV verbs directly.
 
 Everything ``requests.Session`` does keeps working exactly as documented
 in ``requests`` itself (auth, adapters, hooks, cookies, connection pooling,
 ``timeout=``, ``verify=``, ``cert=``, ``stream=``, ...); this subclass adds
-what WebDAV needs on top, in two groups that follow one naming rule:
+the WebDAV verbs on top - ``get``, ``put``, ``delete``, ``head``, ``options``,
+``propfind``, ``proppatch``, ``mkcol``, ``copy``, ``move``, ``lock``,
+``unlock`` - shaped like ``Session.get``/``.put``: they return a
+:class:`webdav.response.Response` and, like ``requests``, do not raise for an
+error status unless asked to (``raise_for_status()``, or
+``raise_on_error=True``).
 
-- **HTTP/WebDAV verbs** - ``get``, ``put``, ``delete``, ``head``,
-  ``options``, ``propfind``, ``proppatch``, ``mkcol``, ``copy``, ``move``,
-  ``lock``, ``unlock`` - shaped like ``Session.get``/``.put``: they return
-  a :class:`webdav.response.Response` and, like ``requests``, do not raise
-  for an error status unless asked to (``raise_for_status()``, or
-  ``raise_on_error=True``);
-- **file-system operations** - ``ls``, ``info``, ``exists``, ``isdir``,
-  ``open``, ``upload_file``, ``download_file``, ``mkdir``, ``remove``,
-  ``locked``, ... - which return plain Python values and raise a
-  :class:`~webdav.exceptions.WebDAVError` on failure.
+For filesystem-shaped access to a server (``ls``, ``open``, ``upload_file``,
+``mkdir``, ``remove``, ... - plain return values, raising a
+:class:`~webdav.exceptions.WebDAVError` on failure) see
+:class:`~webdav.fs.FileSystem`, a peer class built on top of a ``Session``
+rather than a part of it (``FileSystem.from_session(session)`` shares one).
 
-Both take a full URL, or a path if the session has a ``base_url``.
+A verb takes a full URL, or a path if the session has a ``base_url``.
 
 It also brings a redirect policy that is safe for methods other than
 ``GET`` (see :mod:`webdav.redirects` - ``requests`` itself re-sends a
@@ -26,34 +26,24 @@ automatic ``If`` headers for locks the session holds, retries of transient
 failures, and a cap on how large a response body may be declared.
 """
 
-import codecs
 import dataclasses
-import errno
 import ipaddress
 import logging
 import math
 import os
 import pathlib
 import re
-import secrets
-import shutil
-import tempfile
 import threading
 import time
 import warnings
-from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from datetime import timedelta
 from http import HTTPStatus
-from io import TextIOWrapper
 from typing import (
     TYPE_CHECKING,
     Any,
-    BinaryIO,
     Literal,
-    TextIO,
     cast,
-    overload,
 )
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
@@ -66,10 +56,7 @@ from requests.hooks import dispatch_hook
 from requests.structures import CaseInsensitiveDict
 from requests.utils import default_headers, requote_uri, resolve_proxies
 
-from webdav.conditional import (
-    entity_tag,
-    token_condition,
-)
+from webdav.conditional import entity_tag
 from webdav.deadline import DeadlineAdapter, watch
 from webdav.exceptions import (
     STATUS_CODE_EXCEPTIONS,
@@ -77,33 +64,20 @@ from webdav.exceptions import (
     HTTPStatusError,
     InsecureConfigurationError,
     InsecureTransportWarning,
-    IsACollectionError,
-    IsAResourceError,
-    MalformedResponseError,
-    PreconditionFailedError,
-    ResourceAlreadyExistsError,
-    ResourceNotFoundError,
     raise_for_status,
 )
-from webdav.fs_utils import peek_filelike_length
 from webdav.locks import (
-    _TOKEN_RE,
     DEFAULT_LOCK_TIMEOUT,
     EXCLUSIVE,
-    ActiveLock,
     LockRegistry,
     build_lock_body,
     check_token,
     format_timeout,
-    parse_lock_response,
 )
 from webdav.methods import Method
 from webdav.multistatus import parse_multistatus_response
 from webdav.parse_utils import parse_uint
-from webdav.properties import (
-    build_propfind_body,
-    build_proppatch_body,
-)
+from webdav.properties import build_propfind_body, build_proppatch_body
 from webdav.redirects import (
     MAX_REDIRECTS,
     RedirectPolicy,
@@ -113,25 +87,21 @@ from webdav.redirects import (
     redact_url,
     validate_policy,
 )
-from webdav.resource import Resource
 from webdav.response import Response, adopt
 from webdav.retry import retry as _retry
-from webdav.streaming import DEFAULT_CHUNK_SIZE, IterStream, SizedIterator
+from webdav.streaming import DEFAULT_CHUNK_SIZE
 from webdav.tls import mount_mtls_adapter
-from webdav.urls import URL, join_url, path_key, relative_url_to
+from webdav.urls import URL, join_url, relative_url_to
 
 if TYPE_CHECKING:
     import urllib.parse
-    from collections.abc import Callable, Iterable, Mapping, MutableMapping
-    from datetime import datetime
-    from os import PathLike
+    from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping
     from xml.etree.ElementTree import Element
 
     from requests.auth import AuthBase
 
     from webdav.multistatus import MultiStatusResponse
-    from webdav.multistatus import Response as ResourceResponse
-    from webdav.properties import DAVProperties, PropName
+    from webdav.properties import PropName
     from webdav.redirects import Origin
     from webdav.retry import RetryFunc
     from webdav.tls import TLSOptions
@@ -226,8 +196,8 @@ _WRITE_METHODS = frozenset(
         Method.MKCOL,
         Method.COPY,
         Method.MOVE,
-        "POST",
-        "PATCH",
+        Method.POST,
+        Method.PATCH,
     }
 )
 
@@ -270,17 +240,6 @@ _PICKLED = (
     "_retry_arg",
     "_trusted_arg",
 )
-
-#: The modes :meth:`Session.open` understands.
-_OPEN_MODES = frozenset({"r", "rt", "rb", "w", "wt", "wb", "x", "xt", "xb"})
-
-#: ``walk`` refuses to go deeper / visit more collections than this, however
-#: the caller set ``max_depth`` - see ``Session.walk``.
-_WALK_MAX_DEPTH = 256
-_WALK_MAX_DIRS = 100_000
-
-#: A write-mode ``open`` keeps this many bytes in memory before spilling to disk.
-_SPOOL_SIZE = 8 * 1024 * 1024
 
 _DEPTHS = ("0", "1", "infinity")
 
@@ -424,7 +383,7 @@ def _read_response(
     nothing is read, and that length is no reason to refuse it.
     """
     status = response.status_code
-    if method.upper() == "HEAD" or status in (204, 304) or 100 <= status < 200:
+    if method.upper() == Method.HEAD or status in (204, 304) or 100 <= status < 200:
         _set_body(response, b"")
         response.close()
         return
@@ -470,43 +429,6 @@ def _deadline_error(seconds: "float | None") -> ClientError:
     )
 
 
-def _bounded_chunks(
-    fileobj: BinaryIO,
-    size: "int | None",
-    chunk_size: int,
-    callback: "Callable[[int], Any] | None",
-    problem: list[str],
-) -> "Iterator[bytes]":
-    """The chunks of ``fileobj``, exactly ``size`` bytes of them (any length if ``size`` is ``None``).
-
-    A file that is longer or shorter than declared ends the upload with a
-    :class:`~webdav.exceptions.ClientError` (its message is also put in ``problem``,
-    for the caller to raise when the request itself breaks in consequence).
-    """
-    sent = 0
-    while True:
-        want = chunk_size if size is None else min(chunk_size, size - sent)
-        if want <= 0:
-            if fileobj.read(1):
-                problem.append(
-                    f"the file is longer than the {size} bytes it was declared to be"
-                )
-                raise ClientError(problem[0])
-            return
-        data = fileobj.read(want)
-        if not data:
-            if size is not None and sent != size:
-                problem.append(
-                    f"the file ended after {sent} of the {size} bytes it was declared to be"
-                )
-                raise ClientError(problem[0])
-            return
-        sent += len(data)
-        yield data
-        if callback is not None:
-            callback(len(data))
-
-
 def _split(url: str) -> "urllib.parse.SplitResult":
     """``urlsplit`` that reports an unparseable URL as the library's own error."""
     try:
@@ -532,34 +454,6 @@ def _check_chunk_size(value: object) -> None:
 def _display(path: str) -> str:
     """``path`` for a message: a URL loses its userinfo, query and fragment."""
     return redact_url(path) if _URL_RE.match(path) else path
-
-
-#: The character sets a server's ``Content-Type`` may select for text reads.
-_TEXT_CHARSETS = frozenset(
-    {
-        "utf-8",
-        "utf_8",
-        "ascii",
-        "iso8859-1",
-        "latin-1",
-        "cp1252",
-        "utf-16",
-        "utf-16-le",
-        "utf-16-be",
-        "utf-32",
-    }
-)
-
-
-def _text_charset(name: "str | None") -> "str | None":
-    """``name`` if it is a text encoding worth trusting from a server, else ``None``."""
-    if not name:
-        return None
-    try:
-        canonical = codecs.lookup(name).name
-    except LookupError:
-        return None
-    return canonical if canonical in _TEXT_CHARSETS else None
 
 
 def _strong_etag(value: str) -> str:
@@ -588,47 +482,6 @@ def _is_loopback(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
-
-
-def _direct_members(
-    responses: "list[ResourceResponse]", own: "ResourceResponse | None", own_key: str
-) -> "list[ResourceResponse]":
-    """The entries of a ``Depth: 1`` listing that are direct members of the collection asked for.
-
-    An entry outside the collection is a lie or a bug - refused, never
-    followed (``walk`` and anything built on ``ls`` would walk out of the
-    subtree); one deeper down means the server ignored ``Depth: 1``, and is
-    left out.
-    """
-    prefix = own_key.rstrip("/") + "/"
-    members = []
-    for resp in responses:
-        if resp is own:
-            continue
-        key = path_key(resp.path)
-        if not key.startswith(prefix):
-            msg = f"server response href {resp.href!r} is outside the listed collection"
-            raise MalformedResponseError(msg)
-        if "/" not in key[len(prefix) :]:
-            members.append(resp)
-    return members
-
-
-def _resource(response: "ResourceResponse", base_url: URL) -> Resource:
-    """The :class:`~webdav.resource.Resource` a multistatus entry describes."""
-    props = response.properties
-    return Resource(
-        response.path_relative_to(base_url),
-        href=response.href,
-        is_dir=props.resource_type == "directory",
-        size=props.content_length,
-        created=props.created,
-        modified=props.modified,
-        etag=props.etag,
-        content_type=props.content_type,
-        content_language=props.content_language,
-        display_name=props.display_name,
-    )
 
 
 class FeatureDetection:
@@ -742,7 +595,7 @@ class Session(requests.Session):
         auth: "AuthTypes" = None,
         headers: "dict[str, str] | None" = None,
         cert: "CertTypes" = None,
-        verify: "Literal[True] | str" = True,
+        verify: Literal[True] | str = True,
         tls: "TLSOptions | None" = None,
         timeout: "float | tuple[float, float] | None" = DEFAULT_TIMEOUT,
         redirect_policy: RedirectPolicy = RedirectPolicy.SAME_ORIGIN,
@@ -1379,8 +1232,8 @@ class Session(requests.Session):
         # Re-sending a write (or a PROPFIND) to it would be wrong, and
         # silently turning it into a GET would report a write as done.
         if response.status_code == requests.codes.see_other and method not in (
-            "GET",
-            "HEAD",
+            Method.GET,
+            Method.HEAD,
         ):
             return (
                 _REASON_PREFIX
@@ -1589,7 +1442,7 @@ class Session(requests.Session):
             kwargs,
             {
                 "Depth": (
-                    _check_depth(depth, _DEPTHS, "PROPFIND")
+                    _check_depth(depth, _DEPTHS, Method.PROPFIND)
                     if depth is not None
                     else None
                 )
@@ -1710,7 +1563,7 @@ class Session(requests.Session):
         if refresh is not None:
             headers["If"] = f"(<{check_token(refresh)}>)"
             return self._with_headers(Method.LOCK, url, kwargs, headers)
-        headers["Depth"] = _check_depth(depth, ("0", "infinity"), "LOCK")
+        headers["Depth"] = _check_depth(depth, ("0", "infinity"), Method.LOCK)
         headers["Content-Type"] = "application/xml; charset=utf-8"
         return self._with_headers(
             Method.LOCK, url, kwargs, headers, data=build_lock_body(scope, owner)
@@ -1811,634 +1664,6 @@ class Session(requests.Session):
         detected = FeatureDetection(response)
         with self._features_lock:
             return self._features.setdefault(key, detected)
-
-    def dav_compliance(self, path: str = "") -> set[str]:
-        """Return the ``DAV:`` compliance classes the server advertises."""
-        response = self._fetch(Method.OPTIONS, self._locate(path)[0])
-        return FeatureDetection(response).dav_compliances
-
-    def get_props(
-        self,
-        path: str,
-        *,
-        names: "Iterable[str | PropName] | None" = None,
-        all_prop: bool = False,
-        include: "Iterable[str | PropName] | None" = None,
-    ) -> "DAVProperties":
-        """Return properties of a resource via PROPFIND.
-
-        Args:
-            path: Resource path.
-            names: Specific property names to request - see
-                :func:`~webdav.properties.build_propfind_body`. Requests
-                all properties when omitted (and ``all_prop`` is falsy).
-            all_prop: Explicitly request ``<d:allprop/>``.
-            include: Additional named properties to request alongside
-                ``all_prop`` - see
-                :func:`~webdav.properties.build_propfind_body`.
-
-        """
-        _url, base, rel = self._locate(path)
-        data = build_propfind_body(
-            names, all_prop=all_prop or not names, include=include
-        )
-        # Depth: 0 - this is a single-resource lookup, not a traversal.
-        # Left unset, RFC 4918 sec. 9.1 says servers SHOULD default a
-        # missing Depth to infinity, which would make a lookup against a
-        # collection trigger a full recursive PROPFIND for one property.
-        headers = {"Content-Type": "application/xml; charset=utf-8", "Depth": "0"}
-        result = self._propfind_parsed(path, headers=headers, data=data)
-        return result.get_response_for_path(base.path, rel).properties
-
-    def set_props(
-        self,
-        path: str,
-        *,
-        set_props: "dict[str | PropName, Any] | None" = None,
-        remove_props: "Iterable[str | PropName] | None" = None,
-    ) -> None:
-        """Set and/or remove properties via PROPPATCH (RFC 4918 sec. 9.2)."""
-        data = build_proppatch_body(set_props, remove_props)
-        headers = {"Content-Type": "application/xml; charset=utf-8"}
-        self._send(Method.PROPPATCH, path, data=data, headers=headers)
-
-    @contextmanager
-    def locked(
-        self,
-        path: str,
-        *,
-        scope: str = EXCLUSIVE,
-        depth: str = "infinity",
-        lock_timeout: "int | Iterable[int | None] | None" = DEFAULT_LOCK_TIMEOUT,
-        owner: "str | Element | None" = None,
-    ) -> "Iterator[ActiveLock]":
-        """Hold a WebDAV lock on ``path`` for the duration of the ``with`` block.
-
-        Writes made through this same session to ``path`` (or, with
-        ``depth="infinity"``, anything under it) automatically carry the
-        held lock's token in an ``If`` header. The lock is released on
-        exit, even if the block raised.
-
-        Args:
-            path: Resource to lock.
-            scope: :data:`~webdav.locks.EXCLUSIVE` or
-                :data:`~webdav.locks.SHARED`.
-            depth: ``"0"`` or ``"infinity"`` - no other value is legal on
-                a LOCK request (RFC 4918 sec. 9.10.4).
-            lock_timeout: A single seconds value, ``None`` for infinite, or
-                an ordered preference list - see
-                :func:`~webdav.locks.format_timeout`.
-            owner: Plain text, or a pre-built
-                :class:`~xml.etree.ElementTree.Element` for a structured
-                owner identity - see :func:`~webdav.locks.build_lock_body`.
-
-        Raises:
-            ValueError: ``depth`` is neither ``"0"`` nor ``"infinity"``.
-            ClientError: The server did not grant the lock.
-            MalformedResponseError: The server sent an unusable lock answer.
-
-        """
-        depth = _check_depth(depth, ("0", "infinity"), "LOCK")
-        headers = {
-            "Depth": depth,
-            "Timeout": format_timeout(lock_timeout),
-            "Content-Type": "application/xml; charset=utf-8",
-        }
-        # The URL that is locked - fixed now, so that whatever happens to the
-        # session (a changed base_url, ...) the UNLOCK goes to the same place.
-        url = self._locate(path)[0]
-        response = self._send(
-            Method.LOCK,
-            path,
-            multistatus=False,
-            data=build_lock_body(scope, owner),
-            headers=headers,
-        )
-        try:
-            active_lock = parse_lock_response(response)
-            # Always keyed by the *requested* URL, never by the server-supplied
-            # <lockroot>: a malicious server could name an unrelated resource
-            # there and make this session attach the token somewhere the
-            # caller never asked to lock (see LockRegistry).
-            self.locks.add(url, active_lock.token, depth)
-        except (MalformedResponseError, ClientError):
-            # The server granted a lock this side cannot use: release it (with
-            # the token of the Lock-Token header, if that is a usable one)
-            # instead of leaving it there until it times out.
-            header_token = response.headers.get("Lock-Token", "").strip().strip("<>")
-            if _TOKEN_RE.fullmatch(header_token):
-                self._unlock_quietly(url, header_token)
-            raise
-        try:
-            yield active_lock
-        finally:
-            self.locks.discard(url, active_lock.token, depth)
-            self._unlock_quietly(url, active_lock.token)
-
-    def _unlock_quietly(self, url: str, token: str) -> None:
-        """Release the lock ``token`` on ``url``, never raising (and never hiding that it failed)."""
-        try:
-            self._fetch(
-                Method.UNLOCK, url, absolute=True, headers={"Lock-Token": f"<{token}>"}
-            )
-        except requests.RequestException as exc:
-            # A failed UNLOCK (a dropped connection, a refusal) must not
-            # replace whatever the ``with`` body raised - nor hide that the
-            # lock is still there: say so, and go on.
-            _LOGGER.warning(
-                "could not release the lock on %s: %s", redact_url(url), exc
-            )
-
-    def refresh_lock(
-        self,
-        path: str,
-        token: str,
-        *,
-        lock_timeout: "int | Iterable[int | None] | None" = DEFAULT_LOCK_TIMEOUT,
-    ) -> ActiveLock:
-        """Refresh a held lock's timeout (RFC 4918 sec. 9.10.2).
-
-        Sends a bodyless LOCK request carrying the lock's token in the
-        ``If`` header - the RFC's mechanism for extending a lock's
-        timeout without releasing and re-acquiring it, which would risk
-        another client taking the lock in the gap between the two. No
-        ``Depth`` header is sent, since the lock's depth was already
-        fixed when it was created and can't change on refresh.
-
-        Updates this session's own bookkeeping so a still-open
-        :meth:`locked` block for the same lock keeps attaching the right
-        token; the returned :class:`~webdav.locks.ActiveLock` reflects the
-        refreshed timeout (the one an open block is already holding does
-        not update itself - use this method's return value instead).
-        """
-        check_token(token)
-        headers = {
-            "If": token_condition(token),
-            "Timeout": format_timeout(lock_timeout),
-        }
-        response = self._send(Method.LOCK, path, multistatus=False, headers=headers)
-        active_lock = parse_lock_response(response, expected_token=token)
-        self.locks.replace_token(token, active_lock.token)
-        return active_lock
-
-    def mkdir(self, path: str, *, data: str | None = None) -> None:
-        """Create a collection.
-
-        Args:
-            path: Collection path.
-            data: Optional Extended MKCOL request body (RFC 5689) to set
-                a non-default resourcetype and/or properties at creation
-                time. Sent with ``Content-Type: application/xml`` when given.
-
-        """
-        headers = {"Content-Type": "application/xml; charset=utf-8"} if data else None
-        try:
-            response = self._send(
-                Method.MKCOL, path, add_trailing_slash=True, data=data, headers=headers
-            )
-        except HTTPStatusError as exc:
-            if exc.status_code == HTTPStatus.METHOD_NOT_ALLOWED:
-                raise ResourceAlreadyExistsError(exc.response, path) from exc
-            raise
-
-        if response.status_code not in (HTTPStatus.OK, HTTPStatus.CREATED):
-            msg = f"unexpected status {response.status_code} from MKCOL"
-            raise MalformedResponseError(msg)
-
-    def remove(self, path: str) -> None:
-        """Remove a resource (or a collection, with everything in it).
-
-        Raises:
-            ClientError: ``path`` is the root of the session (its ``base_url``, or
-                the server's root) - deleting that is not something a slip of an
-                empty string should be able to do.
-
-        """
-        url, base, _rel = self._locate(path)
-        if path_key(URL(url).path) == path_key(base.path):
-            msg = "refusing to remove the root of the session (its base_url): name what to remove"
-            raise ClientError(msg)
-        self._send(Method.DELETE, path)
-
-    def ls(self, path: str) -> list[Resource]:
-        """List the members of a collection.
-
-        Always a list of :class:`~webdav.resource.Resource` - each is its own name
-        (relative to ``base_url``, or to the server root without one) and carries
-        what the server reported (``.size``, ``.is_dir``, ``.modified``, ...).
-
-        Raises:
-            IsAResourceError: ``path`` is not a collection (:meth:`info` describes one resource).
-            ResourceNotFoundError: There is nothing at ``path``.
-
-        """
-        url, base, _rel = self._locate(path)
-        result = self._propfind_parsed(path, headers={"Depth": "1"})
-        responses = result.responses
-
-        own_key = path_key(URL(url).path)
-        own = responses.get(own_key)
-        if own is None:
-            # A case-insensitive server (IIS, SharePoint) may spell the
-            # collection's own href differently from the request.
-            folded = own_key.casefold()
-            own = next(
-                (r for k, r in responses.items() if k.casefold() == folded), None
-            )
-            if own is not None:
-                own_key = path_key(own.path)
-        if own is not None and own.properties.resource_type == "file":
-            raise IsAResourceError(_display(path), "not a collection: use info()")
-        members = _direct_members(result.entries, own, own_key)
-        return [_resource(resp, base) for resp in members]
-
-    def info(self, path: str) -> Resource:
-        """Describe one resource (a file or a collection - not its members).
-
-        The same :class:`~webdav.resource.Resource` :meth:`ls` returns for each member.
-        """
-        _url, base, rel = self._locate(path)
-        result = self._propfind_parsed(path, headers={"Depth": "0"})
-        return _resource(result.get_response_for_path(base.path, rel), base)
-
-    def exists(self, path: str) -> bool:
-        """Check whether a resource exists."""
-        try:
-            self._propfind_parsed(path, headers={"Depth": "0"})
-        except ResourceNotFoundError:
-            return False
-        return True
-
-    def _is_collection(self, path: str) -> "bool | None":
-        """``True`` for a collection, ``False`` for anything else, ``None`` if there is nothing."""
-        try:
-            return bool(self.get_props(path, names=["resourcetype"]).collection)
-        except ResourceNotFoundError:
-            return None
-
-    def isdir(self, path: str) -> bool:
-        """Check whether a resource is a collection (``False`` if it does not exist)."""
-        return self._is_collection(path) is True
-
-    def isfile(self, path: str) -> bool:
-        """Check whether a resource exists and is not a collection."""
-        return self._is_collection(path) is False
-
-    def content_length(self, path: str) -> "int | None":
-        """Return the ``getcontentlength`` property."""
-        return self.get_props(path, names=["content_length"]).content_length
-
-    def created(self, path: str) -> "datetime | None":
-        """Return the ``creationdate`` property."""
-        return self.get_props(path, names=["created"]).created
-
-    def modified(self, path: str) -> "datetime | None":
-        """Return the ``getlastmodified`` property."""
-        return self.get_props(path, names=["modified"]).modified
-
-    def etag(self, path: str) -> "str | None":
-        """Return the ``getetag`` property."""
-        return self.get_props(path, names=["etag"]).etag
-
-    def content_type(self, path: str) -> "str | None":
-        """Return the ``getcontenttype`` property."""
-        return self.get_props(path, names=["content_type"]).content_type
-
-    def content_language(self, path: str) -> "str | None":
-        """Return the ``getcontentlanguage`` property."""
-        return self.get_props(path, names=["content_language"]).content_language
-
-    @overload
-    @contextmanager
-    def open(
-        self,
-        path: str,
-        mode: Literal["rb", "wb", "xb"],
-        *,
-        encoding: str | None = ...,
-        chunk_size: int | None = ...,
-    ) -> Iterator[BinaryIO]: ...
-
-    @overload
-    @contextmanager
-    def open(
-        self,
-        path: str,
-        mode: Literal["r", "rt", "w", "wt", "x", "xt"] = ...,
-        *,
-        encoding: str | None = ...,
-        chunk_size: int | None = ...,
-    ) -> Iterator[TextIO]: ...
-
-    @contextmanager
-    def open(
-        self,
-        path: str,
-        mode: str = "r",
-        *,
-        encoding: str | None = None,
-        chunk_size: int | None = None,
-    ) -> "Iterator[TextIO | BinaryIO]":
-        """Open a resource for reading or writing, like the builtin ``open``.
-
-        Modes ``r``/``rt``/``rb`` stream the resource down (resuming after
-        a dropped connection). Modes ``w``/``wb`` collect what is written -
-        in memory up to a threshold, on disk beyond it - and ``PUT`` it,
-        replacing the resource, when the ``with`` block ends *without* an
-        exception; ``x``/``xb`` do the same but fail if the resource
-        already exists (``If-None-Match: *``, atomic on the server).
-        Add ``t`` (or nothing) for text, ``b`` for bytes.
-        """
-        if mode not in _OPEN_MODES:
-            msg = f"unsupported mode {mode!r}"
-            raise ValueError(msg)
-        if mode[0] == "r":
-            yield from self._open_read(path, mode, encoding, chunk_size)
-        else:
-            yield from self._open_write(path, mode, encoding, chunk_size)
-
-    def _open_read(
-        self, path: str, mode: str, encoding: "str | None", chunk_size: "int | None"
-    ) -> "Iterator[TextIO | BinaryIO]":
-        if self.isdir(path):
-            raise IsACollectionError(path, "cannot open a collection")
-
-        with IterStream(
-            self, self._locate(path)[0], chunk_size=chunk_size or self.chunk_size
-        ) as buffer:
-            buff = cast("BinaryIO", buffer)
-            if mode == "rb":
-                yield buff
-            else:
-                # The server does not get to pick the codec: only well-known text
-                # encodings are taken from its Content-Type, anything else is UTF-8.
-                enc = encoding or _text_charset(buffer.encoding) or "utf-8"
-                yield TextIOWrapper(buff, encoding=enc)
-
-    def _open_write(
-        self, path: str, mode: str, encoding: "str | None", chunk_size: "int | None"
-    ) -> "Iterator[TextIO | BinaryIO]":
-        with tempfile.SpooledTemporaryFile(max_size=_SPOOL_SIZE, mode="w+b") as spool:
-            if "b" in mode:
-                yield cast("BinaryIO", spool)
-            else:
-                text = TextIOWrapper(spool, encoding=encoding or "utf-8")
-                yield text
-                text.flush()
-                text.detach()  # leave ``spool`` open for the upload below
-            # Reached only if the block raised nothing: a failed write must
-            # never replace the remote resource with a half-written one.
-            size = spool.seek(0, os.SEEK_END)
-            spool.seek(0)
-            self.upload_fileobj(
-                cast("BinaryIO", spool),
-                path,
-                overwrite=mode[0] == "w",
-                chunk_size=chunk_size,
-                size=size,
-            )
-
-    def walk(
-        self, path: str, *, max_depth: "int | None" = None
-    ) -> "Iterator[tuple[str, list[Resource], list[Resource]]]":
-        """Walk a collection tree top-down, like :func:`os.walk`.
-
-        Yields ``(path, directories, files)`` for ``path`` and every collection
-        below it. The members are the same :class:`~webdav.resource.Resource`
-        objects :meth:`ls` returns - full names, usable as they are - not bare
-        basenames as in :func:`os.walk`. Each collection costs one ``Depth: 1``
-        PROPFIND - never ``Depth: infinity``, which servers commonly
-        refuse and which would make one request return a whole tree.
-        Remove a directory from the list to skip that subtree. A
-        collection reachable a second time (RFC 5842 bindings can make a
-        tree cyclic) is visited only once.
-
-        Args:
-            path: The collection to start at.
-            max_depth: How many levels below ``path`` to descend; ``None``
-                for no limit.
-
-        """
-        seen: set[str] = set()
-        stack: list[tuple[str, int]] = [(path, 0)]
-        while stack:
-            current, depth = stack.pop()
-            key = path_key(URL(self._locate(current)[0]).path)
-            if key in seen:
-                continue
-            if depth > _WALK_MAX_DEPTH or len(seen) >= _WALK_MAX_DIRS:
-                msg = (
-                    f"walk gave up at {_display(current)!r}: more than {_WALK_MAX_DEPTH} levels "
-                    f"deep or {_WALK_MAX_DIRS} collections - a server that invents directories "
-                    "as you go never ends. Pass max_depth to bound it deliberately."
-                )
-                raise ClientError(msg)
-            seen.add(key)
-            entries = self.ls(current)
-            dirnames = [e for e in entries if e.is_dir]
-            files = [e for e in entries if not e.is_dir]
-            subdirs = {e.name for e in dirnames}
-            yield current, dirnames, files
-            if max_depth is not None and depth >= max_depth:
-                continue
-            # Honours names the caller removed from ``dirnames``.
-            stack.extend(
-                (self._from_name(current, name.name), depth + 1)
-                for name in reversed(dirnames)
-                if name.name in subdirs
-            )
-            if len(seen) + len(stack) > _WALK_MAX_DIRS:
-                # The queue counts too: one listing can announce a hundred
-                # thousand subdirectories, and each waits in memory.
-                msg = f"walk gave up: more than {_WALK_MAX_DIRS} collections found or queued"
-                raise ClientError(msg)
-
-    def _from_name(self, current: str, name: str) -> str:
-        """The path (or, without a ``base_url``, URL) an ``ls`` entry ``name`` stands for."""
-        if self.base_url is not None:
-            return name
-        return str(URL(current).copy_with(path="/" + name.lstrip("/"), query=""))
-
-    def download_fileobj(
-        self,
-        path: str,
-        fileobj: BinaryIO,
-        *,
-        chunk_size: int | None = None,
-        callback: "Callable[[int], Any] | None" = None,
-    ) -> None:
-        """Write a resource's contents to an open, writable file object.
-
-        Raises if the transfer does not complete - whatever was written to
-        ``fileobj`` before then is a partial file, not a download.
-        """
-        if chunk_size is not None:
-            _check_chunk_size(chunk_size)
-        with self.open(path, mode="rb", chunk_size=chunk_size) as remote_obj:
-            size = chunk_size or self.chunk_size
-            # (pylint takes the @contextmanager result for a generator)
-            while data := remote_obj.read(size):
-                fileobj.write(data)
-                if callback:
-                    callback(len(data))
-
-    def download_file(
-        self,
-        path: str,
-        local_path: "str | PathLike[str]",
-        *,
-        overwrite: bool = False,
-        chunk_size: int | None = None,
-        callback: "Callable[[int], Any] | None" = None,
-    ) -> None:
-        """Download a resource to a local file.
-
-        The data goes to a temporary file next to ``local_path`` first, and only
-        a complete download is moved into place: a failed or interrupted one
-        leaves neither a partial file nor - with ``overwrite=True`` - a
-        destroyed old one behind. Without ``overwrite`` an existing
-        ``local_path`` is an error (``FileExistsError``), checked again
-        atomically at the moment of the move, like ``upload_file``'s
-        ``overwrite=False``.
-
-        Never writes through a symlink: one at ``local_path`` is refused
-        (``OSError``, or ``FileExistsError`` without ``overwrite``), so a
-        pre-planted link can't redirect the write to an unintended local file
-        (the same class of attack OpenSSH's ``sftp`` client hardened against).
-        """
-        if chunk_size is not None:
-            _check_chunk_size(chunk_size)
-        target = pathlib.Path(local_path)
-        directory = target.absolute().parent
-        if not directory.is_dir():
-            raise FileNotFoundError(errno.ENOENT, "no such directory", str(directory))
-        if (target.is_symlink() or target.exists()) and not overwrite:
-            raise FileExistsError(
-                errno.EEXIST,
-                "file exists (pass overwrite=True to replace it)",
-                str(target),
-            )
-        if target.is_symlink():
-            raise OSError(
-                errno.ELOOP, "refusing to write through a symlink", str(target)
-            )
-        # The kernel applies the umask when it creates the file, exclusively
-        # (O_EXCL) and without following a link; nothing here reads or changes
-        # the process-wide umask, which another thread may be relying on.
-        temp = directory / f".webdav-{secrets.token_hex(8)}.part"
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(temp, flags, 0o666)
-        claimed = False
-        try:
-            with os.fdopen(fd, mode="wb") as fobj:
-                self.download_fileobj(
-                    path, fobj, callback=callback, chunk_size=chunk_size
-                )
-            if overwrite:
-                if target.exists():
-                    shutil.copymode(
-                        target, temp
-                    )  # keep the permissions of what is replaced
-            else:
-                # Claim the name first: O_EXCL is atomic on every file system
-                # (a hard link is not available on some), and only a complete
-                # download gets this far, so no half-written file is ever visible.
-                os.close(os.open(target, flags, 0o666))
-                claimed = True
-            temp.replace(target)
-        except BaseException:
-            temp.unlink(missing_ok=True)
-            if claimed and target.exists() and target.stat().st_size == 0:
-                target.unlink(missing_ok=True)  # our own, still empty claim
-            raise
-
-    def upload_file(
-        self,
-        local_path: "str | PathLike[str]",
-        path: str,
-        *,
-        overwrite: bool = False,
-        chunk_size: int | None = None,
-        callback: "Callable[[int], Any] | None" = None,
-        headers: dict[str, str] | None = None,
-    ) -> None:
-        """Upload a local file to a remote path."""
-        with pathlib.Path(local_path).open(mode="rb") as fobj:
-            self.upload_fileobj(
-                fobj,
-                path,
-                overwrite=overwrite,
-                chunk_size=chunk_size,
-                callback=callback,
-                headers=headers,
-            )
-
-    def upload_fileobj(
-        self,
-        fileobj: BinaryIO,
-        path: str,
-        *,
-        overwrite: bool = False,
-        chunk_size: int | None = None,
-        callback: "Callable[[int], Any] | None" = None,
-        size: int | None = None,
-        headers: dict[str, str] | None = None,
-    ) -> None:
-        """Upload an open, readable file object to a remote path.
-
-        The body is exactly ``size`` bytes (measured from the file object unless
-        given): a file that turns out longer or shorter while it is read is an
-        error - never sent as a silently truncated copy, and never allowed to
-        leave surplus bytes on the connection for the server to read as the
-        start of another request.
-
-        Raises:
-            ClientError: The file object did not hold as many bytes as ``size``.
-            ResourceAlreadyExistsError: ``overwrite`` is false and ``path`` exists.
-            PreconditionFailedError: A precondition of the upload failed.
-            requests.RequestException: The transport failed.
-
-        """
-        if chunk_size is not None:
-            _check_chunk_size(chunk_size)
-        headers = dict(headers or {})
-
-        # We try to avoid chunked transfer as much as possible, so we try
-        # to use size as a hint if provided, else find it out from the
-        # file object, else gracefully fall back to chunked encoding.
-        if size is None:
-            size = peek_filelike_length(fileobj)
-
-        if not overwrite:
-            # An `exists()` pre-check followed by a separate PUT would be a
-            # TOCTOU race (another client could create the resource in
-            # between); `If-None-Match: *` (RFC 7232 §3.2) makes the
-            # not-already-there check atomic on the server, which maps a
-            # conflicting PUT to 412 Precondition Failed.
-            headers.setdefault("If-None-Match", "*")
-
-        problem: list[str] = []
-        chunks = _bounded_chunks(
-            fileobj, size, chunk_size or self.chunk_size, callback, problem
-        )
-
-        # SizedIterator lets `requests` learn the real length itself and
-        # keep the upload streamed with a plain Content-Length - passing
-        # size via our own header instead doesn't work, see its docstring.
-        body: Iterator[bytes] | SizedIterator = (
-            SizedIterator(chunks, size) if size is not None else chunks
-        )
-        try:
-            self._send(Method.PUT, path, data=body, headers=headers, error_path=path)
-        except PreconditionFailedError as exc:
-            if not overwrite and not isinstance(exc, ResourceAlreadyExistsError):
-                # We set ``If-None-Match: *``: a 412 here means "it exists".
-                raise ResourceAlreadyExistsError(exc.response, _display(path)) from exc
-            raise
-        except requests.RequestException as exc:
-            if problem:  # the request broke because the body could not be completed
-                raise ClientError(problem[0]) from exc
-            raise
 
     # -- helpers --------------------------------------------------------
 

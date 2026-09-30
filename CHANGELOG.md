@@ -41,8 +41,7 @@ The first release.
 - Resumable, verified streaming downloads; `open(path, "w"/"wb"/"x"/"xb")` uploads on a clean `with`
   exit only; `walk()` like `os.walk` (one `Depth: 1` request per collection, cycle-safe).
 - mTLS with encrypted keys, CRL checking and cipher restriction (`TLSOptions`).
-- An fsspec filesystem (`webdav.fsspec.WebdavFileSystem`) and a `dav` command (`ls`, `info`, `cat`,
-  `get`, `put`, `mkdir`, `rm`, `mv`, `cp`).
+- A `dav` command (`ls`, `info`, `cat`, `get`, `put`, `mkdir`, `rm`, `mv`, `cp`).
 - Retries of transient failures with backoff - for the safe methods only (`GET`, `HEAD`, `OPTIONS`,
   `PROPFIND`): a retried write reports the opposite of what happened when the first try had worked.
 
@@ -66,7 +65,7 @@ they were fixed):
   `CURL_CA_BUNDLE` never replace the configured CA, and a private CA given as `ca_files` is not widened
   by the public ones. TLS 1.2 is the floor; `key_password` is hidden from `repr`.
 - **Credentials in a URL are refused** (`https://user:pw@host/`): pass `auth=`. A pickled `Session`
-  or an fsspec `to_json()` carries its credentials in clear - treat it like a password file.
+  carries its credentials in clear - treat it like a password file.
 - **Credentials do not leak**: not into exception messages, warnings or logs (URL userinfo and the query
   of a signed URL are redacted); an `InsecureTransportWarning` names host and port only.
 - **Limits on what a server can make the client do**: `max_response_size` (after decompression; stacked
@@ -81,7 +80,7 @@ they were fixed):
   downloads. Nothing escapes as a bare `ValueError`.
 - **The local side**: `download_file` writes a temporary file and moves it into place when complete
   (`overwrite=False` by default, atomic no-clobber, never through a symlink, permissions of a replaced
-  file kept, no process-wide `umask` change); `dav rm` and fsspec `rm` refuse a non-empty collection
+  file kept, no process-wide `umask` change); `dav rm` refuses a non-empty collection
   without `-r`/`recursive=True`; the CLI escapes control characters in names and errors.
 - **Safe defaults**: `propfind(depth=)` is required, `copy`/`move` do not overwrite unless told to,
   secondary parameters are keyword-only, `isdir`/`isfile` are `False` for what does not exist.

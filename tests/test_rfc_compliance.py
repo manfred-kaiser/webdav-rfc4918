@@ -10,7 +10,7 @@ from xml.etree.ElementTree import Element
 
 import pytest
 
-from webdav import Session
+from webdav import FileSystem, Session
 from webdav.conditional import Condition, build_if_header
 from webdav.exceptions import (
     STATUS_CODE_EXCEPTIONS,
@@ -156,86 +156,84 @@ def test_lockentry_and_activelock_are_reused_by_the_property_model() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_root_depth_infinity_lock_covers_children(client: Session) -> None:
+def test_root_depth_infinity_lock_covers_children(fs: FileSystem) -> None:
     """A Depth:infinity lock on the WebDAV root must cascade to every path under it."""
-    client.upload_fileobj(io.BytesIO(b"v1"), "rootlock.txt")
-    with client.locked("", scope=EXCLUSIVE, depth="infinity"):
+    fs.upload_fileobj(io.BytesIO(b"v1"), "rootlock.txt")
+    with fs.locked("", scope=EXCLUSIVE, depth="infinity"):
         # Must not raise - the held root lock's token must be attached.
-        client.upload_fileobj(io.BytesIO(b"v2"), "rootlock.txt", overwrite=True)
+        fs.upload_fileobj(io.BytesIO(b"v2"), "rootlock.txt", overwrite=True)
     buf = io.BytesIO()
-    client.download_fileobj("rootlock.txt", buf)
+    fs.download_fileobj("rootlock.txt", buf)
     assert buf.getvalue() == b"v2"
 
 
-def test_concurrent_shared_locks_on_the_same_path(client: Session) -> None:
+def test_concurrent_shared_locks_on_the_same_path(fs: FileSystem) -> None:
     """RFC 4918 §6.2 allows several shared locks on one resource to coexist."""
-    client.upload_fileobj(io.BytesIO(b"v1"), "shared.txt")
-    with client.locked("shared.txt", scope=SHARED) as lock_a:
-        with client.locked("shared.txt", scope=SHARED):
+    fs.upload_fileobj(io.BytesIO(b"v1"), "shared.txt")
+    with fs.locked("shared.txt", scope=SHARED) as lock_a:
+        with fs.locked("shared.txt", scope=SHARED):
             pass  # released here - must not evict lock_a's bookkeeping
         # lock_a is still held; a write through it must still carry its token.
-        client.upload_fileobj(io.BytesIO(b"v2"), "shared.txt", overwrite=True)
+        fs.upload_fileobj(io.BytesIO(b"v2"), "shared.txt", overwrite=True)
         assert lock_a.token  # sanity: still the same object, unaffected
 
 
-def test_copy_onto_a_client_locked_destination(client: Session) -> None:
+def test_copy_onto_a_client_locked_destination(client: Session, fs: FileSystem) -> None:
     """RFC 4918 §10.2: a locked destination's token MUST be submitted too."""
-    client.upload_fileobj(io.BytesIO(b"source"), "xfer_src.txt")
-    client.upload_fileobj(io.BytesIO(b"old dest"), "xfer_dst.txt")
-    with client.locked("xfer_dst.txt", scope=EXCLUSIVE):
+    fs.upload_fileobj(io.BytesIO(b"source"), "xfer_src.txt")
+    fs.upload_fileobj(io.BytesIO(b"old dest"), "xfer_dst.txt")
+    with fs.locked("xfer_dst.txt", scope=EXCLUSIVE):
         client.copy("xfer_src.txt", "xfer_dst.txt", overwrite=True).raise_for_status()
     buf = io.BytesIO()
-    client.download_fileobj("xfer_dst.txt", buf)
+    fs.download_fileobj("xfer_dst.txt", buf)
     assert buf.getvalue() == b"source"
 
 
 def test_move_onto_a_client_locked_destination_without_the_fix_would_423(
-    client: Session,
+    client: Session, fs: FileSystem
 ) -> None:
     """Same as the COPY case, for MOVE."""
-    client.upload_fileobj(io.BytesIO(b"source"), "mv_src.txt")
-    client.upload_fileobj(io.BytesIO(b"old dest"), "mv_dst.txt")
-    with client.locked("mv_dst.txt", scope=EXCLUSIVE):
+    fs.upload_fileobj(io.BytesIO(b"source"), "mv_src.txt")
+    fs.upload_fileobj(io.BytesIO(b"old dest"), "mv_dst.txt")
+    with fs.locked("mv_dst.txt", scope=EXCLUSIVE):
         client.move("mv_src.txt", "mv_dst.txt", overwrite=True).raise_for_status()
     buf = io.BytesIO()
-    client.download_fileobj("mv_dst.txt", buf)
+    fs.download_fileobj("mv_dst.txt", buf)
     assert buf.getvalue() == b"source"
 
 
-def test_lock_refresh(client: Session) -> None:
+def test_lock_refresh(fs: FileSystem) -> None:
     """RFC 4918 §9.10.2: a bodyless LOCK with an If header refreshes the timeout."""
-    client.upload_fileobj(io.BytesIO(b"x"), "refresh.txt")
-    with client.locked("refresh.txt", scope=EXCLUSIVE, lock_timeout=30) as active_lock:
-        refreshed = client.refresh_lock(
-            "refresh.txt", active_lock.token, lock_timeout=60
-        )
+    fs.upload_fileobj(io.BytesIO(b"x"), "refresh.txt")
+    with fs.locked("refresh.txt", scope=EXCLUSIVE, lock_timeout=30) as active_lock:
+        refreshed = fs.refresh_lock("refresh.txt", active_lock.token, lock_timeout=60)
         assert refreshed.token == active_lock.token
         # Still holding it, still usable for a write afterwards.
-        client.upload_fileobj(io.BytesIO(b"y"), "refresh.txt", overwrite=True)
+        fs.upload_fileobj(io.BytesIO(b"y"), "refresh.txt", overwrite=True)
 
 
-def test_lock_rejects_an_invalid_depth(client: Session) -> None:
+def test_lock_rejects_an_invalid_depth(fs: FileSystem) -> None:
     """RFC 4918 §9.10.4: only '0' or 'infinity' are legal Depth values for LOCK."""
-    client.upload_fileobj(io.BytesIO(b"x"), "depthlock.txt")
+    fs.upload_fileobj(io.BytesIO(b"x"), "depthlock.txt")
     with (
         pytest.raises(ValueError, match="Depth"),
-        client.locked("depthlock.txt", depth="1"),
+        fs.locked("depthlock.txt", depth="1"),
     ):
         pass
 
 
-def test_copy_rejects_an_invalid_depth(client: Session) -> None:
+def test_copy_rejects_an_invalid_depth(client: Session, fs: FileSystem) -> None:
     """RFC 4918 §9.8.3: only '0' or 'infinity' are legal Depth values for COPY."""
-    client.upload_fileobj(io.BytesIO(b"x"), "depthcopy.txt")
+    fs.upload_fileobj(io.BytesIO(b"x"), "depthcopy.txt")
     with pytest.raises(ValueError, match="Depth"):
         client.copy("depthcopy.txt", "depthcopy2.txt", depth=1)
 
 
-def test_get_props_sends_depth_zero(client: Session) -> None:
+def test_get_props_sends_depth_zero(fs: FileSystem) -> None:
     """A single-resource property lookup should never trigger a full traversal."""
-    client.mkdir("depthdir")
-    client.upload_fileobj(io.BytesIO(b"x"), "depthdir/child.txt")
-    props = client.get_props("depthdir")
+    fs.mkdir("depthdir")
+    fs.upload_fileobj(io.BytesIO(b"x"), "depthdir/child.txt")
+    props = fs.get_props("depthdir")
     # If Depth had defaulted to infinity, the collection's own PROPFIND
     # response would still be the one returned here - the real assertion
     # is that this doesn't error and returns exactly the collection's
@@ -243,18 +241,18 @@ def test_get_props_sends_depth_zero(client: Session) -> None:
     assert props.collection is True
 
 
-def test_lockdiscovery_is_parsed_into_activelocks(client: Session) -> None:
+def test_lockdiscovery_is_parsed_into_activelocks(fs: FileSystem) -> None:
     """lockdiscovery's <activelock> children should reuse ActiveLock, not stay raw XML."""
-    client.upload_fileobj(io.BytesIO(b"x"), "lockdisco.txt")
-    with client.locked("lockdisco.txt", scope=EXCLUSIVE) as active_lock:
-        props = client.get_props("lockdisco.txt")
+    fs.upload_fileobj(io.BytesIO(b"x"), "lockdisco.txt")
+    with fs.locked("lockdisco.txt", scope=EXCLUSIVE) as active_lock:
+        props = fs.get_props("lockdisco.txt")
         assert len(props.active_locks) == 1
         assert isinstance(props.active_locks[0], ActiveLock)
         assert props.active_locks[0].token == active_lock.token
 
 
-def test_supportedlock_is_parsed_into_lockentries(client: Session) -> None:
+def test_supportedlock_is_parsed_into_lockentries(fs: FileSystem) -> None:
     """supportedlock's <lockentry> children should reuse LockEntry, not stay raw XML."""
-    client.upload_fileobj(io.BytesIO(b"x"), "supportedlock.txt")
-    props = client.get_props("supportedlock.txt")
+    fs.upload_fileobj(io.BytesIO(b"x"), "supportedlock.txt")
+    props = fs.get_props("supportedlock.txt")
     assert all(isinstance(entry, LockEntry) for entry in props.supported_locks)

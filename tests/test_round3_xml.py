@@ -8,7 +8,7 @@ from xml.etree.ElementTree import fromstring
 import pytest
 
 from tests.scripted_server import OK, Seen, always, scripted_server
-from webdav import Session
+from webdav import FileSystem, Session
 from webdav.date_utils import from_rfc1123, fromisoformat
 from webdav.exceptions import MalformedResponseError
 from webdav.locks import LockRegistry
@@ -70,7 +70,7 @@ def test_a_single_string_is_not_a_list_of_characters() -> None:
     with pytest.raises(TypeError, match="not a single"):
         build_propfind_body("etag")  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="not a single"):
-        Session("http://unused.invalid").get_props("/a", names="etag")  # type: ignore[arg-type]
+        FileSystem("http://unused.invalid").get_props("/a", names="etag")  # type: ignore[arg-type]
 
 
 def test_ordinary_names_still_work() -> None:
@@ -182,14 +182,14 @@ def _lock_server(token_text: str, header: str = "<opaquelocktoken:abc>"):  # typ
 
 def test_a_pretty_printed_token_is_accepted() -> None:
     with scripted_server(_lock_server("\n   opaquelocktoken:abc\n  ")) as (url, _rec):
-        with Session(retry=False).locked(f"{url}/f") as lock:
+        with FileSystem(retry=False).locked(f"{url}/f") as lock:
             assert lock.token == "opaquelocktoken:abc"
 
 
 def test_a_lock_the_client_cannot_use_is_released_anyway() -> None:
     with scripted_server(_lock_server("bad token with spaces")) as (url, rec):
         with pytest.raises(MalformedResponseError):
-            with Session(retry=False).locked(f"{url}/f"):
+            with FileSystem(retry=False).locked(f"{url}/f"):
                 pass
     assert [r.method for r in rec.requests] == ["LOCK", "UNLOCK"]
     assert rec.requests[1].headers["lock-token"] == "<opaquelocktoken:abc>"
@@ -199,7 +199,8 @@ def test_unlock_goes_to_the_url_that_was_locked() -> None:
     with scripted_server(_lock_server("opaquelocktoken:abc")) as (url_a, rec_a):
         with scripted_server(always(OK)) as (url_b, rec_b):
             session = Session(url_a, retry=False)
-            with session.locked("f"):
+            fs = FileSystem.from_session(session)
+            with fs.locked("f"):
                 session.base_url = url_b
     assert [r.method for r in rec_a.requests] == ["LOCK", "UNLOCK"]
     assert rec_b.requests == []

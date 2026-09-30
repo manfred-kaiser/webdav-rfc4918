@@ -24,8 +24,8 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 import requests.exceptions
 
+from webdav.fs import FileSystem
 from webdav.redirects import RedirectPolicy
-from webdav.session import Session
 from webdav.tls import DEFAULT_MINIMUM_TLS_VERSION, TLSOptions
 
 if TYPE_CHECKING:
@@ -199,9 +199,9 @@ def _client_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     return kwargs
 
 
-def _client_for(url: str, args: argparse.Namespace) -> tuple[Session, str]:
+def _client_for(url: str, args: argparse.Namespace) -> tuple[FileSystem, str]:
     base_url, path, auth = _split_url(url, user=args.user, password=args.password)
-    return Session(base_url, auth=auth, **_client_kwargs(args)), path
+    return FileSystem(base_url, auth=auth, **_client_kwargs(args)), path
 
 
 def _cmd_ls(args: argparse.Namespace) -> None:
@@ -262,7 +262,7 @@ def _cmd_rm(args: argparse.Namespace) -> None:
 
 def _same_server_paths(
     src: str, dst: str, args: argparse.Namespace
-) -> tuple[Session, str, str]:
+) -> tuple[FileSystem, str, str]:
     src_base, src_path, src_auth = _split_url(
         src, user=args.user, password=args.password
     )
@@ -272,19 +272,23 @@ def _same_server_paths(
     if (src_base, src_auth) != (dst_base, dst_auth):
         msg = "source and destination must be on the same server (move/copy is server-side)"
         raise CLIError(msg)
-    return Session(src_base, auth=src_auth, **_client_kwargs(args)), src_path, dst_path
+    return (
+        FileSystem(src_base, auth=src_auth, **_client_kwargs(args)),
+        src_path,
+        dst_path,
+    )
 
 
 def _cmd_mv(args: argparse.Namespace) -> None:
     client, src_path, dst_path = _same_server_paths(args.src, args.dst, args)
     with client:
-        client.move(src_path, dst_path, overwrite=args.overwrite).raise_for_status()
+        client.move(src_path, dst_path, overwrite=args.overwrite)
 
 
 def _cmd_cp(args: argparse.Namespace) -> None:
     client, src_path, dst_path = _same_server_paths(args.src, args.dst, args)
     with client:
-        client.copy(src_path, dst_path, overwrite=args.overwrite).raise_for_status()
+        client.copy(src_path, dst_path, overwrite=args.overwrite)
 
 
 def _add_client_args(parser: argparse.ArgumentParser) -> None:

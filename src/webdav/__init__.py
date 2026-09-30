@@ -1,46 +1,17 @@
 """RFC 4918 compliant WebDAV client, built on ``requests``."""
 
-# ``open`` mirrors Session.open (like ``gzip.open`` / ``io.open``), so it is public
-# and, as in those modules, ``from webdav import *`` shadows the builtin.
-# pylint: disable-next=redefined-builtin
 from webdav.api import (
-    content_language,
-    content_length,
-    content_type,
-    copy,
-    created,
-    dav_compliance,
     delete,
-    download_file,
-    download_fileobj,
-    etag,
-    exists,
     get,
-    get_props,
     head,
-    info,
-    isdir,
-    isfile,
     lock,
-    locked,
-    ls,
     mkcol,
-    mkdir,
-    modified,
-    move,
-    open,  # noqa: A004
     options,
     propfind,
     proppatch,
     put,
-    refresh_lock,
-    remove,
     request,
-    set_props,
     unlock,
-    upload_file,
-    upload_fileobj,
-    walk,
 )
 from webdav.exceptions import (
     ClientError,
@@ -61,6 +32,39 @@ from webdav.exceptions import (
     TLSConfigError,
     WebDAVError,
 )
+
+# ``open`` mirrors FileSystem.open (like ``gzip.open`` / ``io.open``), so it is
+# public and, as in those modules, ``from webdav import *`` shadows the builtin.
+# pylint: disable-next=redefined-builtin
+from webdav.fs import (
+    FileSystem,
+    content_language,
+    content_length,
+    content_type,
+    copy,
+    created,
+    dav_compliance,
+    download_file,
+    download_fileobj,
+    etag,
+    exists,
+    get_props,
+    info,
+    isdir,
+    isfile,
+    locked,
+    ls,
+    mkdir,
+    modified,
+    move,
+    open,  # noqa: A004
+    refresh_lock,
+    remove,
+    set_props,
+    upload_file,
+    upload_fileobj,
+    walk,
+)
 from webdav.redirects import RedirectPolicy
 from webdav.resource import Resource
 from webdav.response import Response
@@ -71,6 +75,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "ClientError",
+    "FileSystem",
     "ForbiddenError",
     "HTTPStatusError",
     "InsecureConfigurationError",

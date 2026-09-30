@@ -5,9 +5,9 @@ requires = [ "hatchling==1.31.0" ]
 [project]
 name = "webdav-rfc4918"
 version = "0.1.0"
-description = "RFC 4918 compliant WebDAV client, built on requests, with an fsspec filesystem and a CLI"
+description = "RFC 4918 compliant WebDAV client, built on requests, with a CLI"
 readme = "README.md"
-keywords = [ "fsspec", "mtls", "rfc4918", "webdav", "webdav-cli", "webdav-client" ]
+keywords = [ "mtls", "rfc4918", "webdav", "webdav-cli", "webdav-client" ]
 license = { text = "MIT" }
 authors = [ { name = "Manfred Kaiser", email = "manfred.kaiser@ssh-mitm.at" } ]
 maintainers = [ { name = "Manfred Kaiser", email = "manfred.kaiser@ssh-mitm.at" } ]
@@ -26,9 +26,7 @@ dependencies = [ "requests>=2.32.4,<3", "urllib3>=2.7.0,<3" ]
 dav = "webdav.cli:main"
 
 [project.optional-dependencies]
-all = [ "webdav-rfc4918[fsspec]" ]
 docs = [ "myst-parser", "sphinx", "sphinx-copybutton", "sphinx-rtd-theme" ]
-fsspec = [ "fsspec>=2022.11.0" ]
 
 [project.urls]
 Homepage = "https://github.com/manfred-kaiser/webdav-rfc4918"
@@ -41,7 +39,7 @@ packages = [ "src/webdav" ]
 
 [tool.hatch.envs.hatch-test]
 dependencies = [ "hypothesis", "pytest", "pytest-cov", "pytest-xdist", "typing-extensions" ]
-extra-dependencies = [ "webdav-rfc4918[all]", "cheroot", "wsgidav" ]
+extra-dependencies = [ "cheroot", "wsgidav" ]
 
 [tool.hatch.envs.hatch-test.scripts]
 run = "pytest{env:HATCH_TEST_ARGS:} {args:tests/}"
@@ -58,7 +56,6 @@ build = [ "sphinx-build docs build/html" ]
 
 [tool.hatch.envs.lint]
 detached = false
-features = [ "all" ]
 dependencies = [
   "bandit",
   "black~=26.0",
@@ -80,7 +77,6 @@ dependencies = [
 check = [
   "pytest",
   "black --check src/webdav",
-  "python tools/gen_api.py --check",
   "bandit -c pyproject.toml -r src/webdav",
   "ruff check src/webdav",
   "flake8 src/webdav",
@@ -137,6 +133,9 @@ max-args = 13
 "docs/**" = [ "INP001" ]
 "tools/**" = [ "INP001", "S603" ] # standalone scripts, not a package
 "src/webdav/cli.py" = [ "T201" ] # it's a CLI, printing to stdout is the point
+"src/webdav/fs.py" = [
+  "SLF001", # FileSystem *is* the internal API Session's file-system layer composes against
+]
 "tests/**" = [
   "ANN",    # return/argument types not required on test functions
   "D",      # test names are self-documenting, no docstring convention here
@@ -169,8 +168,6 @@ disable = [
   "duplicate-code",
   # urllib3 connections get request/getresponse from http.client; pylint cannot see it.
   "no-member",
-  # fsspec.get_file adds nothing but the documented outfile handling.
-  "signature-differs",
 ]
 
 
@@ -239,7 +236,7 @@ disallow_incomplete_defs = true
 files = [ "src/webdav", "tests", "docs" ]
 
 [[tool.mypy.overrides]]
-module = [ "fsspec.*", "wsgidav.*" ]
+module = [ "wsgidav.*" ]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

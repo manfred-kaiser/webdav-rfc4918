@@ -25,7 +25,13 @@ from typing import cast
 import pytest
 
 from tests.rogue_server import RogueBehavior, rogue_server
-from webdav import RedirectNotFollowedError, RedirectPolicy, Session, WebDAVError
+from webdav import (
+    FileSystem,
+    RedirectNotFollowedError,
+    RedirectPolicy,
+    Session,
+    WebDAVError,
+)
 from webdav.locks import build_lock_body
 from webdav.xml_utils import parse_xml
 
@@ -38,8 +44,8 @@ def test_put_does_not_follow_redirect_to_a_different_resource() -> None:
     behavior = RogueBehavior(redirect_from="/victim.txt", redirect_target=None)
     with rogue_server(behavior) as url:
         behavior.redirect_target = f"{url}/attacker-stash.txt"
-        with Session(url) as client, pytest.raises(RedirectNotFollowedError):
-            client.upload_fileobj(io.BytesIO(b"secret"), "victim.txt")
+        with FileSystem(url) as fs, pytest.raises(RedirectNotFollowedError):
+            fs.upload_fileobj(io.BytesIO(b"secret"), "victim.txt")
 
     attacker_hits = [r for r in behavior.requests if r[1] == "/attacker-stash.txt"]
     assert (
@@ -90,11 +96,9 @@ def test_string_bodied_write_does_not_leak_across_hosts_on_redirect() -> None:
                 self.end_headers()
 
         with _raw_http_server(Victim) as victim_url:
-            client = Session(victim_url, auth=("realuser", "realpass123"))
+            fs = FileSystem(victim_url, auth=("realuser", "realpass123"))
             with pytest.raises(RedirectNotFollowedError):
-                client.set_props(
-                    "victim.txt", set_props={"displayname": "CONFIDENTIAL"}
-                )
+                fs.set_props("victim.txt", set_props={"displayname": "CONFIDENTIAL"})
 
     assert (
         not attacker_hits
@@ -111,10 +115,10 @@ def test_malformed_multistatus_body_raises_a_webdaverror() -> None:
     behavior = RogueBehavior(malformed_multistatus_body=b"<this is not > < valid xml")
     with (
         rogue_server(behavior) as url,
-        Session(url) as client,
+        FileSystem(url) as fs,
         pytest.raises(WebDAVError),
     ):
-        client.get_props("anything")
+        fs.get_props("anything")
 
 
 def test_xxe_file_entity_is_not_resolved() -> None:
@@ -210,11 +214,11 @@ def test_owner_with_crlf_stays_inside_the_xml_body() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_an_empty_file_has_size_zero_not_none(client: Session) -> None:
-    client.upload_fileobj(io.BytesIO(b""), "empty.txt")
-    assert client.get_props("empty.txt", names=["content_length"]).content_length == 0
-    assert client.info("empty.txt").size == 0
-    assert client.content_length("empty.txt") == 0
+def test_an_empty_file_has_size_zero_not_none(fs: FileSystem) -> None:
+    fs.upload_fileobj(io.BytesIO(b""), "empty.txt")
+    assert fs.get_props("empty.txt", names=["content_length"]).content_length == 0
+    assert fs.info("empty.txt").size == 0
+    assert fs.content_length("empty.txt") == 0
 
 
 # ---------------------------------------------------------------------------
@@ -223,9 +227,9 @@ def test_an_empty_file_has_size_zero_not_none(client: Session) -> None:
 
 
 def test_download_file_refuses_to_follow_a_local_symlink(
-    client: Session, tmp_path: Path
+    fs: FileSystem, tmp_path: Path
 ) -> None:
-    client.upload_fileobj(io.BytesIO(b"remote content"), "dl.txt")
+    fs.upload_fileobj(io.BytesIO(b"remote content"), "dl.txt")
 
     real_target = tmp_path / "real_target.txt"
     real_target.write_text("do not touch")
@@ -233,7 +237,7 @@ def test_download_file_refuses_to_follow_a_local_symlink(
     link.symlink_to(real_target)
 
     with pytest.raises(OSError):  # noqa: PT011
-        client.download_file("dl.txt", link)
+        fs.download_file("dl.txt", link)
 
     assert real_target.read_text() == "do not touch"
 
@@ -294,7 +298,9 @@ def test_spoofed_lockroot_does_not_redirect_lock_bookkeeping() -> None:
     with (
         _raw_http_server(Handler) as url,
         Session(url) as client,
-        client.locked("victim.txt", scope="exclusive") as active_lock,
+        FileSystem.from_session(client).locked(
+            "victim.txt", scope="exclusive"
+        ) as active_lock,
     ):
         assert active_lock.lock_root == "/other-secret.txt"  # the server's lie
         # Bookkeeping must follow what the caller asked for, not the lie.
@@ -353,9 +359,9 @@ def test_missing_trailing_slash_same_origin_redirect_is_followed() -> None:
             self.end_headers()
             self.wfile.write(body)
 
-    with _raw_http_server(Handler) as url, Session(url) as client:
-        assert client.exists("somedir") is True
-        assert client.isdir("somedir") is True
+    with _raw_http_server(Handler) as url, FileSystem(url) as fs:
+        assert fs.exists("somedir") is True
+        assert fs.isdir("somedir") is True
 
 
 def test_cross_origin_redirect_is_refused_even_with_a_plausible_pretext() -> None:
@@ -381,10 +387,10 @@ def test_cross_origin_redirect_is_refused_even_with_a_plausible_pretext() -> Non
 
     with (
         _raw_http_server(Handler) as url,
-        Session(url) as client,
+        FileSystem(url) as fs,
         pytest.raises(RedirectNotFollowedError),
     ):
-        client.exists("somedir")
+        fs.exists("somedir")
 
 
 def test_trusted_cross_origin_redirect_does_not_forward_credentials() -> None:
@@ -433,14 +439,14 @@ def test_trusted_cross_origin_redirect_does_not_forward_credentials() -> None:
 
         with (
             _raw_http_server(Gateway) as gateway_url,
-            Session(
+            FileSystem(
                 gateway_url,
                 auth=("secretuser", "secretpass"),
                 redirect_policy=RedirectPolicy.WHITELIST,
                 trusted_redirect_origins=[storage_url],
-            ) as client,
+            ) as fs,
         ):
-            client.set_props("victim.txt", set_props={"displayname": "x"})
+            fs.set_props("victim.txt", set_props={"displayname": "x"})
 
     assert received["had_auth"] is False
     assert b"displayname" in cast("bytes", received["body"])

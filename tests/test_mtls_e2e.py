@@ -7,7 +7,7 @@ import pytest
 import requests.exceptions
 
 from tests.mtls_server import Certificates, mtls_webdav_server
-from webdav import Session
+from webdav import FileSystem
 from webdav.exceptions import TLSConfigError
 from webdav.tls import TLSOptions
 
@@ -25,7 +25,7 @@ def mtls_url(tmp_path: Path, certs: Certificates) -> Iterator[str]:
 
 def test_valid_client_cert_is_accepted(mtls_url: str, certs: Certificates) -> None:
     cert, key = certs.issue_client_cert("client")
-    with Session(
+    with FileSystem(
         mtls_url, cert=(str(cert), str(key)), verify=str(certs.ca_cert)
     ) as client:
         client.mkdir("docs")
@@ -38,7 +38,7 @@ def test_encrypted_client_key_with_correct_password(
     cert, key = certs.issue_client_cert("client")
     encrypted_key = certs.encrypt_key(key, "correct-horse-battery-staple")
     tls = TLSOptions(key_password="correct-horse-battery-staple")
-    with Session(
+    with FileSystem(
         mtls_url,
         cert=(str(cert), str(encrypted_key)),
         verify=str(certs.ca_cert),
@@ -55,7 +55,7 @@ def test_encrypted_client_key_with_wrong_password_fails_cleanly(
     encrypted_key = certs.encrypt_key(key, "correct-horse-battery-staple")
     tls = TLSOptions(key_password="wrong-password")
     with pytest.raises(TLSConfigError):
-        Session(
+        FileSystem(
             mtls_url,
             cert=(str(cert), str(encrypted_key)),
             verify=str(certs.ca_cert),
@@ -69,7 +69,7 @@ def test_certificate_from_untrusted_ca_is_rejected(
     other_ca_key = certs.issue_other_ca()
     cert, key = certs.issue_client_cert("rogue", ca_key=other_ca_key)
     with (
-        Session(
+        FileSystem(
             mtls_url, cert=(str(cert), str(key)), verify=str(certs.ca_cert)
         ) as client,
         pytest.raises(requests.exceptions.SSLError),
@@ -79,7 +79,7 @@ def test_certificate_from_untrusted_ca_is_rejected(
 
 def test_missing_client_cert_is_rejected(mtls_url: str, certs: Certificates) -> None:
     with (
-        Session(mtls_url, verify=str(certs.ca_cert)) as client,
+        FileSystem(mtls_url, verify=str(certs.ca_cert)) as client,
         pytest.raises(requests.exceptions.SSLError),
     ):
         client.exists("docs")

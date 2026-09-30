@@ -17,7 +17,7 @@ import requests
 
 from tests.mtls_server import Certificates
 from tests.scripted_server import OK, Seen, always, redirect, scripted_server
-from webdav import RedirectPolicy, Session, exceptions
+from webdav import FileSystem, RedirectPolicy, Session, exceptions
 from webdav.conditional import Condition, build_if_header_single
 from webdav.exceptions import ClientError, InsecureConfigurationError, TLSConfigError
 from webdav.locks import LockRegistry
@@ -265,7 +265,7 @@ def test_credentials_in_a_url_do_not_reach_messages_or_warnings() -> None:
     with scripted_server(always((404, {}, b""))) as (url, rec):
         host = url.removeprefix("http://")
         with pytest.raises(ClientError, match="auth") as refused:
-            Session(retry=False).ls(f"http://bob:PWD4@{host}/dir")
+            FileSystem(retry=False).ls(f"http://bob:PWD4@{host}/dir")
     assert "PWD4" not in str(refused.value)
     assert (
         rec.requests == []
@@ -465,10 +465,10 @@ def test_a_shared_lock_response_selects_the_lock_that_was_asked_about() -> None:
         return 204, {}, b""
 
     with scripted_server(respond) as (url, _rec):
-        with Session(retry=False).locked(f"{url}/f", scope="shared") as lock:
+        with FileSystem(retry=False).locked(f"{url}/f", scope="shared") as lock:
             assert lock.owner == "me"
             assert lock.token == "opaquelocktoken:mine"
-        refreshed = Session(retry=False).refresh_lock(
+        refreshed = FileSystem(retry=False).refresh_lock(
             f"{url}/f", "opaquelocktoken:mine"
         )
         assert refreshed.owner == "me"
@@ -477,6 +477,7 @@ def test_a_shared_lock_response_selects_the_lock_that_was_asked_about() -> None:
 def test_a_412_is_a_precondition_failure_not_necessarily_an_existing_resource() -> None:
     with scripted_server(always((412, {}, b""))) as (url, _rec):
         session = Session(retry=False)
+        fs = FileSystem.from_session(session)
         with pytest.raises(exceptions.PreconditionFailedError) as excinfo:
             session._send("PUT", f"{url}/a", data=b"x")
         assert not isinstance(excinfo.value, exceptions.ResourceAlreadyExistsError)
@@ -485,7 +486,7 @@ def test_a_412_is_a_precondition_failure_not_necessarily_an_existing_resource() 
         import io
 
         with pytest.raises(exceptions.ResourceAlreadyExistsError):
-            session.upload_fileobj(io.BytesIO(b"x"), f"{url}/a")
+            fs.upload_fileobj(io.BytesIO(b"x"), f"{url}/a")
     assert issubclass(
         exceptions.ResourceAlreadyExistsError, exceptions.PreconditionFailedError
     )

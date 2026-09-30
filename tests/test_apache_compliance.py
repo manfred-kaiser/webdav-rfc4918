@@ -14,7 +14,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from webdav import ResourceAlreadyExistsError, ResourceLockedError, Session
+from webdav import FileSystem, ResourceAlreadyExistsError, ResourceLockedError
 from webdav.locks import EXCLUSIVE
 
 APACHE_URL = os.environ.get("WEBDAV_TEST_APACHE_URL")
@@ -30,19 +30,19 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
-def apache_client() -> Iterator[Session]:
+def apache_client() -> Iterator[FileSystem]:
     assert APACHE_URL is not None  # guaranteed by pytestmark's skipif above
-    with Session(APACHE_URL, auth=APACHE_AUTH) as c:
+    with FileSystem(APACHE_URL, auth=APACHE_AUTH) as c:
         yield c
 
 
-def test_apache_options_advertises_class_2(apache_client: Session) -> None:
+def test_apache_options_advertises_class_2(apache_client: FileSystem) -> None:
     compliances = apache_client.dav_compliance()
     assert "1" in compliances
     assert "2" in compliances, "server does not advertise Class 2 (locking) support"
 
 
-def test_apache_mkdir_upload_download_roundtrip(apache_client: Session) -> None:
+def test_apache_mkdir_upload_download_roundtrip(apache_client: FileSystem) -> None:
     apache_client.mkdir("compliance")
     apache_client.upload_fileobj(io.BytesIO(b"apache says hi"), "compliance/a.txt")
 
@@ -51,7 +51,7 @@ def test_apache_mkdir_upload_download_roundtrip(apache_client: Session) -> None:
     assert buf.getvalue() == b"apache says hi"
 
 
-def test_apache_overwrite_protection(apache_client: Session) -> None:
+def test_apache_overwrite_protection(apache_client: FileSystem) -> None:
     apache_client.upload_fileobj(io.BytesIO(b"v1"), "compliance/protected.txt")
     with pytest.raises(ResourceAlreadyExistsError):
         apache_client.upload_fileobj(
@@ -59,7 +59,7 @@ def test_apache_overwrite_protection(apache_client: Session) -> None:
         )
 
 
-def test_apache_lock_and_write_with_held_token(apache_client: Session) -> None:
+def test_apache_lock_and_write_with_held_token(apache_client: FileSystem) -> None:
     apache_client.upload_fileobj(io.BytesIO(b"v1"), "compliance/locked.txt")
 
     with apache_client.locked("compliance/locked.txt", scope=EXCLUSIVE):
@@ -72,11 +72,11 @@ def test_apache_lock_and_write_with_held_token(apache_client: Session) -> None:
     assert buf.getvalue() == b"v2"
 
 
-def test_apache_lock_blocks_a_second_client(apache_client: Session) -> None:
+def test_apache_lock_blocks_a_second_client(apache_client: FileSystem) -> None:
     apache_client.upload_fileobj(io.BytesIO(b"v1"), "compliance/locked2.txt")
 
     assert APACHE_URL is not None  # guaranteed by pytestmark's skipif above
-    other = Session(APACHE_URL, auth=APACHE_AUTH)
+    other = FileSystem(APACHE_URL, auth=APACHE_AUTH)
     try:
         with (
             apache_client.locked("compliance/locked2.txt", scope=EXCLUSIVE),
@@ -89,7 +89,7 @@ def test_apache_lock_blocks_a_second_client(apache_client: Session) -> None:
         other.close()
 
 
-def test_apache_set_and_get_custom_property(apache_client: Session) -> None:
+def test_apache_set_and_get_custom_property(apache_client: FileSystem) -> None:
     apache_client.upload_fileobj(io.BytesIO(b"x"), "compliance/p.txt")
     apache_client.set_props(
         "compliance/p.txt",

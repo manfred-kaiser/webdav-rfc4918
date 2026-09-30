@@ -6,124 +6,124 @@ import pytest
 
 from tests.server import AUTH
 from webdav import (
+    FileSystem,
     ResourceAlreadyExistsError,
     ResourceLockedError,
     ResourceNotFoundError,
-    Session,
 )
 from webdav.locks import EXCLUSIVE
 
 
-def test_mkdir_and_ls(client: Session) -> None:
-    client.mkdir("docs")
-    assert client.isdir("docs")
-    assert client.exists("docs")
-    assert client.ls("docs") == []
+def test_mkdir_and_ls(fs: FileSystem) -> None:
+    fs.mkdir("docs")
+    assert fs.isdir("docs")
+    assert fs.exists("docs")
+    assert fs.ls("docs") == []
 
 
-def test_mkdir_conflict_on_existing_collection(client: Session) -> None:
-    client.mkdir("docs")
+def test_mkdir_conflict_on_existing_collection(fs: FileSystem) -> None:
+    fs.mkdir("docs")
     with pytest.raises(ResourceAlreadyExistsError):
-        client.mkdir("docs")
+        fs.mkdir("docs")
 
 
-def test_upload_and_download_roundtrip(client: Session) -> None:
-    client.mkdir("docs")
-    client.upload_fileobj(io.BytesIO(b"hello world"), "docs/a.txt")
+def test_upload_and_download_roundtrip(fs: FileSystem) -> None:
+    fs.mkdir("docs")
+    fs.upload_fileobj(io.BytesIO(b"hello world"), "docs/a.txt")
 
-    assert client.isfile("docs/a.txt")
-    assert client.content_length("docs/a.txt") == len(b"hello world")
+    assert fs.isfile("docs/a.txt")
+    assert fs.content_length("docs/a.txt") == len(b"hello world")
 
     buf = io.BytesIO()
-    client.download_fileobj("docs/a.txt", buf)
+    fs.download_fileobj("docs/a.txt", buf)
     assert buf.getvalue() == b"hello world"
 
 
-def test_upload_overwrite_protection(client: Session) -> None:
-    client.upload_fileobj(io.BytesIO(b"v1"), "a.txt")
+def test_upload_overwrite_protection(fs: FileSystem) -> None:
+    fs.upload_fileobj(io.BytesIO(b"v1"), "a.txt")
     with pytest.raises(ResourceAlreadyExistsError):
-        client.upload_fileobj(io.BytesIO(b"v2"), "a.txt", overwrite=False)
+        fs.upload_fileobj(io.BytesIO(b"v2"), "a.txt", overwrite=False)
 
-    client.upload_fileobj(io.BytesIO(b"v2"), "a.txt", overwrite=True)
+    fs.upload_fileobj(io.BytesIO(b"v2"), "a.txt", overwrite=True)
     buf = io.BytesIO()
-    client.download_fileobj("a.txt", buf)
+    fs.download_fileobj("a.txt", buf)
     assert buf.getvalue() == b"v2"
 
 
-def test_open_read_text_and_binary(client: Session) -> None:
-    client.upload_fileobj(io.BytesIO("héllo".encode()), "t.txt")
+def test_open_read_text_and_binary(fs: FileSystem) -> None:
+    fs.upload_fileobj(io.BytesIO("héllo".encode()), "t.txt")
 
-    with client.open("t.txt", mode="rb") as f:
+    with fs.open("t.txt", mode="rb") as f:
         assert f.read() == "héllo".encode()
 
-    with client.open("t.txt", mode="r", encoding="utf-8") as f:
+    with fs.open("t.txt", mode="r", encoding="utf-8") as f:
         assert f.read() == "héllo"
 
 
-def test_move_and_copy(client: Session) -> None:
-    client.upload_fileobj(io.BytesIO(b"content"), "src.txt")
+def test_move_and_copy(fs: FileSystem) -> None:
+    fs.upload_fileobj(io.BytesIO(b"content"), "src.txt")
 
-    client.copy("src.txt", "copy.txt").raise_for_status()
-    assert client.exists("src.txt")
-    assert client.exists("copy.txt")
+    fs.copy("src.txt", "copy.txt")
+    assert fs.exists("src.txt")
+    assert fs.exists("copy.txt")
 
-    client.move("src.txt", "moved.txt").raise_for_status()
-    assert not client.exists("src.txt")
-    assert client.exists("moved.txt")
-
-
-def test_remove(client: Session) -> None:
-    client.upload_fileobj(io.BytesIO(b"x"), "gone.txt")
-    assert client.exists("gone.txt")
-    client.remove("gone.txt")
-    assert not client.exists("gone.txt")
+    fs.move("src.txt", "moved.txt")
+    assert not fs.exists("src.txt")
+    assert fs.exists("moved.txt")
 
 
-def test_not_found(client: Session) -> None:
+def test_remove(fs: FileSystem) -> None:
+    fs.upload_fileobj(io.BytesIO(b"x"), "gone.txt")
+    assert fs.exists("gone.txt")
+    fs.remove("gone.txt")
+    assert not fs.exists("gone.txt")
+
+
+def test_not_found(fs: FileSystem) -> None:
     with pytest.raises(ResourceNotFoundError):
-        client.info("does-not-exist.txt")
+        fs.info("does-not-exist.txt")
 
 
-def test_get_props_and_etag(client: Session) -> None:
-    client.upload_fileobj(io.BytesIO(b"data"), "e.txt")
-    props = client.get_props("e.txt")
+def test_get_props_and_etag(fs: FileSystem) -> None:
+    fs.upload_fileobj(io.BytesIO(b"data"), "e.txt")
+    props = fs.get_props("e.txt")
     assert props.content_length == 4
     assert props.etag
-    assert client.etag("e.txt") == props.etag
+    assert fs.etag("e.txt") == props.etag
 
 
-def test_ls_lists_members(client: Session) -> None:
-    client.mkdir("dir")
-    client.upload_fileobj(io.BytesIO(b"1"), "dir/one.txt")
-    client.upload_fileobj(io.BytesIO(b"2"), "dir/two.txt")
+def test_ls_lists_members(fs: FileSystem) -> None:
+    fs.mkdir("dir")
+    fs.upload_fileobj(io.BytesIO(b"1"), "dir/one.txt")
+    fs.upload_fileobj(io.BytesIO(b"2"), "dir/two.txt")
 
-    # Root-relative, matching fsspec's own AbstractFileSystem.ls() convention
-    # (this client's whole reason to expose a `detail=False` mode).
-    names = sorted(client.ls("dir"))
+    # Root-relative, matching os.walk's own full-path convention for
+    # directories reachable from the walk root.
+    names = sorted(fs.ls("dir"))
     assert names == ["dir/one.txt", "dir/two.txt"]
 
 
-def test_lock_and_write_with_held_token(client: Session) -> None:
-    client.upload_fileobj(io.BytesIO(b"v1"), "locked.txt")
+def test_lock_and_write_with_held_token(fs: FileSystem) -> None:
+    fs.upload_fileobj(io.BytesIO(b"v1"), "locked.txt")
 
-    with client.locked("locked.txt", scope=EXCLUSIVE) as active_lock:
+    with fs.locked("locked.txt", scope=EXCLUSIVE) as active_lock:
         assert active_lock.token
-        # A write through the same client automatically carries the
+        # A write through the same shared session automatically carries the
         # lock token via the `If` header - must succeed.
-        client.upload_fileobj(io.BytesIO(b"v2"), "locked.txt", overwrite=True)
+        fs.upload_fileobj(io.BytesIO(b"v2"), "locked.txt", overwrite=True)
 
     buf = io.BytesIO()
-    client.download_fileobj("locked.txt", buf)
+    fs.download_fileobj("locked.txt", buf)
     assert buf.getvalue() == b"v2"
 
 
-def test_lock_blocks_a_second_client(client: Session, server_url: str) -> None:
-    client.upload_fileobj(io.BytesIO(b"v1"), "locked2.txt")
+def test_lock_blocks_a_second_client(fs: FileSystem, server_url: str) -> None:
+    fs.upload_fileobj(io.BytesIO(b"v1"), "locked2.txt")
 
-    other = Session(server_url, auth=AUTH)
+    other = FileSystem(server_url, auth=AUTH)
     try:
         with (
-            client.locked("locked2.txt", scope=EXCLUSIVE),
+            fs.locked("locked2.txt", scope=EXCLUSIVE),
             pytest.raises(ResourceLockedError),
         ):
             other.upload_fileobj(io.BytesIO(b"v2"), "locked2.txt", overwrite=True)
@@ -131,9 +131,9 @@ def test_lock_blocks_a_second_client(client: Session, server_url: str) -> None:
         other.close()
 
 
-def test_set_and_get_custom_property(client: Session) -> None:
-    client.upload_fileobj(io.BytesIO(b"x"), "p.txt")
-    client.set_props("p.txt", set_props={("https://example.org/ns", "color"): "blue"})
+def test_set_and_get_custom_property(fs: FileSystem) -> None:
+    fs.upload_fileobj(io.BytesIO(b"x"), "p.txt")
+    fs.set_props("p.txt", set_props={("https://example.org/ns", "color"): "blue"})
 
-    props = client.get_props("p.txt", names=[("https://example.org/ns", "color")])
+    props = fs.get_props("p.txt", names=[("https://example.org/ns", "color")])
     assert props.text("https://example.org/ns", "color") == "blue"

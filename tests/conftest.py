@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from tests.server import AUTH, webdav_server
-from webdav import Session
+from webdav import FileSystem, Session
 
 
 @pytest.fixture
@@ -27,3 +27,9 @@ def client(server_url: str) -> Iterator[Session]:
     """A :class:`Session` authenticated against the test server."""
     with Session(server_url, auth=AUTH) as c:
         yield c
+
+
+@pytest.fixture
+def fs(client: Session) -> FileSystem:
+    """A :class:`FileSystem` sharing ``client``'s connection, cookies and locks."""
+    return FileSystem.from_session(client)

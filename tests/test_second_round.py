@@ -16,7 +16,7 @@ from tests.scripted_server import (
     scripted_server,
 )
 from tests.server import AUTH
-from webdav import RedirectPolicy, Session, exceptions
+from webdav import FileSystem, RedirectPolicy, Session, exceptions
 from webdav.exceptions import ClientError, MalformedResponseError, WebDAVError
 
 # ---------------------------------------------------------------------------
@@ -176,7 +176,9 @@ def test_an_absolute_destination_is_percent_encoded_once(server_url: str) -> Non
             f"{server_url}/a.txt", destination=f"{server_url}/ünï code.txt"
         )
         assert response.status_code == 201
-        assert session.exists(f"{server_url}/%C3%BCn%C3%AF%20code.txt")
+        assert FileSystem.from_session(session).exists(
+            f"{server_url}/%C3%BCn%C3%AF%20code.txt"
+        )
 
 
 def test_send_reads_a_no_length_body_normally() -> None:
@@ -200,9 +202,10 @@ def test_send_reads_a_no_length_body_normally() -> None:
 
 def test_copy_and_move_into_a_depth_zero_locked_collection(server_url: str) -> None:
     with Session(server_url, auth=AUTH, retry=False) as session:
-        session.mkdir("dir")
+        fs = FileSystem.from_session(session)
+        fs.mkdir("dir")
         session.put("out.txt", b"x")
-        with session.locked("dir", depth="0"):
+        with fs.locked("dir", depth="0"):
             assert session.copy("out.txt", destination="dir/c.txt").status_code == 201
             assert session.move("out.txt", destination="dir/m.txt").status_code == 201
             assert session.move("dir/c.txt", destination="c.txt").status_code == 201
@@ -261,7 +264,7 @@ def test_a_failure_is_not_hidden_by_a_later_entry_for_the_same_href() -> None:
     )
     with scripted_server(always(reply)) as (url, _rec):
         with pytest.raises(exceptions.MultiStatusError):
-            Session(retry=False).remove(f"{url}/d")
+            FileSystem(retry=False).remove(f"{url}/d")
 
 
 @pytest.mark.parametrize(
@@ -270,7 +273,7 @@ def test_a_failure_is_not_hidden_by_a_later_entry_for_the_same_href() -> None:
 def test_any_member_status_outside_2xx_is_a_failure(status: str) -> None:
     with scripted_server(always(_delete_reply(_entry("/d/x", status)))) as (url, _rec):
         with pytest.raises(exceptions.MultiStatusError):
-            Session(retry=False).remove(f"{url}/d")
+            FileSystem(retry=False).remove(f"{url}/d")
 
 
 def test_an_unparseable_member_status_is_an_error_not_a_success() -> None:
@@ -279,7 +282,7 @@ def test_an_unparseable_member_status_is_an_error_not_a_success() -> None:
         _rec,
     ):
         with pytest.raises(MalformedResponseError):
-            Session(retry=False).remove(f"{url}/d")
+            FileSystem(retry=False).remove(f"{url}/d")
 
 
 def test_a_2xx_member_status_is_fine() -> None:
@@ -287,7 +290,7 @@ def test_a_2xx_member_status_is_fine() -> None:
         _entry("/d/x", "HTTP/1.1 200 OK"), _entry("/d/y", "HTTP/1.1 204 No Content")
     )
     with scripted_server(always(reply)) as (url, _rec):
-        Session(retry=False).remove(f"{url}/d")
+        FileSystem(retry=False).remove(f"{url}/d")
 
 
 def test_nfc_and_nfd_twins_are_both_listed() -> None:
@@ -297,7 +300,7 @@ def test_nfc_and_nfd_twins_are_both_listed() -> None:
     nfd = unicodedata.normalize("NFD", "é")
     body = _multistatus_ls("/d/", f"/d/{nfc}", f"/d/{nfd}", "/d/x")
     with scripted_server(always((207, {}, body))) as (url, _rec):
-        names = Session(retry=False).ls(f"{url}/d")
+        names = FileSystem(retry=False).ls(f"{url}/d")
     assert sorted(names) == sorted([f"d/{nfc}", f"d/{nfd}", "d/x"])
 
 
@@ -317,7 +320,7 @@ def test_an_absolute_href_for_the_same_server_is_fine() -> None:
         return 207, {}, _multistatus_ls(f"http://{host}/d/", f"http://{host}/d/x.txt")
 
     with scripted_server(respond) as (url, _rec):
-        assert Session(retry=False).ls(f"{url}/d") == ["d/x.txt"]
+        assert FileSystem(retry=False).ls(f"{url}/d") == ["d/x.txt"]
 
 
 # ---------------------------------------------------------------------------
@@ -365,9 +368,10 @@ def test_download_does_not_touch_the_process_umask(
 
     monkeypatch.setattr(os, "umask", forbidden)
     with Session(server_url, auth=AUTH, retry=False) as session:
+        fs = FileSystem.from_session(session)
         session.put("a.txt", b"x")
         (tmp_path / "local").mkdir()
-        session.download_file("a.txt", tmp_path / "local" / "a.txt")
+        fs.download_file("a.txt", tmp_path / "local" / "a.txt")
     assert (tmp_path / "local" / "a.txt").read_bytes() == b"x"
 
 
@@ -378,8 +382,9 @@ def test_download_keeps_the_permissions_of_the_file_it_replaces(
     target.write_bytes(b"old")
     target.chmod(0o600)
     with Session(server_url, auth=AUTH, retry=False) as session:
+        fs = FileSystem.from_session(session)
         session.put("a.txt", b"new")
-        session.download_file("a.txt", target, overwrite=True)
+        fs.download_file("a.txt", target, overwrite=True)
     assert target.read_bytes() == b"new"
     assert target.stat().st_mode & 0o777 == 0o600
 
@@ -392,8 +397,9 @@ def test_a_new_download_gets_the_umask_permissions(
     previous = os.umask(0o022)
     try:
         with Session(server_url, auth=AUTH, retry=False) as session:
+            fs = FileSystem.from_session(session)
             session.put("a.txt", b"x")
-            session.download_file("a.txt", tmp_path / "new.txt")
+            fs.download_file("a.txt", tmp_path / "new.txt")
     finally:
         os.umask(previous)
     assert (tmp_path / "new.txt").stat().st_mode & 0o777 == 0o644
@@ -432,7 +438,7 @@ def test_a_failed_unlock_never_replaces_the_callers_own_exception() -> None:
 
     with scripted_server(respond) as (url, _rec):
         with pytest.raises(BoomError):
-            with Session(retry=False).locked(f"{url}/f"):
+            with FileSystem(retry=False).locked(f"{url}/f"):
                 raise BoomError
     assert unlocks["n"] >= 1
 
@@ -473,7 +479,7 @@ def test_a_weak_etag_is_not_a_validator_for_resuming_a_download() -> None:
     out = io.BytesIO()
     with scripted_server(respond) as (url, _rec):
         with pytest.raises((WebDAVError, requests.RequestException)):
-            Session(retry=False).download_fileobj(f"{url}/f", out)
+            FileSystem(retry=False).download_fileobj(f"{url}/f", out)
 
 
 # ---------------------------------------------------------------------------
@@ -517,13 +523,13 @@ def test_a_plain_web_server_answering_a_propfind_is_a_webdav_error_not_a_valueer
     None
 ):
     with scripted_server(always((200, {}, b"<html>hello</html>"))) as (url, _rec):
-        session = Session(retry=False)
+        fs = FileSystem(retry=False)
         for call in (
-            lambda: session.ls(f"{url}/d"),
-            lambda: session.info(f"{url}/d"),
-            lambda: session.exists(f"{url}/d"),
-            lambda: session.isdir(f"{url}/d"),
-            lambda: session.content_length(f"{url}/d"),
+            lambda: fs.ls(f"{url}/d"),
+            lambda: fs.info(f"{url}/d"),
+            lambda: fs.exists(f"{url}/d"),
+            lambda: fs.isdir(f"{url}/d"),
+            lambda: fs.content_length(f"{url}/d"),
         ):
             with pytest.raises(MalformedResponseError, match="207"):
                 call()
@@ -537,7 +543,7 @@ def test_a_case_insensitive_server_spelling_the_collection_differently_is_fine()
         return 207, {}, _multistatus_ls(f"{upper}/", f"{upper}/File.txt")
 
     with scripted_server(respond) as (url, _rec):
-        assert Session(retry=False).ls(f"{url}/dav/dir") == ["DAV/DIR/File.txt"]
+        assert FileSystem(retry=False).ls(f"{url}/dav/dir") == ["DAV/DIR/File.txt"]
 
 
 def test_a_backslash_in_a_name_is_an_ordinary_character_on_posix() -> None:
@@ -547,14 +553,14 @@ def test_a_backslash_in_a_name_is_an_ordinary_character_on_posix() -> None:
         pytest.skip("a backslash separates paths on Windows")
     body = _multistatus_ls("/d/", "/d/a%5Cb.txt", "/d/c\\d.txt")
     with scripted_server(always((207, {}, body))) as (url, _rec):
-        assert sorted(Session(retry=False).ls(f"{url}/d")) == [
+        assert sorted(FileSystem(retry=False).ls(f"{url}/d")) == [
             "d/a\\b.txt",
             "d/c\\d.txt",
         ]
 
 
 def test_walk_counts_queued_collections(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("webdav.session._WALK_MAX_DIRS", 50)
+    monkeypatch.setattr("webdav.fs._WALK_MAX_DIRS", 50)
 
     def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
         base = seen.path.rstrip("/")
@@ -566,7 +572,7 @@ def test_walk_counts_queued_collections(monkeypatch: pytest.MonkeyPatch) -> None
 
     with scripted_server(respond) as (url, rec):
         with pytest.raises(ClientError, match="walk gave up"):
-            list(Session(retry=False).walk(url))
+            list(FileSystem(retry=False).walk(url))
     assert len(rec.requests) == 1
 
 
