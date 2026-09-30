@@ -358,8 +358,11 @@ class LockRegistry:
         """Record that ``token`` (with ``depth``) is held on ``url``."""
         key = self._key(url)
         check_token(token)
+        held = HeldLock(_tag_url(url), token, depth)
         with self._mutex:
-            self._held.setdefault(key, []).append(HeldLock(_tag_url(url), token, depth))
+            entries = self._held.setdefault(key, [])
+            if held not in entries:
+                entries.append(held)
 
     def discard(self, url: str, token: str, depth: str) -> None:
         """Forget a held lock; a no-op if it isn't recorded."""

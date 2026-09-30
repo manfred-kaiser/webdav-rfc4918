@@ -1398,13 +1398,22 @@ class Session:
         depth: "int | str" = "infinity",
         lock_timeout: "int | Iterable[int | None] | None" = DEFAULT_LOCK_TIMEOUT,
         refresh: "str | None" = None,
+        track: bool = True,
         **kwargs: Any,
     ) -> Response:
         """Send a ``LOCK`` (RFC 4918 sec. 9.10).
 
         Returns the raw response; ``response.active_lock`` is the parsed
-        lock. This does *not* record the lock for automatic ``If``
-        headers - add it to :attr:`locks` for that.
+        lock. A lock that was granted (``200``/``201``) is recorded in
+        :attr:`locks`, under the URL that was asked for - never under a
+        ``lockroot`` the server names - so the writes that follow carry its
+        token in an ``If`` header until :meth:`unlock` releases it. (A refresh
+        keeps the token; there is nothing to record.)
+
+        A granted lock this session cannot read or record (no usable token, a
+        body that is not a lock) is released again, as far as its
+        ``Lock-Token`` header allows, and the error is raised: a lock nobody
+        knows the token of would only block everyone else until it times out.
 
         Args:
             url: The resource.
@@ -1417,7 +1426,16 @@ class Session:
                 with ``requests``' own network ``timeout=``).
             refresh: A lock token; sends a bodiless refresh request
                 instead of creating a lock (sec. 9.10.2).
+            track: ``False`` leaves :attr:`locks` alone and the response
+                unread: what you get is the server's answer, and the token in
+                it is yours to keep and to release.
             **kwargs: Anything :meth:`requests.Session.request` takes.
+
+        Raises:
+            ValueError: ``refresh`` is not a usable lock token, or ``depth``,
+                ``scope`` or ``lock_timeout`` is not a legal value.
+            MalformedResponseError: The server granted a lock but the answer
+                has no usable lock in it (with ``track=True``).
 
         """
         headers = {"Timeout": format_timeout(lock_timeout)}
@@ -1426,9 +1444,25 @@ class Session:
             return self._with_headers(Method.LOCK, url, kwargs, headers)
         headers["Depth"] = depth_header(depth, Method.LOCK)
         headers["Content-Type"] = "application/xml; charset=utf-8"
-        return self._with_headers(
+        response = self._with_headers(
             Method.LOCK, url, kwargs, headers, data=build_lock_body(scope, owner)
         )
+        if track and response.status_code in (HTTPStatus.OK, HTTPStatus.CREATED):
+            self._record_granted(url, str(headers["Depth"]), response)
+        return response
+
+    def _record_granted(self, url: str, depth: str, response: Response) -> None:
+        """Record the lock ``response`` granted on ``url`` - or release it, and raise, if that cannot be done."""
+        try:
+            self.locks.add(self.resolve_url(url), response.active_lock.token, depth)
+        except ClientError:  # MalformedResponseError is one
+            # Granted by the server, unusable here: release it (with the token of
+            # the Lock-Token header, if that is a usable one) instead of leaving
+            # it until it times out.
+            header_token = response.headers.get("Lock-Token", "").strip().strip("<>")
+            with suppress(ValueError, requests.RequestException):
+                self.unlock(url, header_token, raise_on_error=False)
+            raise
 
     def unlock(self, url: str, token: str, **kwargs: Any) -> Response:
         """Send an ``UNLOCK`` for ``token`` (RFC 4918 sec. 9.11).

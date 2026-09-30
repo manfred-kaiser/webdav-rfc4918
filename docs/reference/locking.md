@@ -60,10 +60,14 @@ with fs.locked("Documents/report.docx", lock_timeout=60) as active_lock:
   you may not remove it; `409` that the resource was not locked (or the URL is
   outside the lock). `FileSystem.locked()` logs what it could not release
   instead of hiding it or replacing the error your block raised.
-- **At the protocol level** (`Session.lock()` / `unlock()`) nothing is recorded
-  for you: add the lock to `session.locks` to have your writes carry its token.
-  `unlock()` drops the token again once the server says the lock is gone
-  (`2xx`; or `404`/`409` for the URL it was recorded for).
+- **At the protocol level** (`Session.lock()` / `unlock()`) a granted lock is
+  recorded in `session.locks` - under the URL you asked for, never under a
+  `lockroot` the server names - so your writes carry its token; `unlock()` drops
+  it again once the server says the lock is gone (`2xx`; or `404`/`409` for the
+  URL it was recorded for). A lock the server granted but the answer of which
+  cannot be read is released again and the error raised, rather than left to
+  block everyone until it times out. `track=False` gives you the bare answer
+  instead: nothing recorded, nothing read, the token yours to keep.
 
 ## The `If` header
 

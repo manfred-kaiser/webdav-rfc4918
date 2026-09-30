@@ -10,6 +10,7 @@ from tests.scripted_server import Seen, scripted_server
 from webdav import FileSystem, Response, Session
 from webdav.exceptions import (
     STATUS_CODE_EXCEPTIONS,
+    MalformedResponseError,
     MultiStatusError,
     ResourceNotFoundError,
 )
@@ -212,3 +213,116 @@ def test_the_owner_of_a_lock_is_read_whatever_it_holds(
         _rec,
     ):
         assert Session(retry=False).lock(f"{url}/f").active_lock.owner == expected
+
+
+# ---------------------------------------------------------------------------
+# Session.lock() records what it was granted
+# ---------------------------------------------------------------------------
+
+
+def test_a_granted_lock_is_recorded_so_writes_carry_its_token_until_unlock() -> None:
+    with scripted_server(_server()) as (url, rec):
+        session = Session(retry=False)
+        assert session.lock(f"{url}/f").status_code == 200
+        assert session.locks.token_for(f"{url}/f") == TOKEN
+        session.put(f"{url}/f", data=b"x")
+        session.unlock(f"{url}/f", TOKEN)
+        session.put(f"{url}/f", data=b"y")
+    puts = [r for r in rec.requests if r.method == "PUT"]
+    assert puts[0].headers["if"] == f"(<{TOKEN}>)"
+    assert "if" not in puts[1].headers
+    assert not session.locks
+
+
+def test_recording_a_lock_is_not_repeated_when_the_caller_also_adds_it() -> None:
+    with scripted_server(_server()) as (url, rec):
+        session = Session(retry=False)
+        session.lock(f"{url}/f")
+        session.locks.add(f"{url}/f", TOKEN, "infinity")
+        session.put(f"{url}/f", data=b"x")
+        session.unlock(f"{url}/f", TOKEN)
+    assert rec.requests[1].headers["if"] == f"(<{TOKEN}>)"
+    assert not session.locks
+
+
+def test_track_false_records_nothing_and_does_not_even_read_the_answer() -> None:
+    with scripted_server(
+        lambda _s: (200, {"Lock-Token": f"<{TOKEN}>"}, b"not xml")
+    ) as (url, _rec):
+        response = Session(retry=False).lock(f"{url}/f", track=False)
+        session = Session(retry=False)
+        session.lock(f"{url}/f", track=False)
+    assert response.status_code == 200
+    assert not session.locks
+
+
+def test_the_lock_is_recorded_for_the_url_asked_for_not_the_one_the_server_names() -> (
+    None
+):
+    body = LOCK_BODY.replace(
+        b"</d:activelock>",
+        b"<d:lockroot><d:href>/elsewhere/</d:href></d:lockroot></d:activelock>",
+    )
+    with scripted_server(lambda _s: (200, {"Lock-Token": f"<{TOKEN}>"}, body)) as (
+        url,
+        _rec,
+    ):
+        session = Session(retry=False)
+        session.lock(f"{url}/f")
+    assert session.locks.token_for(f"{url}/f") == TOKEN
+    assert session.locks.token_for(f"{url}/elsewhere/x") is None
+
+
+@pytest.mark.parametrize("status", [207, 409, 423, 500])
+def test_an_answer_that_is_no_granted_lock_records_nothing(status: int) -> None:
+    with scripted_server(lambda _s: (status, {}, _MEMBER_LOCKED)) as (url, _rec):
+        session = Session(retry=False)
+        assert session.lock(f"{url}/f").status_code == status
+    assert not session.locks
+
+
+def test_a_refused_lock_raises_and_records_nothing_when_the_session_raises() -> None:
+    with scripted_server(lambda _s: (423, {}, b"")) as (url, _rec):
+        session = Session(retry=False, raise_on_error=True)
+        with pytest.raises(Exception, match="423"):
+            session.lock(f"{url}/f")
+    assert not session.locks
+
+
+def test_a_granted_lock_that_cannot_be_read_is_released_again_and_raised() -> None:
+    def respond(seen: Seen) -> "tuple[int, dict[str, str], bytes]":
+        if seen.method == "LOCK":
+            return 200, {"Lock-Token": f"<{TOKEN}>"}, b"<not-a-lock/>"
+        return 204, {}, b""
+
+    with scripted_server(respond) as (url, rec):
+        session = Session(retry=False)
+        with pytest.raises(MalformedResponseError):
+            session.lock(f"{url}/f")
+    assert [r.method for r in rec.requests] == ["LOCK", "UNLOCK"]
+    assert rec.requests[1].headers["lock-token"] == f"<{TOKEN}>"
+    assert not session.locks
+
+
+def test_a_lock_with_no_usable_token_anywhere_raises_and_has_nothing_to_release() -> (
+    None
+):
+    with scripted_server(
+        lambda _s: (200, {"Lock-Token": "<bad token>"}, b"<not-a-lock/>")
+    ) as (url, rec):
+        with pytest.raises(MalformedResponseError):
+            Session(retry=False).lock(f"{url}/f")
+    assert [r.method for r in rec.requests] == ["LOCK"]
+
+
+def test_a_refresh_leaves_the_recorded_lock_alone() -> None:
+    def respond(seen: Seen) -> "tuple[int, dict[str, str], bytes]":
+        headers = {} if "if" in seen.headers else {"Lock-Token": f"<{TOKEN}>"}
+        return 200, headers, LOCK_BODY
+
+    with scripted_server(respond) as (url, _rec):
+        session = Session(retry=False)
+        session.lock(f"{url}/f")
+        session.lock(f"{url}/f", refresh=TOKEN)
+    assert session.locks.token_for(f"{url}/f") == TOKEN
+    assert len(session.locks.covering(f"{url}/f")) == 1
