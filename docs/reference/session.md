@@ -7,10 +7,10 @@ module-level one-off, exactly as `os.path.exists` is built on `os`:
 `webdav.ls(url)`, `webdav.upload_file(...)` take a full URL, open a
 throwaway `FileSystem`, do one thing and close it again; for several calls
 use `FileSystem` itself - the names, arguments and return values are the
-same (a test compares the signatures). {class}`~webdav.session.Session` is
-a {class}`requests.Session` that speaks WebDAV - `get`, `propfind`,
-`lock`, ... - for protocol-level control (the raw `Response`, a status
-code, a header). It has no module-level mirror: open one explicitly with
+same (a test compares the signatures). {class}`~webdav.session.Session`
+speaks the {class}`requests.Session` API - `get`, `propfind`, `lock`, ... -
+for protocol-level control (the raw `Response`, a status code, a header).
+It has no module-level mirror: open one explicitly with
 `with webdav.Session(...) as session: ...`.
 
 ```python
@@ -57,7 +57,7 @@ passed unchanged to `info`, `remove`, `download_file`, ...; `.is_dir`, `.size`, 
 
 ## Arguments
 
-The `Session` verbs take the keyword arguments of {meth}`requests.Session.request`
+The `Session` verbs take the same keyword arguments as `requests.Session.request`
 (`auth=`, `headers=`, `timeout=`, `verify=`, `cert=`, `stream=`, ...) plus
 `redirect_policy=` for one call. A `copy`/`move` takes
 `destination=`/`overwrite=`; a `PROPFIND` takes `depth=`; a `LOCK` takes
@@ -108,9 +108,26 @@ returned, as `requests` would. `Session(retry=False)` turns it off.
 
 ## Pickling and copying
 
-`copy.copy(session)` and `pickle` give a session with fresh locks and caches. Its
-`auth`, headers and cookies are copied *as they are*: a pickled session contains its
-credentials in clear text - do not write it to disk or send it anywhere untrusted.
+`copy.copy(session)` and `pickle` give a session with fresh locks, caches and
+TLS adapter - the last of these rebuilt from the constructor arguments you
+gave, including `tls=TLSOptions(...)` (mTLS with a client certificate can be
+pickled too, unlike a raw `ssl.SSLContext`). Its `auth`, headers and cookies
+are copied *as they are*: a pickled session contains its credentials in clear
+text - do not write it to disk or send it anywhere untrusted.
+
+## A note on `requests.Session`
+
+`Session` is built *on* `requests`, not a subclass of `requests.Session` -
+deliberately. Everything you set (`auth=`, `headers=`, `verify=`, ...) and
+read (`session.cookies`, `session.hooks`, ...) works exactly as it does on a
+`requests.Session`, forwarded to one it holds internally; what it does not
+do is inherit `requests`' own redirect-following. WebDAV needs its own
+(`requests` turns a redirected `PROPFIND` into a bodiless request, or a
+`GET`, depending on the status - wrong either way; see
+[Redirects](redirects.md)), and building that safely on top of an inherited
+`resolve_redirects()` would mean fighting it more than using it. An
+`isinstance(session, requests.Session)` check is the one thing that does not
+hold; everything else about the shape of the API does.
 
 ```{eval-rst}
 .. autoclass:: webdav.session.Session

@@ -42,12 +42,12 @@ from http import HTTPStatus
 from typing import (
     TYPE_CHECKING,
     Any,
-    Literal,
     cast,
 )
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 import requests
+import requests.adapters
 import requests.auth
 import urllib3.exceptions
 import urllib3.response
@@ -73,7 +73,6 @@ from webdav.exceptions import (
     STATUS_CODE_EXCEPTIONS,
     ClientError,
     HTTPStatusError,
-    InsecureConfigurationError,
     InsecureTransportWarning,
     raise_for_status,
 )
@@ -91,14 +90,16 @@ from webdav.transport.redirects import (
 )
 from webdav.transport.retry import retry as _retry
 from webdav.transport.streaming import DEFAULT_CHUNK_SIZE
-from webdav.transport.tls import mount_mtls_adapter
+from webdav.transport.tls import mount_mtls_adapter, warn_hardening_disabled
 
 if TYPE_CHECKING:
     import urllib.parse
     from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping
+    from typing import Self
     from xml.etree.ElementTree import Element
 
     from requests.auth import AuthBase
+    from requests.cookies import RequestsCookieJar
 
     from webdav.dav.multistatus import MultiStatusResponse
     from webdav.dav.properties import PropName
@@ -226,8 +227,9 @@ _REASON_PREFIX = "\x00reason:"
 
 _URL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
-#: The attributes (beyond ``requests.Session.__attrs__``) a pickled
-#: session keeps; see ``Session._init_derived`` for what is rebuilt.
+#: The WebDAV-specific attributes a pickled session keeps, beyond the plain
+#: ``requests`` ones in ``_TRANSPORT_PICKLED`` below; see
+#: ``Session._init_derived`` for what is rebuilt fresh instead.
 _PICKLED = (
     "base_url",
     "timeout",
@@ -239,6 +241,28 @@ _PICKLED = (
     "redirect_forward_headers",
     "_retry_arg",
     "_trusted_arg",
+    # The raw TLS arguments, not the adapter/SSLContext they build: unlike
+    # those, they are plain, picklable values, and _init_derived() rebuilds
+    # the adapter fresh from them - the same way it already rebuilds locks
+    # and other live state a copy must never share with the original.
+    "_cert_arg",
+    "_verify_arg",
+    "_tls_arg",
+)
+
+#: The plain ``requests.Session`` attributes this class forwards to
+#: ``self._transport`` - see the properties below - and so pickles/copies
+#: the same way the rest of :data:`_PICKLED` does.
+_TRANSPORT_PICKLED = (
+    "headers",
+    "cookies",
+    "auth",
+    "proxies",
+    "hooks",
+    "params",
+    "stream",
+    "trust_env",
+    "max_redirects",
 )
 
 _DEPTHS = ("0", "1", "infinity")
@@ -536,21 +560,27 @@ def _parse_dav_header(value: str) -> set[str]:
 
 
 def _configure_tls(
-    session: "Session",
+    transport: "requests.Session",
     *,
     cert: "CertTypes",
     verify: "bool | str",
     tls: "TLSOptions | None",
 ) -> None:
-    """Wire up ``cert``/``verify`` - via plain ``requests`` attrs, or a hardened adapter.
+    """Wire up ``cert``/``verify`` on ``transport`` - plain ``requests`` attrs, or a hardened adapter.
 
     The hardened :mod:`webdav.transport.tls` adapter is only needed for what plain
     ``requests`` cannot express (``tls=...``); everything else uses
     ``requests``' own, well-known ``cert=``/``verify=`` attributes.
     """
+    verification_on = _verification_on(verify)
     if tls is None:
-        session.cert = cert
-        session.verify = verify
+        if not verification_on:
+            warn_hardening_disabled(
+                f"TLS server certificate verification is off (verify={verify!r}) "
+                "for every request this session sends"
+            )
+        transport.cert = cert
+        transport.verify = verify
         return
 
     certfile: str | None
@@ -562,9 +592,15 @@ def _configure_tls(
     else:
         certfile, keyfile = cert[0], cert[1]
 
-    if tls.ca_files is None and isinstance(verify, str):
+    if verification_on and tls.ca_files is None and isinstance(verify, str):
         tls = dataclasses.replace(tls, ca_files=verify)
-    mount_mtls_adapter(session, certfile=certfile, keyfile=keyfile, options=tls)
+    mount_mtls_adapter(
+        transport,
+        certfile=certfile,
+        keyfile=keyfile,
+        options=tls,
+        verify=verification_on,
+    )
 
 
 #: Methods a transient failure (429, 5xx, a dropped connection) is retried
@@ -577,12 +613,19 @@ def _configure_tls(
 _RETRY_METHODS = frozenset({Method.GET, Method.HEAD, Method.OPTIONS, Method.PROPFIND})
 
 
-class Session(requests.Session):
-    """A :class:`requests.Session` extended with WebDAV.
+class Session:
+    """A WebDAV client built on ``requests``, with the API you already know from it.
+
+    Not a :class:`requests.Session` subclass - it holds one (``auth``,
+    ``headers``, ``cookies``, ``verify``, ``cert``, ``proxies``, ``hooks``,
+    ``params``, ``stream``, ``trust_env``, ``max_redirects`` all work exactly
+    as documented in ``requests``, forwarded to it) rather than *being* one.
+    That is deliberate: ``requests.Session``'s own redirect-following and
+    response construction are exactly what this class needs to replace, not
+    inherit and then fight - see :meth:`send` and :meth:`request`.
 
     Examples:
         >>> session = Session("https://webdav.example.org", auth=("user", "password"))
-        >>> session.ls("/", detail=False)
         >>> response = session.propfind("/dir/", depth=1)
         >>> response.multistatus.responses
 
@@ -595,7 +638,7 @@ class Session(requests.Session):
         auth: "AuthTypes" = None,
         headers: "dict[str, str] | None" = None,
         cert: "CertTypes" = None,
-        verify: Literal[True] | str = True,
+        verify: bool | str = True,
         tls: "TLSOptions | None" = None,
         timeout: "float | tuple[float, float] | None" = DEFAULT_TIMEOUT,
         redirect_policy: RedirectPolicy = RedirectPolicy.SAME_ORIGIN,
@@ -626,11 +669,16 @@ class Session(requests.Session):
             cert: Client certificate for mTLS - a path to a combined
                 cert+key PEM, or a ``(certfile, keyfile)`` tuple.
             verify: Server certificate verification - ``True`` (system
-                trust store), or a path to a CA bundle. ``False`` is
-                refused: there is deliberately no constructor parameter
-                that turns verification off (``requests`` itself still lets
-                you assign ``session.verify = False``, and ``urllib3`` warns
-                when you do).
+                trust store, the default), a path to a CA bundle, or
+                ``False``. Disabling it is a deliberate, explicit choice a
+                developer is free to make - it is not this library's place
+                to forbid it - but it raises and logs a
+                :class:`~webdav.exceptions.TLSHardeningDisabledWarning`
+                every time, loud and independent of ``urllib3``'s own
+                warning category (a common ``urllib3.disable_warnings()``
+                cannot silence it). Prefer naming the CA
+                (``verify="ca.pem"``) over disabling verification when the
+                server certificate simply isn't in the system trust store.
             tls: Advanced TLS knobs (encrypted private key, CRL checking,
                 explicit cipher restriction) that plain ``cert=``/
                 ``verify=`` cannot express - see
@@ -664,20 +712,10 @@ class Session(requests.Session):
 
         Raises:
             ValueError: ``trusted_redirect_origins`` and ``redirect_policy``
-                disagree - see :func:`~webdav.transport.redirects.validate_policy` -
-                or ``verify`` is ``False``.
+                disagree - see :func:`~webdav.transport.redirects.validate_policy`.
 
         """
         validate_policy(redirect_policy, trusted_redirect_origins)
-        if not _verification_on(verify):
-            msg = (
-                f"verify={verify!r} is not accepted: server certificate verification "
-                "cannot be switched off through the constructor - not with False, "
-                "and not with anything else that requests reads as False (None, 0, "
-                "an empty string). Give True, or the path of the CA bundle that "
-                "signed the server's certificate."
-            )
-            raise InsecureConfigurationError(msg)
         _check_chunk_size(chunk_size)
         if max_response_size is not None and (
             isinstance(max_response_size, bool)
@@ -686,16 +724,10 @@ class Session(requests.Session):
         ):
             msg = f"max_response_size must be a positive integer or None, got {max_response_size!r}"
             raise ValueError(msg)
-        super().__init__()
-        # Adapters whose connections answer to the whole-request deadline
-        # (see webdav.transport.deadline); ``tls=`` below replaces the https one with
-        # the mTLS adapter, which has the same property.
-        self.mount("https://", DeadlineAdapter())
-        self.mount("http://", DeadlineAdapter())
+        self._transport = requests.Session()
         self.auth = auth
         if headers:
             self.headers.update(headers)
-        _configure_tls(self, cert=cert, verify=verify, tls=tls)
         self.base_url = base_url
         self.timeout = timeout
         self.redirect_policy = redirect_policy
@@ -713,16 +745,32 @@ class Session(requests.Session):
         self._redirect_forward_headers: frozenset[str] = frozenset()
         self._retry_arg = retry
         self._trusted_arg = trusted_redirect_origins
+        self._cert_arg = cert
+        self._verify_arg = verify
+        self._tls_arg = tls
         self._init_derived()
 
     def _init_derived(self) -> None:
         """(Re)build the state that follows from the constructor arguments.
 
-        Kept apart from ``__init__`` because none of it can be pickled (a
-        closure, a mutex): a copy or unpickled session gets fresh ones -
-        which also means it holds none of the original's locks, as it
-        must: a lock belongs to the server, not to a copy of an object.
+        Kept apart from the rest of ``__init__`` because none of it can be
+        pickled (a closure, a mutex, a live TLS adapter) - a copy or
+        unpickled session gets everything here freshly rebuilt from the
+        stored arguments, including its locks: it must hold none of the
+        original's, since a lock belongs to the server, not to a copy of an
+        object holding it.
         """
+        # Adapters whose connections answer to the whole-request deadline
+        # (see webdav.transport.deadline); ``_tls_arg`` below replaces the
+        # https one with the mTLS adapter, which has the same property.
+        self.mount("https://", DeadlineAdapter())
+        self.mount("http://", DeadlineAdapter())
+        _configure_tls(
+            self._transport,
+            cert=self._cert_arg,
+            verify=self._verify_arg,
+            tls=self._tls_arg,
+        )
         self.with_retry = (
             self._retry_arg if callable(self._retry_arg) else _retry(self._retry_arg)
         )
@@ -735,6 +783,119 @@ class Session(requests.Session):
         # so that neither a client certificate (mTLS) nor any transport
         # setting meant for *this* server goes with it.
         self._foreign_adapter = DeadlineAdapter()
+
+    # -- forwarded to self._transport, exactly like plain requests.Session --
+
+    @property
+    def headers(self) -> "CaseInsensitiveDict[str]":
+        """Default headers sent with every request - see :attr:`requests.Session.headers`."""
+        return cast("CaseInsensitiveDict[str]", self._transport.headers)
+
+    @headers.setter
+    def headers(self, value: "MutableMapping[str, str]") -> None:
+        self._transport.headers = value  # type: ignore[assignment]
+
+    @property
+    def cookies(self) -> "RequestsCookieJar":
+        """See :attr:`requests.Session.cookies`."""
+        return self._transport.cookies
+
+    @cookies.setter
+    def cookies(self, value: Any) -> None:
+        self._transport.cookies = value
+
+    @property
+    def auth(self) -> Any:
+        """See :attr:`requests.Session.auth`."""
+        return self._transport.auth
+
+    @auth.setter
+    def auth(self, value: Any) -> None:
+        self._transport.auth = value
+
+    @property
+    def proxies(self) -> "MutableMapping[str, str]":
+        """See :attr:`requests.Session.proxies`."""
+        return self._transport.proxies
+
+    @proxies.setter
+    def proxies(self, value: "MutableMapping[str, str]") -> None:
+        self._transport.proxies = value
+
+    @property
+    def hooks(self) -> Any:
+        """See :attr:`requests.Session.hooks`."""
+        return self._transport.hooks
+
+    @hooks.setter
+    def hooks(self, value: Any) -> None:
+        self._transport.hooks = value
+
+    @property
+    def params(self) -> Any:
+        """See :attr:`requests.Session.params`."""
+        return self._transport.params
+
+    @params.setter
+    def params(self, value: Any) -> None:
+        self._transport.params = value
+
+    @property
+    def stream(self) -> bool:
+        """See :attr:`requests.Session.stream`."""
+        return self._transport.stream
+
+    @stream.setter
+    def stream(self, value: bool) -> None:
+        self._transport.stream = value
+
+    @property
+    def verify(self) -> "bool | str | None":
+        """See :attr:`requests.Session.verify`."""
+        return self._transport.verify
+
+    @verify.setter
+    def verify(self, value: "bool | str | None") -> None:
+        self._transport.verify = value
+
+    @property
+    def cert(self) -> Any:
+        """See :attr:`requests.Session.cert`."""
+        return self._transport.cert
+
+    @cert.setter
+    def cert(self, value: Any) -> None:
+        self._transport.cert = value
+
+    @property
+    def trust_env(self) -> bool:
+        """See :attr:`requests.Session.trust_env`."""
+        return self._transport.trust_env
+
+    @trust_env.setter
+    def trust_env(self, value: bool) -> None:
+        self._transport.trust_env = value
+
+    @property
+    def max_redirects(self) -> int:
+        """See :attr:`requests.Session.max_redirects` - unused: this class never delegates redirect-following to it."""
+        return self._transport.max_redirects
+
+    @max_redirects.setter
+    def max_redirects(self, value: int) -> None:
+        self._transport.max_redirects = value
+
+    def mount(self, prefix: str, adapter: requests.adapters.BaseAdapter) -> None:
+        """Mount a transport adapter - see :meth:`requests.Session.mount`."""
+        self._transport.mount(prefix, adapter)
+
+    def get_adapter(self, url: str) -> requests.adapters.BaseAdapter:
+        """The adapter mounted for ``url`` - see :meth:`requests.Session.get_adapter`."""
+        return self._transport.get_adapter(url)
+
+    def get_redirect_target(self, response: requests.Response) -> "str | None":
+        """The ``Location`` header's value, decoded - see :meth:`requests.Session.get_redirect_target`."""
+        return self._transport.get_redirect_target(response)
 
     @property
     def max_response_time(self) -> "float | None":
@@ -775,9 +936,17 @@ class Session(requests.Session):
             names = [names]
         self._redirect_forward_headers = frozenset(n.strip().lower() for n in names)
 
+    def __enter__(self) -> "Self":
+        """Usable as a context manager, exactly like :class:`requests.Session`."""
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        """Close the session on exit."""
+        self.close()
+
     def close(self) -> None:
         """Close the session and every connection pool it opened."""
-        super().close()
+        self._transport.close()
         self._foreign_adapter.close()
 
     def merge_environment_settings(
@@ -794,20 +963,25 @@ class Session(requests.Session):
         environment replace ``verify=True`` - and so replace, or widen, the
         CA a caller pinned. Proxies from the environment are kept.
         """
-        settings = super().merge_environment_settings(
+        settings = self._transport.merge_environment_settings(
             url, proxies, stream, verify, cert
         )
         settings["verify"] = verify if verify is not None else self.verify
         return settings
 
     def __getstate__(self) -> dict[str, Any]:
-        """Pickle the configuration (``requests``' own attributes plus ours)."""
+        """Pickle the configuration - ``requests``' own attributes (forwarded) plus ours."""
         return {
-            name: getattr(self, name, None) for name in (*self.__attrs__, *_PICKLED)
+            name: getattr(self, name, None) for name in (*_TRANSPORT_PICKLED, *_PICKLED)
         }
 
     def __setstate__(self, state: dict[str, Any]) -> None:
-        """Restore from :meth:`__getstate__`, with fresh locks/caches."""
+        """Restore from :meth:`__getstate__`.
+
+        ``self._transport`` and every derived, unpicklable piece of state
+        (locks, caches, adapters) are rebuilt fresh - see :meth:`_init_derived`.
+        """
+        self._transport = requests.Session()
         for name, value in state.items():
             setattr(self, name, value)
         self._init_derived()
@@ -853,7 +1027,7 @@ class Session(requests.Session):
 
     # -- sending --------------------------------------------------------
 
-    def request(  # type: ignore[override]
+    def request(
         self,
         method: str,
         url: str,
@@ -950,23 +1124,22 @@ class Session(requests.Session):
             raise ClientError(msg)
 
     def _require_verification(self, verify: object) -> None:
-        """Refuse to talk to a server whose certificate would not be checked.
+        """Warn loudly when talking to a server whose certificate will not be checked.
 
         ``requests`` reads any falsy ``verify`` as "do not check", per call and
-        as a session attribute; the constructor already refuses those, and this
-        closes the other two doors. There is no way to switch this off: a session
+        as a session attribute. An explicit choice, not refused - see
+        :class:`~webdav.exceptions.TLSHardeningDisabledWarning` - but a session
         that talks to a server it does not authenticate hands the password to
-        whoever answers - name the CA that signed the server's certificate
-        (``verify="ca.pem"``) instead.
+        whoever answers, so every occurrence is loud and logged. Prefer naming
+        the CA that signed the server's certificate (``verify="ca.pem"``)
+        over disabling verification when it's just not in the system trust store.
         """
         effective = self.verify if verify is None else verify
         if not _verification_on(effective):
-            msg = (
-                f"verify={effective!r}: this session does not talk to a server whose "
-                "certificate is not verified. Use verify=True, or the path of the CA "
-                "bundle that signed the server's certificate."
+            warn_hardening_disabled(
+                f"TLS server certificate verification is off (verify={effective!r})"
             )
-            raise InsecureConfigurationError(msg)
+            return
         if (
             isinstance(effective, str | os.PathLike)
             and not pathlib.Path(effective).exists()
@@ -1014,7 +1187,7 @@ class Session(requests.Session):
         # getting the response (headers) and the caller reads the rest.
         with watch(budget) as watcher:
             try:
-                response = super().request(method, url, allow_redirects=False, **first)
+                response = self._dispatch(method, url, allow_redirects=False, **first)
                 response = self._follow_redirects(
                     response, method, policy, kwargs, kwargs_for
                 )
@@ -1028,7 +1201,7 @@ class Session(requests.Session):
                 # A socket shut down mid-body can look like a clean end of the
                 # data (EOF): never hand that back as a complete response.
                 raise _deadline_error(budget)
-        return cast("Response", response)
+        return response
 
     def prepare_request(self, request: requests.Request) -> requests.PreparedRequest:
         """Prepare ``request``; with no credentials configured, none are looked up.
@@ -1038,7 +1211,49 @@ class Session(requests.Session):
         """
         if request.auth is None and self.auth is None:
             request.auth = _NO_AUTH
-        return super().prepare_request(request)
+        return self._transport.prepare_request(request)
+
+    def _dispatch(self, method: str, url: str, **kwargs: Any) -> Response:
+        """Build a request exactly like :meth:`requests.Session.request` does, then :meth:`send` it.
+
+        Not inherited, because ``requests.Session.request()`` always ends by
+        calling *its own* ``send()`` - reused here up to that point
+        (``self._transport`` builds and merges the ``PreparedRequest``
+        exactly as ``requests`` documents), but the actual dispatch always
+        goes through this class's own :meth:`send`, which is what enforces
+        verification, the deadline and bounded reading - none of which
+        ``self._transport`` knows anything about. Every same-origin redirect
+        hop goes through here too (see :meth:`_follow_redirects`), so none
+        of that is only applied to the first and last response of a chain.
+        """
+        allow_redirects = kwargs.pop("allow_redirects", True)
+        prepared = self.prepare_request(
+            requests.Request(
+                method=method.upper(),
+                url=url,
+                headers=kwargs.get("headers"),
+                files=kwargs.get("files"),
+                data=kwargs.get("data") or {},
+                json=kwargs.get("json"),
+                params=kwargs.get("params") or {},
+                auth=kwargs.get("auth"),
+                cookies=kwargs.get("cookies"),
+                hooks=kwargs.get("hooks"),
+            )
+        )
+        settings = self.merge_environment_settings(
+            prepared.url,
+            kwargs.get("proxies") or {},
+            kwargs.get("stream"),
+            kwargs.get("verify"),
+            kwargs.get("cert"),
+        )
+        send_kwargs: dict[str, Any] = {
+            "timeout": kwargs.get("timeout"),
+            "allow_redirects": allow_redirects,
+        }
+        send_kwargs.update(settings)
+        return self.send(prepared, **send_kwargs)
 
     def send(self, request: requests.PreparedRequest, **kwargs: Any) -> Response:
         """Send one prepared request and return its response - never following a redirect.
@@ -1088,7 +1303,9 @@ class Session(requests.Session):
                 raise
             if watcher is not None and watcher.expired.is_set():
                 raise _deadline_error(self.max_response_time)
-        result = Response.adopt(response)
+        # Already a webdav.Response: every adapter this library ever uses is
+        # a DeadlineAdapter, whose build_response() constructs one directly.
+        result = cast("Response", response)
         if allow_redirects and (result.is_redirect or result.is_permanent_redirect):
             _refuse(
                 result,
@@ -1138,12 +1355,12 @@ class Session(requests.Session):
 
     def _follow_redirects(
         self,
-        response: requests.Response,
+        response: Response,
         method: str,
         policy: RedirectPolicy,
         kwargs: dict[str, Any],
         kwargs_for: "Callable[[str], dict[str, Any]] | None" = None,
-    ) -> requests.Response:
+    ) -> Response:
         """Follow redirects per ``policy``; stop (leaving the 3xx) on any doubt.
 
         Never delegated to ``requests``' own redirect-following, which for
@@ -1192,7 +1409,7 @@ class Session(requests.Session):
                     if kwargs_for is not None
                     else {k: v for k, v in kwargs.items() if k != "params"}
                 )
-                response = super().request(
+                response = self._dispatch(
                     method, target, allow_redirects=False, **hop_kwargs
                 )
             else:
@@ -1265,16 +1482,17 @@ class Session(requests.Session):
             and self._is_trusted_redirect_target(target)
         )
         # Never step down from https to http on the strength of a policy
-        # alone (even ALL): the body would cross the network in clear text.
-        if source_origin[0] == "https" and target_origin[0] == "http" and not trusted:
+        # alone - not even a whitelisted target, not even ALL: trusting a
+        # target with credentials is a different question from accepting
+        # that the same bytes cross the network in clear text, and there is
+        # no legitimate reason to want the latter. No browser allows it either.
+        if source_origin[0] == "https" and target_origin[0] == "http":
             return "the redirect would downgrade https to http"
         if policy == RedirectPolicy.ALL or trusted:
             return False
         return "the target is on another origin and redirect_policy does not allow that"
 
-    def _send_stripped(
-        self, method: str, url: str, kwargs: dict[str, Any]
-    ) -> requests.Response:
+    def _send_stripped(self, method: str, url: str, kwargs: dict[str, Any]) -> Response:
         """Send one request to another origin, carrying nothing that is ours.
 
         Built from scratch and sent through a plain adapter of its own, so
@@ -1306,34 +1524,37 @@ class Session(requests.Session):
             None,
         )
         self._require_verification(settings["verify"])
-        response = self._foreign_adapter.send(
-            prepared,
-            stream=True,
-            timeout=kwargs.get("timeout"),
-            verify=settings["verify"],
-            cert=None,
-            proxies=settings["proxies"],
+        # Already a webdav.Response: _foreign_adapter is a DeadlineAdapter too.
+        return cast(
+            "Response",
+            self._foreign_adapter.send(
+                prepared,
+                stream=True,
+                timeout=kwargs.get("timeout"),
+                verify=settings["verify"],
+                cert=None,
+                proxies=settings["proxies"],
+            ),
         )
-        return Response.adopt(response)
 
     # -- HTTP verbs, typed to return a webdav Response --------------------
 
-    def get(self, url: str, params: Any = None, **kwargs: Any) -> Response:  # type: ignore[override]
+    def get(self, url: str, params: Any = None, **kwargs: Any) -> Response:
         """Send a ``GET``; like :meth:`requests.Session.get`."""
         kwargs.setdefault("allow_redirects", True)
         return self.request(Method.GET, url, params=params, **kwargs)
 
-    def head(self, url: str, **kwargs: Any) -> Response:  # type: ignore[override]
+    def head(self, url: str, **kwargs: Any) -> Response:
         """Send a ``HEAD``; like :meth:`requests.Session.head` (redirects off by default)."""
         kwargs.setdefault("allow_redirects", False)
         return self.request(Method.HEAD, url, **kwargs)
 
-    def options(self, url: str, **kwargs: Any) -> Response:  # type: ignore[override]
+    def options(self, url: str, **kwargs: Any) -> Response:
         """Send an ``OPTIONS``; like :meth:`requests.Session.options`."""
         kwargs.setdefault("allow_redirects", True)
         return self.request(Method.OPTIONS, url, **kwargs)
 
-    def put(  # type: ignore[override]
+    def put(
         self,
         url: str,
         data: Any = None,
@@ -1372,7 +1593,7 @@ class Session(requests.Session):
             extra["If-None-Match"] = "*"
         return self._with_headers(Method.PUT, url, kwargs, extra, data=data)
 
-    def delete(  # type: ignore[override]
+    def delete(
         self, url: str, *, if_match: "str | None" = None, **kwargs: Any
     ) -> Response:
         """Send a ``DELETE``; like :meth:`requests.Session.delete`.

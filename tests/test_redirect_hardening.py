@@ -283,7 +283,9 @@ def test_https_to_http_downgrade_is_never_followed(policy: RedirectPolicy) -> No
     assert "downgrade" in hop
 
 
-def test_https_to_http_downgrade_needs_an_explicit_whitelist_entry() -> None:
+def test_https_to_http_downgrade_is_never_followed_even_whitelisted() -> None:
+    """Trusting an origin with credentials is a different question from accepting
+    that the same bytes cross the network in clear text - no policy allows it."""
     session = Session(
         redirect_policy=RedirectPolicy.WHITELIST,
         trusted_redirect_origins=["http://gateway.example"],
@@ -292,7 +294,8 @@ def test_https_to_http_downgrade_needs_an_explicit_whitelist_entry() -> None:
     hop = session._plan_hop(
         response, "PUT", RedirectPolicy.WHITELIST, {"data": b"x"}, set()
     )
-    assert hop == ("http://gateway.example/f", False)
+    assert isinstance(hop, str)
+    assert "downgrade" in hop
 
 
 def test_http_to_https_upgrade_on_the_same_host_is_a_different_origin() -> None:

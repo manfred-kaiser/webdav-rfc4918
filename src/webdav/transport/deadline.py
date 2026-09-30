@@ -17,14 +17,18 @@ import contextvars
 import socket
 import threading
 from contextlib import contextmanager, suppress
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from requests.adapters import HTTPAdapter
 from urllib3.connection import HTTPConnection, HTTPSConnection
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 
+from webdav.response import Response
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from requests import PreparedRequest
 
 _ACTIVE: "contextvars.ContextVar[_Watch | None]" = contextvars.ContextVar(
     "webdav_deadline_watch", default=None
@@ -140,7 +144,31 @@ _POOL_CLASSES: dict[str, Any] = {"http": _HTTPPool, "https": _HTTPSPool}
 
 
 class DeadlineAdapter(HTTPAdapter):
-    """An ``HTTPAdapter`` whose connections answer to :func:`watch`."""
+    """An ``HTTPAdapter`` whose connections answer to :func:`watch`.
+
+    Every adapter this library ever mounts or uses standalone
+    (:class:`~webdav.transport.tls.SSLContextAdapter`, the credential-stripped
+    cross-origin adapter a :class:`~webdav.session.Session` keeps for
+    redirects) is one of these, so :meth:`build_response` is the one place a
+    :class:`~webdav.response.Response` - not a bare :class:`requests.Response`
+    - comes from, for every request this library ever sends.
+    """
+
+    def build_response(self, req: "PreparedRequest", resp: Any) -> Response:
+        """Build a :class:`~webdav.response.Response`, not a plain :class:`requests.Response`.
+
+        Overriding this - not reclassifying afterwards - is what
+        :class:`~requests.adapters.HTTPAdapter` itself documents as the way
+        to customise the response type; see its own docstring ("only
+        exposed for use when subclassing"). Delegates to ``requests``' own
+        population logic first (status, headers, encoding, cookies, ...) so
+        a future ``requests`` version's improvements to it are not silently
+        missed, and only changes the resulting object's class - in place,
+        so the connection/stream it holds is unaffected.
+        """
+        response = super().build_response(req, resp)
+        response.__class__ = Response
+        return cast("Response", response)
 
     def init_poolmanager(self, *args: Any, **kwargs: Any) -> None:
         """Build the pool manager, with tracked connections."""

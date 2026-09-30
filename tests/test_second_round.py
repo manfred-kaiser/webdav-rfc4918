@@ -55,10 +55,10 @@ def test_send_checks_tls_verification_like_request_does() -> None:
     with scripted_server(always(OK)) as (url, _rec):
         session = Session(retry=False)
         prepared = session.prepare_request(requests.Request("GET", f"{url}/a"))
-        with pytest.raises(ClientError, match="not verified"):
+        with pytest.warns(exceptions.TLSHardeningDisabledWarning):
             session.send(prepared, verify=False)
         session.verify = False
-        with pytest.raises(ClientError, match="not verified"):
+        with pytest.warns(exceptions.TLSHardeningDisabledWarning):
             session.send(prepared)
 
 

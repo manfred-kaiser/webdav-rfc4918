@@ -6,20 +6,32 @@ no way to supply a password for an encrypted key, which is how most
 real-world mTLS client certificates are actually distributed. This module
 fills that gap with a small ``HTTPAdapter`` configured from an explicit
 :class:`ssl.SSLContext`, built with security-first defaults: server
-certificate verification is always required (there is no parameter to
-turn it off), TLS 1.2 is the floor, and TLS compression is disabled
-(mitigates CRIME-style compression side-channel attacks).
+certificate verification, the TLS 1.2 floor and strict certificate-chain
+checking are all on by default, and TLS compression is always disabled
+(mitigates CRIME-style compression side-channel attacks, and no client
+has a legitimate reason to want it back).
+
+The three defaults above can each be turned off explicitly - this library
+is not the one deciding a developer isn't allowed to, e.g., talk to a
+legacy server that only speaks TLS 1.1. Turning one off logs and raises a
+:class:`~webdav.exceptions.TLSHardeningDisabledWarning`, loud and
+independent of ``urllib3``'s own warning hierarchy (see its docstring for
+why) - a security-conscious deployment should be able to spot every one of
+these in its logs, and it should never be possible to accidentally not
+notice one.
 """
 
+import logging
 import os
 import ssl
+import warnings
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import requests
 
-from webdav.exceptions import TLSConfigError
+from webdav.exceptions import TLSConfigError, TLSHardeningDisabledWarning
 from webdav.transport.deadline import DeadlineAdapter
 
 if TYPE_CHECKING:
@@ -31,6 +43,16 @@ if TYPE_CHECKING:
     StrPath = str | PathLike[str]
 
 DEFAULT_MINIMUM_TLS_VERSION = ssl.TLSVersion.TLSv1_2
+
+_LOGGER = logging.getLogger("webdav")
+
+
+def warn_hardening_disabled(reason: str) -> None:
+    """Raise :class:`TLSHardeningDisabledWarning` and log it - see the module docstring."""
+    _LOGGER.warning("TLS hardening disabled: %s", reason)
+    warnings.warn(
+        f"TLS hardening disabled: {reason}", TLSHardeningDisabledWarning, stacklevel=3
+    )
 
 
 @dataclass(frozen=True)
@@ -50,6 +72,10 @@ class TLSOptions:
     ciphers: str | None = None
     minimum_version: ssl.TLSVersion = DEFAULT_MINIMUM_TLS_VERSION
     maximum_version: "ssl.TLSVersion | None" = None
+    #: RFC 5280 chain checking, strict rather than the more lenient default
+    #: OpenSSL itself uses. ``False`` accepts a chain some legacy/internal
+    #: CAs produce that strict checking rejects - see the module docstring.
+    strict_chain_checking: bool = True
 
 
 def _load(op: str, path: object, fn: "Callable[[], None]") -> None:
@@ -69,52 +95,22 @@ def _load(op: str, path: object, fn: "Callable[[], None]") -> None:
         raise TLSConfigError(msg) from exc
 
 
-def build_ssl_context(
-    *,
-    certfile: "StrPath | None" = None,
-    keyfile: "StrPath | None" = None,
-    options: TLSOptions | None = None,
-) -> ssl.SSLContext:
-    """Build a hardened :class:`ssl.SSLContext`, optionally for mTLS.
-
-    Server certificate verification and hostname checking are always on -
-    on purpose, there is no parameter to disable them. An mTLS setup with
-    client-certificate auth but no server verification is a trivial MITM
-    target, and this library refuses to make that easy to reach by
-    accident. Use ``options.ca_files`` (a private CA) rather than
-    disabling verification when the server certificate isn't in the
-    system trust store.
-
-    Args:
-        certfile: Client certificate (PEM) for mTLS. ``None`` for a
-            regular TLS connection without a client certificate.
-        keyfile: Private key for ``certfile``, if not bundled in the same
-            file.
-        options: The advanced knobs - see :class:`TLSOptions`.
-
-    Raises:
-        TLSConfigError: A certificate, key or CA/CRL file could not be
-            loaded.
-
-    """
-    options = options or TLSOptions()
+def _warn_about_disabled_hardening(options: TLSOptions, *, verify: bool) -> None:
+    """Warn once for each hardening measure ``options``/``verify`` turns off - see :func:`build_ssl_context`."""
     if options.minimum_version < ssl.TLSVersion.TLSv1_2:
-        msg = (
+        warn_hardening_disabled(
             f"minimum_version {options.minimum_version.name} is below the TLS 1.2 floor"
         )
-        raise TLSConfigError(msg)
+    if not options.strict_chain_checking:
+        warn_hardening_disabled("strict RFC 5280 certificate chain checking is off")
+    if not verify:
+        warn_hardening_disabled(
+            "TLS server certificate verification is off (verify=False)"
+        )
 
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    context.minimum_version = options.minimum_version
-    if options.maximum_version is not None:
-        context.maximum_version = options.maximum_version
-    context.verify_mode = ssl.CERT_REQUIRED
-    context.check_hostname = True
-    context.options |= ssl.OP_NO_COMPRESSION
-    # Strict RFC 5280 checking of the certificate chain (the default of
-    # ``ssl.create_default_context``, but not of a bare ``SSLContext``).
-    context.verify_flags |= ssl.VERIFY_X509_STRICT
 
+def _load_ca_and_crl(context: ssl.SSLContext, options: TLSOptions) -> None:
+    """Load ``options.ca_files``/``crl_files`` into ``context`` - see :func:`build_ssl_context`."""
     ca_file_list = _as_list(options.ca_files, "ca_files")
     if ca_file_list:
         for ca_file in ca_file_list:
@@ -135,6 +131,67 @@ def build_ssl_context(
                 partial(context.load_verify_locations, cafile=str(crl_file)),
             )
         context.verify_flags |= ssl.VERIFY_CRL_CHECK_LEAF
+
+
+def build_ssl_context(
+    *,
+    certfile: "StrPath | None" = None,
+    keyfile: "StrPath | None" = None,
+    options: TLSOptions | None = None,
+    verify: bool = True,
+) -> ssl.SSLContext:
+    """Build a hardened :class:`ssl.SSLContext`, optionally for mTLS.
+
+    Server certificate verification, hostname checking, the TLS 1.2 floor
+    and strict chain checking are all on by default. Each can be turned off
+    explicitly (``verify=False``; ``options.minimum_version``/
+    ``options.strict_chain_checking``) for a developer who has decided they
+    need to - this library only owns the default, not the final word - but
+    doing so raises and logs a
+    :class:`~webdav.exceptions.TLSHardeningDisabledWarning` every time,
+    loud and impossible to mistake for routine output. Prefer
+    ``options.ca_files`` (a private CA) over ``verify=False`` when the
+    server certificate simply isn't in the system trust store - that
+    keeps verification on.
+
+    Args:
+        certfile: Client certificate (PEM) for mTLS. ``None`` for a
+            regular TLS connection without a client certificate.
+        keyfile: Private key for ``certfile``, if not bundled in the same
+            file.
+        options: The advanced knobs - see :class:`TLSOptions`.
+        verify: Server certificate verification. ``False`` disables it
+            entirely (and hostname checking with it) - the connection is
+            then not protected against a machine-in-the-middle.
+
+    Raises:
+        TLSConfigError: A certificate, key or CA/CRL file could not be
+            loaded.
+
+    """
+    options = options or TLSOptions()
+    _warn_about_disabled_hardening(options, verify=verify)
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = options.minimum_version
+    if options.maximum_version is not None:
+        context.maximum_version = options.maximum_version
+    if verify:
+        context.verify_mode = ssl.CERT_REQUIRED
+        context.check_hostname = True
+    else:
+        # check_hostname must be turned off before verify_mode - the ssl
+        # module refuses CERT_NONE while check_hostname is still True.
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    context.options |= ssl.OP_NO_COMPRESSION
+    # Strict RFC 5280 checking of the certificate chain (the default of
+    # ``ssl.create_default_context``, but not of a bare ``SSLContext``).
+    if options.strict_chain_checking:
+        context.verify_flags |= ssl.VERIFY_X509_STRICT
+
+    if verify:
+        _load_ca_and_crl(context, options)
 
     if certfile is not None:
         _load(
@@ -193,9 +250,12 @@ class SSLContextAdapter(DeadlineAdapter):
     :func:`build_ssl_context`.
     """
 
-    def __init__(self, ssl_context: ssl.SSLContext, **kwargs: Any) -> None:
+    def __init__(
+        self, ssl_context: ssl.SSLContext, *, verify: bool = True, **kwargs: Any
+    ) -> None:
         """Store the context; applied to both pool managers below."""
         self._ssl_context = ssl_context
+        self._verify = verify
         super().__init__(**kwargs)
 
     def __getstate__(self) -> "dict[str, Any]":
@@ -210,10 +270,11 @@ class SSLContextAdapter(DeadlineAdapter):
         on top of the context - so a private CA given as ``ca_files`` would
         also trust every public CA - and would honour a per-call
         ``verify=False``/``cert=``. This context is the whole configuration:
-        the server is always verified, against exactly the CAs it holds, and
-        the client certificate is the one it was built with.
+        verification is exactly what :func:`build_ssl_context` built it
+        with, against exactly the CAs it holds (if any), and the client
+        certificate is the one it was built with.
         """
-        conn.cert_reqs = "CERT_REQUIRED"
+        conn.cert_reqs = "CERT_REQUIRED" if self._verify else "CERT_NONE"
         conn.ca_certs = None
         conn.ca_cert_dir = None
         conn.cert_file = None
@@ -236,6 +297,7 @@ def mount_mtls_adapter(
     certfile: "StrPath | None" = None,
     keyfile: "StrPath | None" = None,
     options: TLSOptions | None = None,
+    verify: bool = True,
 ) -> None:
     """Build an mTLS :class:`SSLContextAdapter` and mount it for ``https://``.
 
@@ -243,6 +305,9 @@ def mount_mtls_adapter(
     :class:`SSLContextAdapter` for the common case.
     """
     adapter = SSLContextAdapter(
-        build_ssl_context(certfile=certfile, keyfile=keyfile, options=options)
+        build_ssl_context(
+            certfile=certfile, keyfile=keyfile, options=options, verify=verify
+        ),
+        verify=verify,
     )
     session.mount("https://", adapter)
