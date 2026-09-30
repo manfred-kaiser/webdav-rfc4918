@@ -13,6 +13,7 @@ WebDAV-specific meaning to (207, 422, 423, 424, 507) in addition to the
 regular HTTP 4xx/5xx codes a WebDAV server commonly returns.
 """
 
+import warnings
 import xml.etree.ElementTree as ET
 from http import HTTPStatus
 from typing import TYPE_CHECKING, ClassVar
@@ -75,14 +76,6 @@ class TLSConfigError(ClientError):
     raises (e.g. a bare ``ssl.SSLError: [SSL] PEM lib`` that doesn't say
     *which* of possibly several configured files was the culprit) with
     the path that was actually being loaded.
-    """
-
-
-class InsecureConfigurationError(ClientError, ValueError):
-    """Raised when a session would be set up or used without verifying the server's certificate.
-
-    A :class:`ClientError` (so a :class:`WebDAVError`) and a ``ValueError`` (it is,
-    at heart, an unacceptable argument): catch whichever suits.
     """
 
 
@@ -446,6 +439,30 @@ class RedirectNotFollowedError(HTTPStatusError):
 
 class InsecureTransportWarning(UserWarning):
     """Credentials are about to be sent over plain ``http`` to a non-local host."""
+
+
+class TLSHardeningDisabledWarning(UserWarning):
+    """A TLS hardening measure was explicitly turned off for this session.
+
+    Certificate verification, the 1.2 floor or strict chain checking.
+    Deliberately its own class, not a subclass of anything ``urllib3``/``requests``
+    already define (``urllib3.exceptions.InsecureRequestWarning`` and its
+    ``HTTPWarning`` base) - ``urllib3.disable_warnings()`` filters on that
+    hierarchy, a one-liner common enough in ``requests``-based code that relying
+    on it would risk this warning being silenced by the same call that silenced
+    the unrelated warning someone was actually trying to quiet. Also logged
+    (``logging.getLogger("webdav")``), not just raised as a Python warning - and
+    unlike a plain ``warnings.warn``, exempted below from the default filter's
+    once-per-(message, category, module, line) deduplication, so a repeated
+    insecure call keeps warning every time, not just the first.
+    """
+
+
+# See the class docstring: without this, Python's default warnings filter
+# would print this warning only once per call site per process - which
+# would quietly undersell what every other call to it does: the log line
+# still fires each time either way, but the Python warning should too.
+warnings.filterwarnings("always", category=TLSHardeningDisabledWarning)
 
 
 def raise_for_status(response: "Response", path: str | None = None) -> None:

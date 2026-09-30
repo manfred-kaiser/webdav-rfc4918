@@ -11,9 +11,10 @@ The first release.
 
 ### Added
 
-- An RFC 4918 WebDAV client with two peer classes, like `os`/`pathlib.Path`: `webdav.Session` - a
-  `requests.Session` that also speaks the WebDAV verbs - and `webdav.FileSystem`, which treats a server
-  like a local filesystem. Every `FileSystem` operation is also a module-level one-off
+- An RFC 4918 WebDAV client with two peer classes, like `os`/`pathlib.Path`: `webdav.Session` - built
+  on `requests`, speaking its API (`auth=`, `headers=`, `verify=`, ...) plus the WebDAV verbs, but not
+  a `requests.Session` subclass - and `webdav.FileSystem`, which treats a server like a local
+  filesystem. Every `FileSystem` operation is also a module-level one-off
   (`webdav.ls(url)`, `webdav.upload_file(...)`, ...) with an identical signature (a test compares them,
   and the module functions are typed - and completed by your IDE - like the methods); `Session` has no
   module-level mirror, open one explicitly for protocol-level control. The HTTP verbs take a `url`, the
@@ -62,10 +63,12 @@ they were fixed):
   followed; `303` only for `GET`/`HEAD`; a body that cannot be re-sent is not re-sent; loops and
   ambiguous or unparseable targets are refused (the two URL parsers involved must agree on the host).
   `Session.send()` sends one request and never follows a redirect.
-- **TLS verification cannot be switched off.** `verify=False` - and everything `requests` reads as
-  false - is refused in the constructor, per call and as `session.verify`. `REQUESTS_CA_BUNDLE`/
-  `CURL_CA_BUNDLE` never replace the configured CA, and a private CA given as `ca_files` is not widened
-  by the public ones. TLS 1.2 is the floor; `key_password` is hidden from `repr`.
+- **TLS verification is on by default, and disabling it is never quiet.** `verify=False` - and
+  everything `requests` reads as false - is accepted (in the constructor, per call, as
+  `session.verify`), but raises and logs a `TLSHardeningDisabledWarning` every time, immune to a
+  plain `urllib3.disable_warnings()`. The TLS 1.2 floor and strict chain checking get the same
+  treatment. `REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` never replace the configured CA, and a private CA
+  given as `ca_files` is not widened by the public ones; `key_password` is hidden from `repr`.
 - **Credentials in a URL are refused** (`https://user:pw@host/`): pass `auth=`. A pickled `Session`
   carries its credentials in clear - treat it like a password file.
 - **Credentials do not leak**: not into exception messages, warnings or logs (URL userinfo and the query

@@ -20,6 +20,7 @@ from webdav import (
     ResourceNotFoundError,
     Response,
     Session,
+    exceptions,
 )
 from webdav.exceptions import InsecureTransportWarning, MultiStatusError
 
@@ -709,9 +710,9 @@ def test_secondary_parameters_must_be_named() -> None:
         fs.get_props("/a", None, True)  # type: ignore[misc]
 
 
-def test_certificate_verification_cannot_be_switched_off_by_the_constructor() -> None:
-    with pytest.raises(ValueError, match="verify=False"):
-        Session(verify=False)  # type: ignore[arg-type]
+def test_disabling_certificate_verification_in_the_constructor_warns_loudly() -> None:
+    with pytest.warns(exceptions.TLSHardeningDisabledWarning, match="verify=False"):
+        assert Session(verify=False).verify is False  # type: ignore[arg-type]
     assert Session(verify=True).verify is True
     assert Session(verify="/etc/ssl/ca.pem").verify == "/etc/ssl/ca.pem"
 

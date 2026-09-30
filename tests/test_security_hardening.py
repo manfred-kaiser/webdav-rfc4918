@@ -21,57 +21,60 @@ from webdav import FileSystem, RedirectPolicy, Session, exceptions
 from webdav.dav.conditional import Condition, build_if_header_single
 from webdav.dav.locks import LockRegistry
 from webdav.dav.properties import build_proppatch_body
-from webdav.exceptions import ClientError, InsecureConfigurationError, TLSConfigError
+from webdav.exceptions import ClientError, TLSConfigError
 from webdav.transport.redirects import effective_origin
 from webdav.transport.tls import SSLContextAdapter, TLSOptions, build_ssl_context
 
 # ---------------------------------------------------------------------------
-# Certificate verification cannot be switched off by accident, or quietly
+# Certificate verification is on by default, and disabling it is never quiet
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("verify", [False, None, 0, "", b"", 0.0])
-def test_the_constructor_refuses_everything_that_means_no_verification(
+def test_the_constructor_warns_loudly_for_everything_that_means_no_verification(
     verify: object,
 ) -> None:
-    with pytest.raises(InsecureConfigurationError, match="not accepted"):
+    with pytest.warns(exceptions.TLSHardeningDisabledWarning, match="verification"):
         Session(verify=verify)  # type: ignore[arg-type]
 
 
-def test_a_per_call_or_attribute_verify_false_is_refused() -> None:
+def test_a_per_call_or_attribute_verify_false_still_sends_the_request() -> None:
     with scripted_server(always(OK)) as (url, rec):
         session = Session(retry=False)
-        with pytest.raises(
-            InsecureConfigurationError, match="certificate is not verified"
-        ):
+        with pytest.warns(exceptions.TLSHardeningDisabledWarning):
             session.get(f"{url}/a", verify=False)
         session.verify = False
-        with pytest.raises(
-            InsecureConfigurationError, match="certificate is not verified"
-        ):
+        with pytest.warns(exceptions.TLSHardeningDisabledWarning):
             session.get(f"{url}/a")
-        with pytest.raises(InsecureConfigurationError):
+        with pytest.warns(exceptions.TLSHardeningDisabledWarning):
             session.propfind(f"{url}/a", depth=0)
-    assert rec.requests == []
+    assert len(rec.requests) == 3
 
 
-def test_there_is_no_opt_out_of_certificate_verification() -> None:
-    assert not hasattr(Session(), "allow_insecure_tls")
+def test_disabling_verification_is_logged_too_not_only_a_python_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Not only ``warnings.warn`` - a blanket warnings filter must not erase every trace."""
+
+    def connect_insecurely(url: str) -> None:
+        Session(retry=False, verify=False).get(f"{url}/a")
+
     with scripted_server(always(OK)) as (url, _rec):
-        session = Session(retry=False)
-        session.verify = False
-        with pytest.raises(InsecureConfigurationError):
-            session.get(f"{url}/a")
-        session.allow_insecure_tls = True  # type: ignore[attr-defined]  # an attribute nothing reads
-        with pytest.raises(InsecureConfigurationError):
-            session.get(f"{url}/a")
+        with pytest.warns(exceptions.TLSHardeningDisabledWarning):
+            connect_insecurely(url)
+    assert any(
+        "TLS hardening disabled" in r.message and "verification" in r.message
+        for r in caplog.records
+    )
 
 
-def test_the_refusal_is_both_a_webdav_error_and_a_value_error() -> None:
-    with pytest.raises(InsecureConfigurationError) as excinfo:
-        Session(verify=False)  # type: ignore[arg-type]
-    assert isinstance(excinfo.value, ValueError)
-    assert isinstance(excinfo.value, ClientError)
+def test_a_missing_ca_bundle_is_both_a_webdav_error_and_a_value_error(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ClientError) as excinfo:
+        Session(verify=str(tmp_path / "nope.pem"), retry=False).get(
+            "http://unused.invalid/a"
+        )
     assert isinstance(excinfo.value, requests.RequestException)
 
 
@@ -81,12 +84,14 @@ def test_a_missing_ca_bundle_is_a_webdav_error_not_an_oserror(tmp_path: Path) ->
         session.get("http://unused.invalid/a")
 
 
-def test_verification_falsy_values_are_refused_per_call_too() -> None:
-    session = Session(retry=False)
-    for falsy in (False, 0, "", None):
-        session.verify = falsy  # type: ignore[assignment]
-        with pytest.raises(InsecureConfigurationError):
-            session.get("http://unused.invalid/a")
+def test_verification_falsy_values_warn_per_call_too() -> None:
+    with scripted_server(always(OK)) as (url, rec):
+        session = Session(retry=False)
+        for falsy in (False, 0, "", None):
+            session.verify = falsy  # type: ignore[assignment]
+            with pytest.warns(exceptions.TLSHardeningDisabledWarning):
+                session.get(f"{url}/a")
+        assert len(rec.requests) == 4
 
 
 def test_the_environment_cannot_replace_the_configured_ca(
@@ -309,12 +314,36 @@ def test_an_empty_ca_or_crl_list_is_an_error_not_a_weaker_setup(
         build_ssl_context(options=TLSOptions(**options))
 
 
-def test_the_tls_floor_cannot_be_lowered() -> None:
-    with pytest.raises(TLSConfigError, match="floor"):
-        build_ssl_context(options=TLSOptions(minimum_version=ssl.TLSVersion.TLSv1))
+def test_the_tls_floor_is_secure_by_default_but_can_be_lowered_loudly() -> None:
     context = build_ssl_context()
     assert context.minimum_version >= ssl.TLSVersion.TLSv1_2
     assert context.verify_flags & ssl.VERIFY_X509_STRICT
+
+    with pytest.warns(exceptions.TLSHardeningDisabledWarning, match="floor"):
+        context = build_ssl_context(
+            options=TLSOptions(minimum_version=ssl.TLSVersion.TLSv1)
+        )
+    assert context.minimum_version == ssl.TLSVersion.TLSv1
+
+
+def test_strict_chain_checking_is_on_by_default_but_can_be_turned_off_loudly() -> None:
+    context = build_ssl_context()
+    assert context.verify_flags & ssl.VERIFY_X509_STRICT
+
+    with pytest.warns(exceptions.TLSHardeningDisabledWarning, match="strict"):
+        context = build_ssl_context(options=TLSOptions(strict_chain_checking=False))
+    assert not context.verify_flags & ssl.VERIFY_X509_STRICT
+
+
+def test_verification_is_on_by_default_but_can_be_turned_off_loudly() -> None:
+    context = build_ssl_context()
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+
+    with pytest.warns(exceptions.TLSHardeningDisabledWarning, match="verify"):
+        context = build_ssl_context(verify=False)
+    assert context.verify_mode == ssl.CERT_NONE
+    assert context.check_hostname is False
 
 
 def test_the_adapter_leaves_verification_to_its_context_alone() -> None:
@@ -333,6 +362,22 @@ def test_the_adapter_leaves_verification_to_its_context_alone() -> None:
     assert conn.ca_certs is None
     assert conn.cert_file is None
     assert conn.key_file is None
+
+
+def test_the_adapter_carries_verify_false_through_to_the_connection() -> None:
+    with pytest.warns(exceptions.TLSHardeningDisabledWarning):
+        adapter = SSLContextAdapter(build_ssl_context(verify=False), verify=False)
+
+    class Conn:
+        cert_reqs = None
+        ca_certs = "/certifi/cacert.pem"
+        ca_cert_dir = "/somewhere"
+        cert_file = "/tmp/other.pem"
+        key_file = "/tmp/other.key"
+
+    conn = Conn()
+    adapter.cert_verify(conn, "https://dav.example/", False, ("/a", "/b"))
+    assert conn.cert_reqs == "CERT_NONE"
 
 
 def test_a_pinned_ca_is_not_widened_by_the_public_ones(tmp_path: Path) -> None:

@@ -63,8 +63,11 @@ Whatever the policy:
   host it names. Userinfo, control characters, backslashes and any
   scheme but `http`/`https` are refused - an origin is scheme, host and
   port, so `http` -> `https` on the same host is a *different* origin.
-- `https` -> `http` is never followed, not even with `ALL` - only to an
-  origin explicitly listed in `trusted_redirect_origins`.
+- `https` -> `http` is never followed - not even with `ALL`, and not even
+  to an origin explicitly listed in `trusted_redirect_origins`. Trusting a
+  target with credentials and accepting that the same bytes then cross the
+  network in clear text are different questions; there is no legitimate
+  reason to want the second.
 
 Every hop is judged against the origin the request *started at*: after
 A redirects to B, a further redirect to another path on B is still "another

@@ -15,10 +15,10 @@
 
 ---
 
-`webdav-rfc4918` is a WebDAV client ([RFC 4918](https://www.rfc-editor.org/rfc/rfc4918)) for Python: `webdav.FileSystem` treats a server like a local filesystem (`ls`, `open`, `walk`, `upload_file`, ...) - the same relationship `os` and `pathlib.Path` have for the local one - and every one of its operations is also a module-level one-off, `webdav.ls(url)`, `webdav.upload_file(...)`, no connection to manage yourself. For protocol-level control it's built *on* [`requests`](https://requests.readthedocs.io/), not next to it: `webdav.Session` **is** a `requests.Session` that additionally speaks the WebDAV vocabulary (`propfind`, `mkcol`, `copy`, `move`, `lock`, ...), and everything you know from `requests` - `auth=`, `verify=`, adapters, hooks - keeps working.
+`webdav-rfc4918` is a WebDAV client ([RFC 4918](https://www.rfc-editor.org/rfc/rfc4918)) for Python: `webdav.FileSystem` treats a server like a local filesystem (`ls`, `open`, `walk`, `upload_file`, ...) - the same relationship `os` and `pathlib.Path` have for the local one - and every one of its operations is also a module-level one-off, `webdav.ls(url)`, `webdav.upload_file(...)`, no connection to manage yourself. For protocol-level control, `webdav.Session` speaks the API you already know from [`requests`](https://requests.readthedocs.io/) - the same constructor arguments, the same `auth=`/`headers=`/`verify=`/`cookies=`/`hooks=` attributes - plus the WebDAV vocabulary (`propfind`, `mkcol`, `copy`, `move`, `lock`, ...) on top; it isn't a `requests.Session` subclass, on purpose - see [Session and FileSystem](docs/reference/session.md#a-note-on-requestssession) for why.
 
 - **One filesystem API, two ways to call it**: module-level functions for a single request, `FileSystem` for several - same names, same arguments, same return values (a test compares the signatures)
-- **Secure by default**: a malicious server is the attacker this library is written against - TLS verification cannot be switched off, redirects never carry your credentials to another origin, responses are bounded in size and time ([details below](#security))
+- **Secure by default**: a malicious server is the attacker this library is written against - TLS verification, safe redirect handling and bounded responses are all on by default, and turning any of them off is loud, never silent ([details below](#security))
 - **RFC 4918 to the letter**: multistatus parsing, `Depth`, `Overwrite`, class 2 locking with `If` headers, conditional writes, extended MKCOL
 - **Consistent return types**: `FileSystem` operations return plain values and raise a `WebDAVError`; `Session` verbs (for when you need them) return a `Response` and never raise unless asked - no call changes its result type depending on its arguments
 
@@ -46,7 +46,7 @@ with webdav.FileSystem("https://webdav.example.org", auth=auth) as fs:
     fs.upload_file("Gorilla.jpg", "Photos/Gorilla.jpg")
     fs.download_file("Photos/Gorilla.jpg", "copy.jpg")
 
-# Protocol-level control: a Session is a requests.Session that speaks WebDAV
+# Protocol-level control: a Session speaks the requests API, plus WebDAV
 with webdav.Session("https://webdav.example.org", auth=auth) as session:
     response = session.propfind("/Photos/", depth=1)
     response.multistatus.responses            # the parsed 207 body
@@ -108,8 +108,8 @@ with webdav.Session("https://webdav.example.org", auth=auth) as session:
 
 A WebDAV server - or a redirect to one - can be hostile. The defaults assume so:
 
-- **TLS verification cannot be disabled.** `verify=False` (and `None`, `0`, `""`) is refused - in the constructor, per call and as `session.verify`. There is no opt-out: use a CA file for a private CA. `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` and `~/.netrc` are ignored - credentials are only the ones you pass.
-- **Redirects are yours to allow.** Only same-origin redirects are followed by default (`RedirectPolicy.SAME_ORIGIN`). A hop to another origin never carries credentials, cookies, session headers, a client certificate or a lock token; `https` → `http` is never followed. `NEVER`, `WHITELIST` and `ALL` are there when you need them - see [Redirects](docs/reference/redirects.md).
+- **TLS verification is on by default, and turning it off is never quiet.** `verify=False` (and `None`, `0`, `""`) is accepted - it's your call to make, not this library's to forbid - but every use raises *and* logs a `TLSHardeningDisabledWarning`: its own warning class, not a subclass of anything `urllib3`/`requests` define, so a plain `urllib3.disable_warnings()` can't silence it as a side effect. The TLS 1.2 floor and strict certificate-chain checking (`TLSOptions`) get the same treatment. Prefer a CA file for a private CA over disabling verification. `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` and `~/.netrc` are ignored either way - credentials are only the ones you pass.
+- **Redirects are yours to allow.** Only same-origin redirects are followed by default (`RedirectPolicy.SAME_ORIGIN`). A hop to another origin never carries credentials, cookies, session headers, a client certificate or a lock token; `https` → `http` is never followed, under any policy, not even for an explicitly trusted target. `NEVER`, `WHITELIST` and `ALL` are there when you need them - see [Redirects](docs/reference/redirects.md).
 - **Bounded responses.** `max_response_size` (64 MiB after decompression; stacked content-codings are refused), `max_response_time` (a 300 s deadline for the whole request, headers included), 200 000 `<response>` elements per multistatus, limits on `walk`. All can be tightened. A streamed download is bounded per read, not in size.
 - **Safe defaults.** `copy`/`move` do not overwrite unless told to, `download_file` writes a temporary file and moves it into place when complete (never through a symlink), writes are never retried, credentials in a URL (`https://user:pw@host/`) are refused.
 - **Credentials do not leak** into exception messages, warnings or logs.

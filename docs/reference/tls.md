@@ -12,12 +12,13 @@ session = Session(
 )
 ```
 
-Server certificate verification is always on: there is no constructor
-parameter to disable it, and `Session(verify=False)` - like `None`, `0` and
-`""`, which `requests` reads the same way - is refused. So is `verify=False`
-on a single call, or set as `session.verify`. There is no opt-out (a
-`InsecureConfigurationError` is raised): use `verify=<path to a CA bundle>`
-for a private CA or a test setup instead.
+Server certificate verification is on by default - the constructor, a
+single call and `session.verify` all accept `False` (like `None`, `0` and
+`""`, which `requests` reads the same way), but every use raises and logs
+a `TLSHardeningDisabledWarning`, loud and independent of `urllib3`'s own
+warning category (a plain `urllib3.disable_warnings()` cannot silence it).
+Prefer `verify=<path to a CA bundle>` for a private CA or a test setup -
+that keeps verification on.
 
 `REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` from the environment are ignored (they
 would replace the CA you configured), and so is `~/.netrc`.
