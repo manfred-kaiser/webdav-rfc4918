@@ -89,7 +89,7 @@ from webdav.transport.redirects import (
 from webdav.transport.retry import retry as _retry
 from webdav.transport.streaming import DEFAULT_CHUNK_SIZE
 from webdav.transport.tls import mount_mtls_adapter, warn_hardening_disabled
-from webdav.url_safety import effective_origin, redact_url
+from webdav.url_safety import display_url, effective_origin, is_url, redact_url
 
 if TYPE_CHECKING:
     import urllib.parse
@@ -223,8 +223,6 @@ _NO_AUTH = _NoAuth()
 
 #: Marks a reason string (rather than a URL) returned by ``Session._hop_target``.
 _REASON_PREFIX = "\x00reason:"
-
-_URL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
 #: The WebDAV-specific attributes a pickled session keeps, beyond the plain
 #: ``requests`` ones in ``_TRANSPORT_PICKLED`` below; see
@@ -472,11 +470,6 @@ def _check_chunk_size(value: object) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         msg = f"chunk_size must be a positive integer, got {value!r}"
         raise ValueError(msg)
-
-
-def _display(path: str) -> str:
-    """``path`` for a message: a URL loses its userinfo, query and fragment."""
-    return redact_url(path) if _URL_RE.match(path) else path
 
 
 def _strong_etag(value: str) -> str:
@@ -1006,7 +999,7 @@ class Session:
         """
         if self.base_url is None:
             return url
-        if _URL_RE.match(url):
+        if is_url(url):
             if effective_origin(url) is None or effective_origin(
                 url
             ) != effective_origin(self.base_url):
@@ -1113,7 +1106,7 @@ class Session:
         whichever error ``requests`` (or ``urlsplit``) would raise. Credentials
         belong in ``auth=``, not in a URL, which ends up in logs and messages.
         """
-        if _URL_RE.match(url) and urlsplit(url).username is not None:
+        if is_url(url) and urlsplit(url).username is not None:
             msg = "a URL with credentials in it is refused: pass auth=(user, password) instead"
             raise ClientError(msg)
         if effective_origin(url) is None:
@@ -1809,7 +1802,7 @@ class Session:
         if self.base_url is not None:
             url = self.resolve_url(path, add_trailing_slash=add_trailing_slash)
             base = URL(self.base_url)
-            if _URL_RE.match(path):
+            if is_url(path):
                 try:
                     return url, base, relative_url_to(base, URL(url).path)
                 except ValueError as exc:
@@ -1841,7 +1834,7 @@ class Session:
         """
         url = self._locate(path, add_trailing_slash)[0]
         response = self._fetch(method, url, **kwargs)
-        raise_for_status(response, path=_display(error_path or path))
+        raise_for_status(response, path=display_url(error_path or path))
         if multistatus and response.status_code == HTTPStatus.MULTI_STATUS:
             parse_multistatus_response(response).raise_for_status()
         return response
@@ -1955,7 +1948,7 @@ class Session:
         if destination.startswith("//"):
             msg = "a scheme-relative Destination is not allowed (RFC 4918 sec. 10.3)"
             raise ClientError(msg)
-        if _URL_RE.match(destination):
+        if is_url(destination):
             parts = _split(destination)
             if parts.query or parts.fragment or "\\" in destination:
                 # Not part of a resource's address here - and exactly where a

@@ -79,10 +79,9 @@ from webdav.session import (
     Session,
     _check_chunk_size,
     _check_depth,
-    _display,
 )
 from webdav.transport.streaming import IterStream, SizedIterator
-from webdav.url_safety import redact_url
+from webdav.url_safety import display_url, redact_url
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -549,7 +548,7 @@ class FileSystem:
             if own is not None:
                 own_key = path_key(own.path)
         if own is not None and own.properties.resource_type == "file":
-            raise IsAResourceError(_display(path), "not a collection: use info()")
+            raise IsAResourceError(display_url(path), "not a collection: use info()")
         members = _direct_members(result.entries, own, own_key)
         return [_resource(resp, base) for resp in members]
 
@@ -709,7 +708,7 @@ class FileSystem:
                 continue
             if depth > _WALK_MAX_DEPTH or len(seen) >= _WALK_MAX_DIRS:
                 msg = (
-                    f"walk gave up at {_display(current)!r}: more than {_WALK_MAX_DEPTH} levels "
+                    f"walk gave up at {display_url(current)!r}: more than {_WALK_MAX_DEPTH} levels "
                     f"deep or {_WALK_MAX_DIRS} collections - a server that invents directories "
                     "as you go never ends. Pass max_depth to bound it deliberately."
                 )
@@ -916,7 +915,9 @@ class FileSystem:
         except PreconditionFailedError as exc:
             if not overwrite and not isinstance(exc, ResourceAlreadyExistsError):
                 # We set ``If-None-Match: *``: a 412 here means "it exists".
-                raise ResourceAlreadyExistsError(exc.response, _display(path)) from exc
+                raise ResourceAlreadyExistsError(
+                    exc.response, display_url(path)
+                ) from exc
             raise
         except requests.RequestException as exc:
             if problem:  # the request broke because the body could not be completed

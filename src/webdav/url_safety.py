@@ -27,6 +27,13 @@ _FORBIDDEN_URL_CHARS = re.compile(r"[\x00-\x1f\x7f\\]")
 
 Origin = tuple[str, str, int]
 
+_URL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+
+
+def is_url(value: str) -> bool:
+    """Whether ``value`` is written as a URL (``scheme://...``) rather than a plain path."""
+    return _URL_RE.match(value) is not None
+
 
 def effective_origin(url: str) -> "Origin | None":
     r"""The origin a connection to ``url`` would *actually* go to, or ``None``.
@@ -113,4 +120,9 @@ def redact_url(url: str) -> str:
     ]
 
 
-__all__ = ["Origin", "effective_origin", "redact_url"]
+def display_url(path: str) -> str:
+    """``path`` for a message: a URL loses its userinfo, query and fragment."""
+    return redact_url(path) if is_url(path) else path
+
+
+__all__ = ["Origin", "display_url", "effective_origin", "is_url", "redact_url"]
