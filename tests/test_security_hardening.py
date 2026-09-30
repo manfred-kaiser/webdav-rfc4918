@@ -15,15 +15,15 @@ from typing import Any
 import pytest
 import requests
 
-from tests.mtls_server import Certificates
+from tests.certificates import Certificates
 from tests.scripted_server import OK, Seen, always, redirect, scripted_server
 from webdav import FileSystem, RedirectPolicy, Session, exceptions
 from webdav.dav.conditional import Condition, build_if_header_single
 from webdav.dav.locks import LockRegistry
 from webdav.dav.properties import build_proppatch_body
 from webdav.exceptions import ClientError, TLSConfigError
-from webdav.transport.redirects import effective_origin
 from webdav.transport.tls import SSLContextAdapter, TLSOptions, build_ssl_context
+from webdav.url_safety import effective_origin
 
 # ---------------------------------------------------------------------------
 # Certificate verification is on by default, and disabling it is never quiet
@@ -469,7 +469,7 @@ def test_unlock_strips_angle_brackets_and_validates() -> None:
     with scripted_server(always(OK)) as (url, rec):
         session = Session(retry=False)
         session.unlock(f"{url}/a", "<opaquelocktoken:t>")
-        with pytest.raises(exceptions.MalformedResponseError):
+        with pytest.raises(ValueError, match="not a usable lock token"):
             session.unlock(f"{url}/a", "x>) (<y")
     assert rec.requests[0].headers["lock-token"] == "<opaquelocktoken:t>"
     assert len(rec.requests) == 1
@@ -521,10 +521,10 @@ def test_a_shared_lock_response_selects_the_lock_that_was_asked_about() -> None:
 
 def test_a_412_is_a_precondition_failure_not_necessarily_an_existing_resource() -> None:
     with scripted_server(always((412, {}, b""))) as (url, _rec):
-        session = Session(retry=False)
+        session = Session(retry=False, raise_on_error=True)
         fs = FileSystem.from_session(session)
         with pytest.raises(exceptions.PreconditionFailedError) as excinfo:
-            session._send("PUT", f"{url}/a", data=b"x")
+            session.put(f"{url}/a", data=b"x")
         assert not isinstance(excinfo.value, exceptions.ResourceAlreadyExistsError)
         assert "already exists" not in str(excinfo.value)
         # ...while an upload that asked for "create only" knows what a 412 means:

@@ -18,7 +18,6 @@ from webdav.dav.conditional import (
     merge_if_headers,
     token_condition,
 )
-from webdav.dav.parse_utils import parse_uint
 from webdav.dav.urls import URL, path_key
 from webdav.dav.xml_utils import (
     dav,
@@ -28,7 +27,9 @@ from webdav.dav.xml_utils import (
     to_xml_string,
 )
 from webdav.exceptions import ClientError, MalformedResponseError
-from webdav.transport.redirects import effective_origin
+from webdav.methods import WRITE_METHODS, Method
+from webdav.transport.parse_utils import parse_uint
+from webdav.url_safety import effective_origin
 
 #: What a lock token may look like. A token is a Coded-URL (RFC 4918 sec.
 #: 10.4): an absolute URI, in ASCII, that this library puts between ``<`` and
@@ -41,7 +42,7 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]{1,1024}")
 
 
 def check_token(token: str) -> str:
-    """Return ``token`` if it is a usable lock token.
+    """Return ``token``, a lock token the *server* sent, if it is usable.
 
     Raises:
         MalformedResponseError: It is not (see ``_TOKEN_RE``).
@@ -53,12 +54,28 @@ def check_token(token: str) -> str:
     return token
 
 
+def validate_token(token: str) -> str:
+    """Return ``token``, a lock token the *caller* gave, if it is usable.
+
+    The same test as :func:`check_token`, but a bad token here is the caller's
+    mistake, not a malformed answer from the server.
+
+    Raises:
+        ValueError: It is not a usable lock token (see ``_TOKEN_RE``).
+
+    """
+    if not _TOKEN_RE.fullmatch(token):
+        msg = f"not a usable lock token: {token[:60]!r}"
+        raise ValueError(msg)
+    return token
+
+
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
 
     from requests import Response as HTTPResponse
 
-    from webdav.transport.redirects import Origin
+    from webdav.url_safety import Origin
 
 #: How long a lock is requested for when the caller says nothing, in seconds.
 #: Deliberately finite: a client that crashes or loses the network never
@@ -208,7 +225,14 @@ class ActiveLock:
             else EXCLUSIVE
         )
         depth = element.findtext(dav("depth")) or "0"
-        owner = element.findtext(dav("owner"))
+        # ``owner`` may hold anything (sec. 14.17; the RFC's own example is an
+        # ``<href>``): its text, including that of its children.
+        owner_el = element.find(dav("owner"))
+        owner = (
+            "".join(owner_el.itertext()).strip() or None
+            if owner_el is not None
+            else None
+        )
         lock_root = element.findtext(f"{dav('lockroot')}/{dav('href')}")
 
         timeout_text = element.findtext(dav("timeout")) or timeout_header
@@ -334,8 +358,11 @@ class LockRegistry:
         """Record that ``token`` (with ``depth``) is held on ``url``."""
         key = self._key(url)
         check_token(token)
+        held = HeldLock(_tag_url(url), token, depth)
         with self._mutex:
-            self._held.setdefault(key, []).append(HeldLock(_tag_url(url), token, depth))
+            entries = self._held.setdefault(key, [])
+            if held not in entries:
+                entries.append(held)
 
     def discard(self, url: str, token: str, depth: str) -> None:
         """Forget a held lock; a no-op if it isn't recorded."""
@@ -347,6 +374,21 @@ class LockRegistry:
             entries[:] = [e for e in entries if (e.token, e.depth) != (token, depth)]
             if not entries:
                 del self._held[key]
+
+    def discard_token(self, token: str, *, url: "str | None" = None) -> None:
+        """Forget every held lock with this ``token``; a no-op if there is none.
+
+        Wherever it was recorded - or, with ``url``, only there.
+        """
+        only = self._key(url) if url is not None else None
+        with self._mutex:
+            for key in list(self._held):
+                if only is not None and key != only:
+                    continue
+                entries = self._held[key]
+                entries[:] = [e for e in entries if e.token != token]
+                if not entries:
+                    del self._held[key]
 
     def replace_token(self, old: str, new: str) -> None:
         """Swap a token after a refresh (RFC 4918 sec. 9.10.2)."""
@@ -472,4 +514,40 @@ class LockRegistry:
                 build_if_header_single([Condition(token=h.token)], resource=h.url)
                 for h in held_locks
             )
+        )
+
+    def headers_for(
+        self, method: str, url: str, headers: "Mapping[str, str]"
+    ) -> dict[str, str]:
+        """``headers`` plus the ``If`` header of any held lock a ``method`` request to ``url`` needs.
+
+        Only a write carries one - a read has no use for a lock token, and
+        sending one anyway would put a capability on the wire for nothing -
+        and never on top of an ``If`` header the caller wrote themselves.
+        """
+        if method not in WRITE_METHODS or any(k.lower() == "if" for k in headers):
+            return dict(headers)
+        below = (url,) if method == Method.DELETE else ()
+        header = self.if_header(url, include_below=below)
+        return {**headers, "If": header} if header else dict(headers)
+
+    def if_header_for_transfer(
+        self, source: str, destination: str, *, moves: bool
+    ) -> str | None:
+        """The ``If`` header a COPY/MOVE from ``source`` to ``destination`` needs, or ``None``.
+
+        RFC 4918 sec. 10.2: "If a source or destination resource within
+        the scope of the Depth header is locked in such a way as to
+        prevent the successful execution of the method, then the lock
+        token for that resource MUST be submitted with the request in the
+        If request header." That includes a lock on the *parent* of either
+        (sec. 7.4: a lock on a collection covers its membership: the
+        source's parent loses a member on a MOVE, the destination's gains
+        one), and - for a MOVE, which takes the source and all it holds away -
+        locks on members of the source. Every lock touched is presented as a
+        tagged list of its own resource - a plain token would only speak about
+        the request's.
+        """
+        return self.if_header(
+            source, destination, include_below=(source,) if moves else ()
         )

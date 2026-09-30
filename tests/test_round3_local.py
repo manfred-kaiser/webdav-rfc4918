@@ -9,8 +9,8 @@ from typing import Any, BinaryIO, cast
 import pytest
 import requests
 
+from tests.credentials import AUTH
 from tests.scripted_server import OK, Seen, always, scripted_server
-from tests.server import AUTH
 from webdav import FileSystem, Session
 from webdav.exceptions import ClientError
 

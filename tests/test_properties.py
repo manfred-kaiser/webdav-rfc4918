@@ -14,10 +14,11 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from webdav import RedirectPolicy, Session
+from webdav import RedirectPolicy
 from webdav.dav.locks import LockRegistry
 from webdav.dav.urls import join_url_path
-from webdav.transport.redirects import effective_origin, redact_url
+from webdav.transport.redirects import Refuse, build_trust_check, may_follow
+from webdav.url_safety import effective_origin, redact_url
 
 pytestmark = pytest.mark.filterwarnings("ignore")
 
@@ -145,11 +146,13 @@ def test_redact_url_removes_query_userinfo_and_fragment(
 def test_a_redirect_is_only_ever_followed_to_a_trusted_plain_http_url(
     target: str,
 ) -> None:
-    session = Session(
-        redirect_policy=RedirectPolicy.ALL,
+    verdict = may_follow(
+        "https://dav.example/f",
+        target,
+        RedirectPolicy.ALL,
+        is_trusted=build_trust_check(None),
     )
-    verdict = session._may_follow("https://dav.example/f", target, RedirectPolicy.ALL)
-    if isinstance(verdict, str):
+    if isinstance(verdict, Refuse):
         return
     origin = effective_origin(target)
     assert origin is not None

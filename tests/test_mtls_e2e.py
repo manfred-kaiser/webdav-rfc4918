@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 import requests.exceptions
 
-from tests.mtls_server import Certificates, mtls_webdav_server
+from tests.certificates import Certificates
+from tests.mtls_server import mtls_webdav_server
 from webdav import FileSystem
 from webdav.exceptions import TLSConfigError
 from webdav.transport.tls import TLSOptions

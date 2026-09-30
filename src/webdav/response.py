@@ -95,8 +95,10 @@ class Response(requests.Response):
 
         Done in place (not by copying) so the connection, ``history`` and
         streaming state stay attached to the one object the caller holds.
-        Called only by :class:`~webdav.session.Session`, the only place a
-        plain ``requests.Response`` is ever produced.
+        The adapters this library mounts build a :class:`Response` themselves
+        (:class:`~webdav.transport.deadline.DeadlineAdapter`); this is for the
+        response of one a caller mounted, which :class:`~webdav.session.Session`
+        adopts before handing it back. Idempotent.
         """
         # Exactly this class - not a subclass, which has been adopted already.
         if response.__class__ is requests.Response:

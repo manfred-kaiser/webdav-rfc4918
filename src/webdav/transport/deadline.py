@@ -23,6 +23,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.connection import HTTPConnection, HTTPSConnection
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 
+from webdav.exceptions import ClientError
 from webdav.response import Response
 
 if TYPE_CHECKING:
@@ -104,6 +105,35 @@ def watch(seconds: "float | None") -> "Iterator[_Watch | None]":
     finally:
         watcher.cancel()
         _ACTIVE.reset(token)
+
+
+@contextmanager
+def enforce(seconds: "float | None") -> "Iterator[None]":
+    """:func:`watch` the block, and turn a cut-off into a :class:`~webdav.exceptions.ClientError`.
+
+    Two things must not be left to the caller to remember. An exception that
+    escapes while the time is up is the cut-off connection talking, not a
+    network error - say so. And a socket shut down in the middle of a body
+    can look like a clean end of the data (EOF): a block that *returns* after
+    the time is up must never hand back what it read as complete.
+
+    Nested, the outermost deadline is the one that counts (see :func:`watch`).
+    """
+    with watch(seconds) as watcher:
+        try:
+            yield
+        except BaseException:
+            if watcher is not None and watcher.expired.is_set():
+                raise _deadline_error(seconds) from None
+            raise
+        if watcher is not None and watcher.expired.is_set():
+            raise _deadline_error(seconds)
+
+
+def _deadline_error(seconds: "float | None") -> ClientError:
+    return ClientError(
+        f"the request did not complete within the configured time of {seconds} seconds"
+    )
 
 
 def _register(connection: Any) -> None:

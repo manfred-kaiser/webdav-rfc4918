@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from cheroot import wsgi
 from wsgidav.wsgidav_app import WsgiDAVApp
 
-AUTH = "user1", "password1"
+from tests.credentials import AUTH
 
 
 def get_server_address(srvr: wsgi.Server) -> str:

@@ -15,6 +15,7 @@ group in ``--help``.
 """
 
 import argparse
+import math
 import os
 import ssl
 import sys
@@ -112,13 +113,32 @@ def _size_cap(value: str) -> "int | None":
     return _positive_int(value)
 
 
+def _time_cap(value: str) -> "float | None":
+    """Argparse type: a positive number of seconds, or 'none'/'unlimited' to disable the deadline."""
+    if value.lower() in ("none", "unlimited"):
+        return None
+    return _positive_seconds(value)
+
+
+def _redirect_count(value: str) -> int:
+    """Argparse type: how many redirects to follow - ``0`` means none."""
+    try:
+        parsed = int(value)
+    except ValueError:
+        parsed = -1
+    if parsed < 0:
+        msg = f"must be an integer of at least 0, got {value!r}"
+        raise argparse.ArgumentTypeError(msg)
+    return parsed
+
+
 def _positive_seconds(value: str) -> float:
     """Argparse type: a positive number of seconds."""
     try:
         parsed = float(value)
     except ValueError:
         parsed = 0.0
-    if not parsed > 0:
+    if not (parsed > 0 and math.isfinite(parsed)):
         msg = f"must be a positive number of seconds, got {value!r}"
         raise argparse.ArgumentTypeError(msg)
     return parsed
@@ -194,6 +214,10 @@ def _client_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         kwargs["chunk_size"] = args.chunk_size
     if args.timeout is not _UNSET:
         kwargs["timeout"] = args.timeout
+    if args.max_response_time is not _UNSET:
+        kwargs["max_response_time"] = args.max_response_time
+    if args.max_redirects is not _UNSET:
+        kwargs["max_redirects"] = args.max_redirects
     if args.trusted_redirect_origin:
         kwargs["trusted_redirect_origins"] = args.trusted_redirect_origin
     return kwargs
@@ -376,6 +400,14 @@ def _add_client_args(parser: argparse.ArgumentParser) -> None:
         "(follow any redirect - only for a server you fully trust)",
     )
     redirects.add_argument(
+        "--max-redirects",
+        type=_redirect_count,
+        default=_UNSET,
+        metavar="COUNT",
+        help="how many redirects in a row to follow before refusing the "
+        "request as a loop (default: 5; 0 follows none)",
+    )
+    redirects.add_argument(
         "--trusted-redirect-origin",
         action="append",
         default=None,
@@ -408,6 +440,14 @@ def _add_client_args(parser: argparse.ArgumentParser) -> None:
         metavar="SECONDS",
         help="give up when the server does not answer for this long "
         "(connect and read; default: 10 to connect, 60 to read)",
+    )
+    conn.add_argument(
+        "--max-response-time",
+        type=_time_cap,
+        default=_UNSET,
+        metavar="SECONDS",
+        help="give up on a request that has not completed after this long, "
+        "headers, redirects and body included ('none' to disable; default: 300)",
     )
     conn.add_argument(
         "--no-retry",

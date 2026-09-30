@@ -4,7 +4,7 @@ import io
 
 import pytest
 
-from tests.server import AUTH
+from tests.credentials import AUTH
 from webdav import (
     FileSystem,
     ResourceAlreadyExistsError,
@@ -135,5 +135,5 @@ def test_set_and_get_custom_property(fs: FileSystem) -> None:
     fs.upload_fileobj(io.BytesIO(b"x"), "p.txt")
     fs.set_props("p.txt", set_props={("https://example.org/ns", "color"): "blue"})
 
-    props = fs.get_props("p.txt", names=[("https://example.org/ns", "color")])
+    props = fs.get_props("p.txt", props=[("https://example.org/ns", "color")])
     assert props.text("https://example.org/ns", "color") == "blue"

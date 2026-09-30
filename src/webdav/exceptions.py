@@ -13,16 +13,21 @@ WebDAV-specific meaning to (207, 422, 423, 424, 507) in addition to the
 regular HTTP 4xx/5xx codes a WebDAV server commonly returns.
 """
 
+import inspect
 import warnings
 import xml.etree.ElementTree as ET
 from http import HTTPStatus
+from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar
 
 import requests.exceptions
 
-from webdav.transport.redirects import redact_url
+from webdav.url_safety import redact_url
 
 if TYPE_CHECKING:
+    import types
+    from collections.abc import Mapping
+
     from requests import Response
 
 #: RFC 4918 §16's <error> element lives in the DAV: namespace, same as
@@ -212,12 +217,20 @@ def _phrase_for(status_code: int) -> str:
         return ""
 
 
-STATUS_CODE_EXCEPTIONS: dict[int, type[HTTPStatusError]] = {}
+_STATUS_CODE_EXCEPTIONS: dict[int, type[HTTPStatusError]] = {}
+
+#: Which exception a status code raises (see :func:`raise_for_status`) - also
+#: which ones a retry repeats (``retryable``). Read-only: a mapping that any
+#: import could add to would let it change what every session in the process
+#: raises and retries.
+STATUS_CODE_EXCEPTIONS: "Mapping[int, type[HTTPStatusError]]" = MappingProxyType(
+    _STATUS_CODE_EXCEPTIONS
+)
 
 
 def _register(exc_cls: type[HTTPStatusError]) -> type[HTTPStatusError]:
     assert exc_cls.default_status_code is not None
-    STATUS_CODE_EXCEPTIONS[exc_cls.default_status_code] = exc_cls
+    _STATUS_CODE_EXCEPTIONS[exc_cls.default_status_code] = exc_cls
     return exc_cls
 
 
@@ -463,6 +476,30 @@ class TLSHardeningDisabledWarning(UserWarning):
 # would quietly undersell what every other call to it does: the log line
 # still fires each time either way, but the Python warning should too.
 warnings.filterwarnings("always", category=TLSHardeningDisabledWarning)
+
+
+def _in_this_package(frame: "types.FrameType") -> bool:
+    """Whether ``frame`` belongs to this library (or is plumbing ``contextlib`` adds between its frames)."""
+    name = frame.f_globals.get("__name__", "")
+    return name in {"webdav", "contextlib"} or name.startswith("webdav.")
+
+
+def warn_at_caller(message: str, category: type[Warning]) -> None:
+    """``warnings.warn``, attributed to the first frame outside this library.
+
+    A fixed ``stacklevel`` counts the library's own frames (a verb calls
+    ``request``, which calls the retry wrapper, which calls ...) and is wrong
+    as soon as one of them changes. Here the level is worked out on every call,
+    so the warning always names the line of the caller's code that made the
+    request - which is what the default warning filter deduplicates on and
+    what a ``-W error`` or a ``filterwarnings`` entry has to be able to match.
+    """
+    frame = inspect.currentframe()
+    level = 1
+    while frame is not None and _in_this_package(frame):
+        frame = frame.f_back
+        level += 1
+    warnings.warn(message, category, stacklevel=level)
 
 
 def raise_for_status(response: "Response", path: str | None = None) -> None:

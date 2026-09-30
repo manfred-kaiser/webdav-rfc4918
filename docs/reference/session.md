@@ -41,7 +41,7 @@ requests and interprets the answers.
 Both kinds take a full URL - or a path, if the session/filesystem was given a
 `base_url`. Verbs take a `url`, file-system operations a `path`; uploads are
 `(local_path, path)`, downloads `(path, local_path)`. Everything after the first
-argument(s) of a file-system operation - `names=`, `set_props=`, `data=`,
+argument(s) of a file-system operation - `props=`, `set_props=`, `data=`,
 `overwrite=`, ... - is keyword-only.
 
 ## `ls`, `info` and `walk`: one type
@@ -59,12 +59,13 @@ passed unchanged to `info`, `remove`, `download_file`, ...; `.is_dir`, `.size`, 
 
 The `Session` verbs take the same keyword arguments as `requests.Session.request`
 (`auth=`, `headers=`, `timeout=`, `verify=`, `cert=`, `stream=`, ...) plus
-`redirect_policy=` for one call. A `copy`/`move` takes
+`redirect_policy=` and `raise_on_error=` for one call. A `copy`/`move` takes
 `destination=`/`overwrite=`; a `PROPFIND` takes `depth=`; a `LOCK` takes
 `lock_timeout=` (not `timeout=`, which stays the network timeout). Headers
 you pass yourself always win over these conveniences. The session-level
 options - `redirect_policy`, `trusted_redirect_origins`,
-`max_response_size`, `retry`, `chunk_size`, `raise_on_error` - are
+`max_response_size`, `max_response_time`, `max_redirects`, `retry`, `chunk_size`,
+`raise_on_error` - are
 arguments of `Session(...)` and `FileSystem(...)` alike, and of the
 module-level file-system functions.
 
@@ -104,7 +105,10 @@ methods only: `GET`, `HEAD`, `OPTIONS`, `PROPFIND`. Never for a write: if the
 server acted before the connection broke, the retry finds the work done and
 reports the opposite (`mkdir` "exists", `remove` "not found"), and a lost `LOCK`
 reply would leave an orphaned lock. When the attempts run out, the last response is
-returned, as `requests` would. `Session(retry=False)` turns it off.
+returned, as `requests` would. A `Retry-After` header (RFC 9110 §10.2.3, seconds
+or an HTTP-date) is waited for when it is longer than the backoff - but a server
+that asks for more than 30 s is not waited for: the failure is returned instead.
+`Session(retry=False)` turns it off.
 
 ## Pickling and copying
 
@@ -113,7 +117,11 @@ TLS adapter - the last of these rebuilt from the constructor arguments you
 gave, including `tls=TLSOptions(...)` (mTLS with a client certificate can be
 pickled too, unlike a raw `ssl.SSLContext`). Its `auth`, headers and cookies
 are copied *as they are*: a pickled session contains its credentials in clear
-text - do not write it to disk or send it anywhere untrusted.
+text - do not write it to disk or send it anywhere untrusted. (Pickling is
+supported because tools such as `fsspec` and `multiprocessing` need it; like
+them, it serialises the options you configured.) A callable you passed -
+`trusted_redirect_origins=` or `retry=` as a function - has to be picklable
+too: a module-level function, not a lambda.
 
 ## A note on `requests.Session`
 

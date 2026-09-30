@@ -26,6 +26,7 @@ For the module-level functions that mirror this class one-to-one
 # pylint: disable=redefined-builtin,protected-access
 import codecs
 import errno
+import logging
 import os
 import pathlib
 import secrets
@@ -37,10 +38,10 @@ from http import HTTPStatus
 from io import TextIOWrapper
 from typing import (
     TYPE_CHECKING,
-    Any,
     BinaryIO,
     Literal,
     TextIO,
+    Unpack,
     cast,
     overload,
 )
@@ -48,16 +49,18 @@ from typing import (
 import requests
 
 from webdav.dav.conditional import token_condition
+from webdav.dav.features import FeatureDetection
 from webdav.dav.fs_utils import peek_filelike_length
+from webdav.dav.headers import depth_header
 from webdav.dav.locks import (
     _TOKEN_RE,
     DEFAULT_LOCK_TIMEOUT,
     EXCLUSIVE,
     ActiveLock,
     build_lock_body,
-    check_token,
     format_timeout,
     parse_lock_response,
+    validate_token,
 )
 from webdav.dav.properties import build_propfind_body, build_proppatch_body
 from webdav.dav.urls import URL, path_key
@@ -71,28 +74,25 @@ from webdav.exceptions import (
     ResourceAlreadyExistsError,
     ResourceNotFoundError,
 )
+from webdav.fs._remote import Remote
+from webdav.fs.streams import IterStream, SizedIterator
 from webdav.methods import Method
 from webdav.resource import Resource
-from webdav.session import (
-    _LOGGER,
-    FeatureDetection,
-    Session,
-    _check_chunk_size,
-    _check_depth,
-    _display,
-)
-from webdav.transport.redirects import redact_url
-from webdav.transport.streaming import IterStream, SizedIterator
+from webdav.session import Session, SessionOptions
+from webdav.transport.limits import check_chunk_size
+from webdav.url_safety import display_url, redact_url
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from datetime import datetime
     from os import PathLike
-    from typing import Self
+    from typing import Any, Self
     from xml.etree.ElementTree import Element
 
-    from webdav.dav.multistatus import Response as ResourceResponse
+    from webdav.dav.multistatus import ResourceResponse
     from webdav.dav.properties import DAVProperties, PropName
+
+_LOGGER = logging.getLogger("webdav")
 
 #: The modes :meth:`FileSystem.open` understands.
 _OPEN_MODES = frozenset({"r", "rt", "rb", "w", "wt", "wb", "x", "xt", "xb"})
@@ -216,8 +216,11 @@ class FileSystem:
 
     _session: Session
     _owns_session: bool
+    _remote: Remote
 
-    def __init__(self, base_url: "str | None" = None, **kwargs: Any) -> None:
+    def __init__(
+        self, base_url: "str | None" = None, **options: Unpack[SessionOptions]
+    ) -> None:
         """Open a private :class:`~webdav.session.Session` for this ``FileSystem`` alone.
 
         Takes exactly the arguments :class:`~webdav.session.Session` does.
@@ -225,8 +228,7 @@ class FileSystem:
         its locks, cookies and connection pool) with code that also sends
         verbs directly.
         """
-        self._session = Session(base_url, **kwargs)
-        self._owns_session = True
+        self._bind(Session(base_url, **options), owns=True)
 
     @classmethod
     def from_session(cls, session: Session) -> "FileSystem":
@@ -238,9 +240,23 @@ class FileSystem:
         does *not* close ``session`` - the caller still owns it.
         """
         self = cls.__new__(cls)
-        self._session = session
-        self._owns_session = False
+        self._bind(session, owns=False)
         return self
+
+    def _bind(self, session: Session, *, owns: bool) -> None:
+        self._session = session
+        self._remote = Remote(session)
+        self._owns_session = owns
+
+    @property
+    def session(self) -> Session:
+        """The session this ``FileSystem`` sends its requests through.
+
+        Its verbs, settings and ``locks`` are the ones :meth:`locked` and every
+        other operation use; for a ``FileSystem`` built with
+        :meth:`from_session` it is the session that was given.
+        """
+        return self._session
 
     def close(self) -> None:
         """Close the underlying session - only if this ``FileSystem`` created it itself."""
@@ -258,15 +274,23 @@ class FileSystem:
     # -- properties/compliance -------------------------------------------
 
     def dav_compliance(self, path: str = "") -> set[str]:
-        """Return the ``DAV:`` compliance classes the server advertises."""
-        response = self._session._fetch(Method.OPTIONS, self._session._locate(path)[0])
-        return FeatureDetection(response).dav_compliances
+        """Return the ``DAV:`` compliance classes the server advertises.
+
+        Asks the server every time (an ``OPTIONS`` request) and raises if it
+        cannot be reached; :meth:`Session.features_for
+        <webdav.session.Session.features_for>` is the cached variant, for
+        which a server that does not answer is "nothing known".
+        """
+        response = self._session.request(
+            Method.OPTIONS, self._remote.locate(path).url, raise_on_error=False
+        )
+        return set(FeatureDetection.from_response(response).dav_compliances)
 
     def get_props(
         self,
         path: str,
         *,
-        names: "Iterable[str | PropName] | None" = None,
+        props: "Iterable[str | PropName] | None" = None,
         all_prop: bool = False,
         include: "Iterable[str | PropName] | None" = None,
     ) -> "DAVProperties":
@@ -274,7 +298,7 @@ class FileSystem:
 
         Args:
             path: Resource path.
-            names: Specific property names to request - see
+            props: Specific property names to request - see
                 :func:`~webdav.dav.properties.build_propfind_body`. Requests
                 all properties when omitted (and ``all_prop`` is falsy).
             all_prop: Explicitly request ``<d:allprop/>``.
@@ -283,13 +307,13 @@ class FileSystem:
                 :func:`~webdav.dav.properties.build_propfind_body`.
 
         """
-        _url, base, rel = self._session._locate(path)
+        _url, base, rel = self._remote.locate(path)
         data = build_propfind_body(
-            names, all_prop=all_prop or not names, include=include
+            props, all_prop=all_prop or not props, include=include
         )
         # Depth: 0 - this is a single-resource lookup, not a traversal.
         headers = {"Content-Type": "application/xml; charset=utf-8", "Depth": "0"}
-        result = self._session._propfind_parsed(path, headers=headers, data=data)
+        result = self._remote.propfind(path, headers=headers, data=data)
         return result.get_response_for_path(base.path, rel).properties
 
     def set_props(
@@ -302,31 +326,31 @@ class FileSystem:
         """Set and/or remove properties via PROPPATCH (RFC 4918 sec. 9.2)."""
         data = build_proppatch_body(set_props, remove_props)
         headers = {"Content-Type": "application/xml; charset=utf-8"}
-        self._session._send(Method.PROPPATCH, path, data=data, headers=headers)
+        self._remote.send(Method.PROPPATCH, path, data=data, headers=headers)
 
     def content_length(self, path: str) -> "int | None":
         """Return the ``getcontentlength`` property."""
-        return self.get_props(path, names=["content_length"]).content_length
+        return self.get_props(path, props=["content_length"]).content_length
 
     def created(self, path: str) -> "datetime | None":
         """Return the ``creationdate`` property."""
-        return self.get_props(path, names=["created"]).created
+        return self.get_props(path, props=["created"]).created
 
     def modified(self, path: str) -> "datetime | None":
         """Return the ``getlastmodified`` property."""
-        return self.get_props(path, names=["modified"]).modified
+        return self.get_props(path, props=["modified"]).modified
 
     def etag(self, path: str) -> "str | None":
         """Return the ``getetag`` property."""
-        return self.get_props(path, names=["etag"]).etag
+        return self.get_props(path, props=["etag"]).etag
 
     def content_type(self, path: str) -> "str | None":
         """Return the ``getcontenttype`` property."""
-        return self.get_props(path, names=["content_type"]).content_type
+        return self.get_props(path, props=["content_type"]).content_type
 
     def content_language(self, path: str) -> "str | None":
         """Return the ``getcontentlanguage`` property."""
-        return self.get_props(path, names=["content_language"]).content_language
+        return self.get_props(path, props=["content_language"]).content_language
 
     # -- locking ----------------------------------------------------------
 
@@ -347,6 +371,13 @@ class FileSystem:
         held lock's token in an ``If`` header. The lock is released on
         exit, even if the block raised.
 
+        Locking a ``path`` that does not exist yet creates an empty resource
+        there (RFC 4918 sec. 9.10.4) that stays after the lock is gone. The
+        lock times out (see ``lock_timeout`` and the granted
+        :attr:`~webdav.dav.locks.ActiveLock.timeout`) and is not refreshed for
+        you - use :meth:`refresh_lock`; writes made after it timed out fail with
+        ``412``.
+
         Args:
             path: Resource to lock.
             scope: :data:`~webdav.dav.locks.EXCLUSIVE` or
@@ -362,11 +393,14 @@ class FileSystem:
 
         Raises:
             ValueError: ``depth`` is neither ``"0"`` nor ``"infinity"``.
+            ResourceLockedError: A conflicting lock is held (423).
+            MultiStatusError: A ``Depth: infinity`` lock could not cover every
+                member (207 - it names the member that stopped it).
             ClientError: The server did not grant the lock.
             MalformedResponseError: The server sent an unusable lock answer.
 
         """
-        depth = _check_depth(depth, ("0", "infinity"), "LOCK")
+        depth = depth_header(depth, Method.LOCK)
         headers = {
             "Depth": depth,
             "Timeout": format_timeout(lock_timeout),
@@ -374,11 +408,12 @@ class FileSystem:
         }
         # The URL that is locked - fixed now, so that whatever happens to the
         # session (a changed base_url, ...) the UNLOCK goes to the same place.
-        url = self._session._locate(path)[0]
-        response = self._session._send(
+        url = self._remote.locate(path).url
+        # A 207 is not a granted lock: for ``Depth: infinity`` it names the member
+        # that could not be locked (RFC 4918 sec. 9.10.6) and raises here.
+        response = self._remote.send(
             Method.LOCK,
             path,
-            multistatus=False,
             data=build_lock_body(scope, owner),
             headers=headers,
         )
@@ -406,16 +441,41 @@ class FileSystem:
     def _unlock_quietly(self, url: str, token: str) -> None:
         """Release the lock ``token`` on ``url``, never raising (and never hiding that it failed)."""
         try:
-            self._session._fetch(
-                Method.UNLOCK, url, absolute=True, headers={"Lock-Token": f"<{token}>"}
-            )
+            response = self._session.unlock(url, token, raise_on_error=False)
         except requests.RequestException as exc:
             # A failed UNLOCK (a dropped connection, a refusal) must not
             # replace whatever the ``with`` body raised - nor hide that the
             # lock is still there: say so, and go on.
             _LOGGER.warning(
-                "could not release the lock on %s: %s", redact_url(url), exc
+                "could not release the lock on %s: %s - it stays on the server "
+                "until it times out, unless it is released with a session "
+                "configured for that server",
+                redact_url(url),
+                exc,
             )
+            return
+        status = response.status_code
+        if HTTPStatus.OK <= status < HTTPStatus.MULTIPLE_CHOICES:
+            return
+        if status in (HTTPStatus.NOT_FOUND, HTTPStatus.CONFLICT):
+            # RFC 4918 sec. 9.11.1: 409 - the resource was not locked (the URL is
+            # the one that was locked, so: it may have timed out) - or it is gone.
+            # Nothing to release any more, but writes since may have lost the lock.
+            _LOGGER.warning(
+                "the lock on %s was already gone when it was released (the server "
+                "answered %s %s) - it may have timed out",
+                redact_url(url),
+                status,
+                response.reason or "",
+            )
+            return
+        # 403: not permitted to remove it; anything else: the server did not release it.
+        _LOGGER.warning(
+            "could not release the lock on %s: the server answered %s %s",
+            redact_url(url),
+            status,
+            response.reason or "",
+        )
 
     def refresh_lock(
         self,
@@ -439,14 +499,12 @@ class FileSystem:
         refreshed timeout (the one an open block is already holding does
         not update itself - use this method's return value instead).
         """
-        check_token(token)
+        validate_token(token)
         headers = {
             "If": token_condition(token),
             "Timeout": format_timeout(lock_timeout),
         }
-        response = self._session._send(
-            Method.LOCK, path, multistatus=False, headers=headers
-        )
+        response = self._remote.send(Method.LOCK, path, headers=headers)
         active_lock = parse_lock_response(response, expected_token=token)
         self._session.locks.replace_token(token, active_lock.token)
         return active_lock
@@ -465,7 +523,7 @@ class FileSystem:
         """
         headers = {"Content-Type": "application/xml; charset=utf-8"} if data else None
         try:
-            response = self._session._send(
+            response = self._remote.send(
                 Method.MKCOL, path, add_trailing_slash=True, data=data, headers=headers
             )
         except HTTPStatusError as exc:
@@ -486,11 +544,11 @@ class FileSystem:
                 empty string should be able to do.
 
         """
-        url, base, _rel = self._session._locate(path)
+        url, base, _rel = self._remote.locate(path)
         if path_key(URL(url).path) == path_key(base.path):
             msg = "refusing to remove the root of the session (its base_url): name what to remove"
             raise ClientError(msg)
-        self._session._send(Method.DELETE, path)
+        self._remote.send(Method.DELETE, path)
 
     def copy(
         self,
@@ -533,8 +591,8 @@ class FileSystem:
             ResourceNotFoundError: There is nothing at ``path``.
 
         """
-        url, base, _rel = self._session._locate(path)
-        result = self._session._propfind_parsed(path, headers={"Depth": "1"})
+        url, base, _rel = self._remote.locate(path)
+        result = self._remote.propfind(path, headers={"Depth": "1"})
         responses = result.responses
 
         own_key = path_key(URL(url).path)
@@ -549,7 +607,7 @@ class FileSystem:
             if own is not None:
                 own_key = path_key(own.path)
         if own is not None and own.properties.resource_type == "file":
-            raise IsAResourceError(_display(path), "not a collection: use info()")
+            raise IsAResourceError(display_url(path), "not a collection: use info()")
         members = _direct_members(result.entries, own, own_key)
         return [_resource(resp, base) for resp in members]
 
@@ -558,14 +616,14 @@ class FileSystem:
 
         The same :class:`~webdav.resource.Resource` :meth:`ls` returns for each member.
         """
-        _url, base, rel = self._session._locate(path)
-        result = self._session._propfind_parsed(path, headers={"Depth": "0"})
+        _url, base, rel = self._remote.locate(path)
+        result = self._remote.propfind(path, headers={"Depth": "0"})
         return _resource(result.get_response_for_path(base.path, rel), base)
 
     def exists(self, path: str) -> bool:
         """Check whether a resource exists."""
         try:
-            self._session._propfind_parsed(path, headers={"Depth": "0"})
+            self._remote.propfind(path, headers={"Depth": "0"})
         except ResourceNotFoundError:
             return False
         return True
@@ -573,7 +631,7 @@ class FileSystem:
     def _is_collection(self, path: str) -> "bool | None":
         """``True`` for a collection, ``False`` for anything else, ``None`` if there is nothing."""
         try:
-            return bool(self.get_props(path, names=["resourcetype"]).collection)
+            return bool(self.get_props(path, props=["resourcetype"]).collection)
         except ResourceNotFoundError:
             return None
 
@@ -644,7 +702,7 @@ class FileSystem:
 
         with IterStream(
             self._session,
-            self._session._locate(path)[0],
+            self._remote.locate(path).url,
             chunk_size=chunk_size or self._session.chunk_size,
         ) as buffer:
             buff = cast("BinaryIO", buffer)
@@ -704,12 +762,12 @@ class FileSystem:
         stack: list[tuple[str, int]] = [(path, 0)]
         while stack:
             current, depth = stack.pop()
-            key = path_key(URL(self._session._locate(current)[0]).path)
+            key = path_key(URL(self._remote.locate(current).url).path)
             if key in seen:
                 continue
             if depth > _WALK_MAX_DEPTH or len(seen) >= _WALK_MAX_DIRS:
                 msg = (
-                    f"walk gave up at {_display(current)!r}: more than {_WALK_MAX_DEPTH} levels "
+                    f"walk gave up at {display_url(current)!r}: more than {_WALK_MAX_DEPTH} levels "
                     f"deep or {_WALK_MAX_DIRS} collections - a server that invents directories "
                     "as you go never ends. Pass max_depth to bound it deliberately."
                 )
@@ -754,7 +812,7 @@ class FileSystem:
         ``fileobj`` before then is a partial file, not a download.
         """
         if chunk_size is not None:
-            _check_chunk_size(chunk_size)
+            check_chunk_size(chunk_size)
         with self.open(path, mode="rb", chunk_size=chunk_size) as remote_obj:
             size = chunk_size or self._session.chunk_size
             # (pylint takes the @contextmanager result for a generator)
@@ -788,7 +846,7 @@ class FileSystem:
         (the same class of attack OpenSSH's ``sftp`` client hardened against).
         """
         if chunk_size is not None:
-            _check_chunk_size(chunk_size)
+            check_chunk_size(chunk_size)
         target = pathlib.Path(local_path)
         directory = target.absolute().parent
         if not directory.is_dir():
@@ -881,7 +939,7 @@ class FileSystem:
 
         """
         if chunk_size is not None:
-            _check_chunk_size(chunk_size)
+            check_chunk_size(chunk_size)
         headers = dict(headers or {})
 
         # We try to avoid chunked transfer as much as possible, so we try
@@ -910,13 +968,15 @@ class FileSystem:
             SizedIterator(chunks, size) if size is not None else chunks
         )
         try:
-            self._session._send(
+            self._remote.send(
                 Method.PUT, path, data=body, headers=headers, error_path=path
             )
         except PreconditionFailedError as exc:
             if not overwrite and not isinstance(exc, ResourceAlreadyExistsError):
                 # We set ``If-None-Match: *``: a 412 here means "it exists".
-                raise ResourceAlreadyExistsError(exc.response, _display(path)) from exc
+                raise ResourceAlreadyExistsError(
+                    exc.response, display_url(path)
+                ) from exc
             raise
         except requests.RequestException as exc:
             if problem:  # the request broke because the body could not be completed

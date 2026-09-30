@@ -9,13 +9,13 @@ if TYPE_CHECKING:
 class Resource(str):  # noqa: SLOT000 - a str subclass cannot have a non-empty __slots__
     """A resource on the server: its name - and what the server told about it.
 
-    The one type :meth:`webdav.Session.ls` and :meth:`webdav.Session.info` return,
+    The one type :meth:`webdav.FileSystem.ls` and :meth:`webdav.FileSystem.info` return,
     always the same fields, whatever the call. It *is* its name (a ``str``), so
-    ``session.ls(path)`` is a list of names as far as any code expecting names is
+    ``fs.ls(path)`` is a list of names as far as any code expecting names is
     concerned - and ``resource.size``, ``resource.is_dir``, ... are there when you
     want more. Two resources are equal when their names are (as any two strings).
 
-    ``name`` is the path relative to the session's ``base_url`` (relative to the server
+    ``name`` is the path relative to the ``base_url`` (relative to the server
     root without one); it can be handed, unchanged, to any other method.
     """
 

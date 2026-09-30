@@ -21,7 +21,6 @@ from typing import (
     Literal,
     ParamSpec,
     TextIO,
-    TypedDict,
     TypeVar,
     Unpack,
     overload,
@@ -30,6 +29,7 @@ from typing import (
 from webdav.dav.locks import DEFAULT_LOCK_TIMEOUT, EXCLUSIVE, ActiveLock
 from webdav.fs.client import FileSystem
 from webdav.resource import Resource
+from webdav.session import ConnectionOptions, SessionOptions
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -38,59 +38,26 @@ if TYPE_CHECKING:
     from xml.etree.ElementTree import Element
 
     from webdav.dav.properties import DAVProperties, PropName
-    from webdav.transport.redirects import RedirectPolicy
-    from webdav.transport.tls import TLSOptions
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 _T = TypeVar("_T")
 
 
-class _BaseOptions(TypedDict, total=False):
-    """Connection options every function takes, as :class:`FileSystem` does."""
-
-    auth: Any
-    cert: Any
-    verify: "Literal[True] | str"
-    tls: "TLSOptions | None"
-    timeout: "float | tuple[float, float] | None"
-    redirect_policy: "RedirectPolicy"
-    trusted_redirect_origins: "Iterable[str] | Callable[[str], bool] | None"
-    max_response_size: "int | None"
-    retry: "Callable[..., Any] | bool"
-    raise_on_error: bool
-    max_response_time: "float | None"
-
-
-class _Options(_BaseOptions, total=False):
-    headers: "dict[str, str] | None"
-    chunk_size: int
-
-
-class _TransferOptions(_BaseOptions, total=False):
+class _TransferOptions(ConnectionOptions, total=False):
     """For functions with their own ``chunk_size`` parameter."""
 
     headers: "dict[str, str] | None"
 
 
-class _UploadOptions(_BaseOptions, total=False):
-    """For functions with their own ``chunk_size`` and ``headers`` parameters."""
+_Options = SessionOptions
+#: For functions with their own ``chunk_size`` and ``headers`` parameters.
+_UploadOptions = ConnectionOptions
 
 
 def _new_filesystem(session_options: "dict[str, Any]") -> FileSystem:
-    """A ``FileSystem`` (owning its own session) from the (already split off) session options.
-
-    ``max_response_time`` is an attribute of the session, not a constructor
-    argument, so it is set after construction.
-    """
-    max_response_time = session_options.pop("max_response_time", None)
-    filesystem = FileSystem(**session_options)
-    if max_response_time is not None:
-        # FileSystem *is* the internal API Session's file-system layer composes against.
-        # pylint: disable-next=protected-access
-        session = filesystem._session  # noqa: SLF001
-        session.max_response_time = max_response_time
-    return filesystem
+    """A ``FileSystem`` (owning its own session) from the (already split off) session options."""
+    return FileSystem(**session_options)
 
 
 def _run(
@@ -224,7 +191,7 @@ def move(
 def get_props(
     path: str,
     *,
-    names: "Iterable[str | PropName] | None" = None,
+    props: "Iterable[str | PropName] | None" = None,
     all_prop: bool = False,
     include: "Iterable[str | PropName] | None" = None,
     **kwargs: Unpack[_Options],
@@ -237,7 +204,7 @@ def get_props(
         FileSystem.get_props,
         kwargs,
         path,
-        names=names,
+        props=props,
         all_prop=all_prop,
         include=include,
     )

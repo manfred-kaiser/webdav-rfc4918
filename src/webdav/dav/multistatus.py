@@ -71,7 +71,7 @@ def _check_href(href: str) -> None:
         raise ValueError(msg)
 
 
-class Response:
+class ResourceResponse:
     """One ``<d:response>`` element: the result for a single resource."""
 
     def __init__(self, response_xml: Element) -> None:
@@ -134,11 +134,11 @@ class Response:
 
     def __str__(self) -> str:
         """User-facing representation."""
-        return f"Response: {self.path_norm}"
+        return f"ResourceResponse: {self.path_norm}"
 
     def __repr__(self) -> str:
         """Debug representation."""
-        return f"Response({self.path!r})"
+        return f"ResourceResponse({self.path!r})"
 
     def path_relative_to(self, base_url: URL) -> str:
         """Path of this response's resource, relative to ``base_url``.
@@ -174,18 +174,18 @@ class MultiStatusResponse:
             dav("responsedescription")
         )
 
-        self.responses: dict[str, Response] = {}
+        self.responses: dict[str, ResourceResponse] = {}
         #: Every ``<d:response>``, in document order. ``responses`` is a lookup
         #: by path - two entries for one path (or for the NFC and NFD spelling
         #: of one name) share a key there, so anything that has to see them
         #: all (a failure hiding behind a later success, a listing) uses this.
-        self.entries: list[Response] = []
+        self.entries: list[ResourceResponse] = []
         for count, resp_el in enumerate(tree.findall(f".//{dav('response')}"), start=1):
             if count > MAX_RESPONSES:
                 msg = f"multistatus has too many <d:response> elements (over {MAX_RESPONSES})"
                 raise MalformedResponseError(msg)
             try:
-                response = Response(resp_el)
+                response = ResourceResponse(resp_el)
             except ValueError as exc:
                 # Never skipped quietly: in a DELETE/COPY/MOVE reply the entry
                 # that does not parse may be the one reporting the failure, and
@@ -194,18 +194,18 @@ class MultiStatusResponse:
                 raise MalformedResponseError(msg) from exc
             self.entries.append(response)
             # Register under every href this response covers (usually just
-            # one - see Response.__init__ for the multi-href case). Keyed by
+            # one - see ResourceResponse.__init__ for the multi-href case). Keyed by
             # ``path_key``: NFC, so either spelling of a name finds it.
             for href in response.hrefs:
                 self.responses[path_key(URL(href).path)] = response
 
-    def get_response_for_path(self, hostname: str, path: str) -> Response:
+    def get_response_for_path(self, base_path: str, path: str) -> ResourceResponse:
         """Return the response for the resource at ``path``.
 
         Args:
-            hostname: The base URL's path component (WebDAV root), used to
+            base_path: The base URL's path component (WebDAV root), used to
                 reconstruct the absolute path a server's ``href`` would use.
-            path: Resource path relative to ``hostname``.
+            path: Resource path relative to ``base_path``.
 
         Raises:
             MalformedResponseError: The server's multistatus reply has no
@@ -214,7 +214,7 @@ class MultiStatusResponse:
                 path than this client expected.
 
         """
-        key = path_key(join_url_path(hostname, path))
+        key = path_key(join_url_path(base_path, path))
         try:
             return self.responses[key]
         except KeyError:

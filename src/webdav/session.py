@@ -1,4 +1,4 @@
-# pylint: disable=too-many-lines  # Session is a requests.Session subclass with every verb on it; see pyproject
+# pylint: disable=too-many-lines  # one documented entry point: about a quarter of this file is docstrings
 """A :class:`requests.Session` that speaks WebDAV verbs directly.
 
 Everything ``requests.Session`` does keeps working exactly as documented
@@ -26,89 +26,99 @@ automatic ``If`` headers for locks the session holds, retries of transient
 failures, and a cap on how large a response body may be declared.
 """
 
-import dataclasses
-import ipaddress
-import logging
-import math
-import os
-import pathlib
-import re
+import difflib
 import threading
 import time
-import warnings
 from contextlib import suppress
 from datetime import timedelta
 from http import HTTPStatus
 from typing import (
     TYPE_CHECKING,
     Any,
+    TypedDict,
     cast,
 )
-from urllib.parse import quote, urljoin, urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
 import requests.adapters
 import requests.auth
-import urllib3.exceptions
-import urllib3.response
 from requests.cookies import extract_cookies_to_jar
 from requests.hooks import dispatch_hook
-from requests.structures import CaseInsensitiveDict
-from requests.utils import default_headers, requote_uri, resolve_proxies
+from requests.utils import default_headers, resolve_proxies
 
-from webdav.dav.conditional import entity_tag
+from webdav.dav.body import prepare_body
+from webdav.dav.features import FeatureDetection
+from webdav.dav.headers import depth_header, destination_header, strong_etag
 from webdav.dav.locks import (
     DEFAULT_LOCK_TIMEOUT,
     EXCLUSIVE,
     LockRegistry,
     build_lock_body,
-    check_token,
     format_timeout,
+    validate_token,
 )
-from webdav.dav.multistatus import parse_multistatus_response
-from webdav.dav.parse_utils import parse_uint
 from webdav.dav.properties import build_propfind_body, build_proppatch_body
-from webdav.dav.urls import URL, join_url, relative_url_to
+from webdav.dav.urls import URL, join_url
 from webdav.exceptions import (
     STATUS_CODE_EXCEPTIONS,
     ClientError,
     HTTPStatusError,
-    InsecureTransportWarning,
-    raise_for_status,
 )
-from webdav.methods import Method
+from webdav.methods import RETRYABLE_METHODS, Method
 from webdav.response import Response
-from webdav.transport.deadline import DeadlineAdapter, watch
+from webdav.transport.body import read_bounded, read_response
+from webdav.transport.deadline import DeadlineAdapter, enforce
+from webdav.transport.guards import (
+    NO_AUTH,
+    CleartextWarner,
+    check_base_url,
+    check_verify,
+    require_full_url,
+)
+from webdav.transport.limits import (
+    DEFAULT_CHUNK_SIZE,
+    check_chunk_size,
+    check_flag,
+    check_max_redirects,
+    check_max_size,
+    check_max_time,
+    check_timeout,
+)
 from webdav.transport.redirects import (
+    MAX_REDIRECT_BODY,
     MAX_REDIRECTS,
     RedirectPolicy,
+    Refuse,
     build_trust_check,
-    effective_origin,
+    check_redirect_policy,
+    cross_origin_headers,
     has_replayable_body,
-    redact_url,
+    plan_hop,
+    refuse,
     validate_policy,
 )
 from webdav.transport.retry import retry as _retry
-from webdav.transport.streaming import DEFAULT_CHUNK_SIZE
-from webdav.transport.tls import mount_mtls_adapter, warn_hardening_disabled
+from webdav.transport.tls import (
+    configure_tls,
+)
+from webdav.url_safety import effective_origin, is_url, redact_url
 
 if TYPE_CHECKING:
-    import urllib.parse
-    from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping
+    from collections.abc import Callable, Iterable, Mapping, MutableMapping
     from typing import Self
     from xml.etree.ElementTree import Element
 
     from requests.auth import AuthBase
     from requests.cookies import RequestsCookieJar
+    from requests.structures import CaseInsensitiveDict
 
-    from webdav.dav.multistatus import MultiStatusResponse
     from webdav.dav.properties import PropName
-    from webdav.transport.redirects import Origin
     from webdav.transport.retry import RetryFunc
-    from webdav.transport.tls import TLSOptions
+    from webdav.transport.tls import CertTypes, TLSOptions
+    from webdav.url_safety import Origin
 
     AuthTypes = AuthBase | tuple[str, str] | None
-    CertTypes = str | tuple[str, str] | None
 
 #: Applied whenever a call site doesn't set its own ``timeout=`` -
 #: ``requests`` itself defaults to *no* timeout, which lets a stalled
@@ -148,85 +158,6 @@ _REQUEST_PARAMS = (
     "json",
 )
 
-#: Headers that are credentials or capabilities of *this* server and so
-#: must never be forwarded to another origin a redirect lands on: login
-#: credentials, session cookies, a lock token (``If``/``Lock-Token``, a
-#: bearer capability for one resource), and ``Destination`` (which names
-#: a resource on the *original* server).
-_NEVER_FORWARD = frozenset(
-    {
-        "authorization",
-        "proxy-authorization",
-        "cookie",
-        "if",
-        "lock-token",
-        "destination",
-    }
-)
-
-#: The only per-call headers a cross-origin redirect keeps: the ones that
-#: describe the representation being sent or the conditions of the request.
-#: Everything else - a custom ``X-Api-Key``, a bearer token in a header the
-#: library cannot recognise as one - is dropped, because a whitelisted
-#: origin is trusted with the *body*, not with whatever else the caller
-#: attached. Extend with ``Session.redirect_forward_headers``.
-_FORWARD_HEADERS = frozenset(
-    {
-        "content-type",
-        "content-encoding",
-        "content-language",
-        "content-md5",
-        "accept",
-        "accept-language",
-        "range",
-        "if-match",
-        "if-none-match",
-        "if-modified-since",
-        "if-unmodified-since",
-    }
-)
-
-#: Methods that change something: only these carry the ``If`` header of a held
-#: lock. A read has no use for a lock token, and sending one anyway would
-#: only put a capability on the wire for nothing.
-_WRITE_METHODS = frozenset(
-    {
-        Method.PUT,
-        Method.DELETE,
-        Method.PROPPATCH,
-        Method.MKCOL,
-        Method.COPY,
-        Method.MOVE,
-        Method.POST,
-        Method.PATCH,
-    }
-)
-
-#: Methods whose request body is an XML document (RFC 4918).
-_XML_BODY_METHODS = frozenset(
-    {Method.PROPFIND, Method.PROPPATCH, Method.MKCOL, Method.LOCK}
-)
-
-
-class _NoAuth(requests.auth.AuthBase):
-    """Authentication that adds nothing.
-
-    Passing this as ``auth`` when the caller gave none stops ``requests``
-    from looking the host up in ``~/.netrc`` and silently authenticating with
-    whatever it finds there: credentials are only ever the ones asked for.
-    """
-
-    def __call__(self, r: requests.PreparedRequest) -> requests.PreparedRequest:
-        return r
-
-
-_NO_AUTH = _NoAuth()
-
-#: Marks a reason string (rather than a URL) returned by ``Session._hop_target``.
-_REASON_PREFIX = "\x00reason:"
-
-_URL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
-
 #: The WebDAV-specific attributes a pickled session keeps, beyond the plain
 #: ``requests`` ones in ``_TRANSPORT_PICKLED`` below; see
 #: ``Session._init_derived`` for what is rebuilt fresh instead.
@@ -238,6 +169,7 @@ _PICKLED = (
     "raise_on_error",
     "chunk_size",
     "max_response_time",
+    "max_redirects",
     "redirect_forward_headers",
     "_retry_arg",
     "_trusted_arg",
@@ -262,355 +194,72 @@ _TRANSPORT_PICKLED = (
     "params",
     "stream",
     "trust_env",
-    "max_redirects",
 )
 
-_DEPTHS = ("0", "1", "infinity")
 
+def _merge_arguments(args: "tuple[Any, ...]", kwargs: "dict[str, Any]") -> None:
+    """Fold the positional arguments of ``request()`` into ``kwargs``, and refuse any name it does not know.
 
-def _check_depth(depth: "int | str", allowed: "Iterable[str]", method: str) -> str:
-    value = str(depth)
-    if value not in allowed:
-        msg = f"{method} Depth must be one of {', '.join(allowed)}, got {depth!r}"
-        raise ValueError(msg)
-    return value
-
-
-#: How much of a redirect's own body is kept for ``response.history``.
-_MAX_REDIRECT_BODY = 1024 * 1024
-
-#: Read granularity of :func:`_read_bounded`.
-_READ_CHUNK = 64 * 1024
-
-_LOOPBACK_NAMES = frozenset({"localhost", "localhost.localdomain"})
-
-_LOGGER = logging.getLogger("webdav")
-
-
-def _refuse(response: requests.Response, reason: str) -> None:
-    """Record (and log) why a redirect was not followed."""
-    if isinstance(response, Response):
-        response.redirect_refusal = reason
-    _LOGGER.warning(
-        "not following the %s redirect from %s to %s: %s",
-        response.status_code,
-        redact_url(response.url),
-        redact_url(response.headers.get("Location", "")),
-        reason,
-    )
-
-
-def _iter_body(response: requests.Response) -> "Iterator[bytes]":
-    """Yield a streamed body in whatever pieces arrive, without waiting to fill a buffer.
-
-    ``iter_content(n)`` blocks until ``n`` bytes have arrived, so a server
-    sending one byte just inside the read timeout keeps it waiting for days;
-    ``read1`` hands back what is there, and gives the caller a chance to look
-    at the clock after every read.
-    """
-    raw = response.raw
-    read1 = getattr(raw, "read1", None)
-    if not isinstance(raw, urllib3.response.BaseHTTPResponse) or read1 is None:
-        # A body that is not urllib3's (a custom adapter's, a test double).
-        yield from response.iter_content(chunk_size=_READ_CHUNK)
-        return
-    try:
-        while chunk := read1(_READ_CHUNK, decode_content=True):
-            yield chunk
-    except urllib3.exceptions.ProtocolError as exc:
-        raise requests.exceptions.ChunkedEncodingError(exc, response=response) from exc
-    except urllib3.exceptions.DecodeError as exc:
-        raise requests.exceptions.ContentDecodingError(exc) from exc
-    except urllib3.exceptions.ReadTimeoutError as exc:
-        raise requests.exceptions.ConnectionError(exc, response=response) from exc
-    except urllib3.exceptions.SSLError as exc:
-        raise requests.exceptions.SSLError(exc, response=response) from exc
-
-
-def _read_bounded(
-    response: requests.Response,
-    max_size: "int | None",
-    max_time: "float | None" = None,
-) -> None:
-    """Read the body of a streamed ``response`` into memory - within a size and a time budget.
-
-    Counts the bytes *after* decoding (``Content-Encoding``), so a small
-    gzip body that inflates to gigabytes is stopped as surely as a chunked
-    response that never ends; a declared ``Content-Length`` over the cap
-    is rejected without reading anything. ``max_time`` is a deadline for the
-    *whole* body: the timeouts of ``requests`` apply to each single read, so
-    on their own they let a server that drips one byte at a time keep a
-    request alive indefinitely. ``None`` for either means no limit.
+    ``requests`` refuses an unknown keyword argument; so does this. Silently
+    ignoring one would turn a typo in an option that matters
+    (``allow_redirect=False``, ``verfiy=True``, ``timout=5``) into a request
+    that quietly does the opposite of what was asked.
 
     Raises:
-        ClientError: The body is larger than ``max_size`` or takes longer
-            than ``max_time`` seconds.
+        TypeError: Too many positional arguments, one given twice, an
+            unknown keyword argument, or ``allow_redirects``/``stream`` that
+            is not a ``bool``.
 
     """
-    if max_size is None and max_time is None:
-        _ = response.content
-        return
-    codings = [
-        c for c in response.headers.get("Content-Encoding", "").split(",") if c.strip()
-    ]
-    if len(codings) > 1:
-        # ``gzip, gzip, gzip``: each layer multiplies what a few kilobytes
-        # inflate to, and (before urllib3 2.6) is undone in one piece before
-        # the size cap can look at it. No legitimate server stacks codings.
-        response.close()
-        msg = f"refusing a response with stacked content-codings ({', '.join(c.strip() for c in codings)})"
-        raise ClientError(msg)
-    declared = parse_uint(response.headers.get("Content-Length"))
-    if max_size is not None and declared is not None and declared > max_size:
-        response.close()
-        msg = (
-            f"response declared Content-Length {declared} bytes, "
-            f"exceeding the configured limit of {max_size} bytes"
-        )
-        raise ClientError(msg)
-    deadline = None if max_time is None else time.monotonic() + max_time
-    chunks: list[bytes] = []
-    total = 0
-    for chunk in _iter_body(response):
-        total += len(chunk)
-        if max_size is not None and total > max_size:
-            response.close()
-            msg = f"response body exceeds the configured limit of {max_size} bytes"
-            raise ClientError(msg)
-        if deadline is not None and time.monotonic() > deadline:
-            response.close()
-            msg = f"response body did not arrive within the configured time of {max_time} seconds"
-            raise ClientError(msg)
-        chunks.append(chunk)
-    # What ``response.content`` would have stored, minus the unbounded read.
-    body = b"".join(chunks)
-    _set_body(response, body)
-
-
-def _set_body(response: requests.Response, body: bytes) -> None:
-    """Store ``body`` as what ``response.content`` returns (requests has no public way)."""
-    # pylint: disable=protected-access
-    response._content = body  # noqa: SLF001
-    response._content_consumed = True  # type: ignore[attr-defined]  # noqa: SLF001
-
-
-def _read_response(
-    response: requests.Response,
-    method: str,
-    max_size: "int | None",
-    max_time: "float | None",
-) -> None:
-    """Read the body of a streamed ``response`` - if it has one - within the size and time budget.
-
-    A ``HEAD`` reply, a ``1xx``/``204``/``304`` carries no body whatever its
-    ``Content-Length`` says (the length of what a ``GET`` would have sent):
-    nothing is read, and that length is no reason to refuse it.
-    """
-    status = response.status_code
-    if method.upper() == Method.HEAD or status in (204, 304) or 100 <= status < 200:
-        _set_body(response, b"")
-        response.close()
-        return
-    _read_bounded(response, max_size, max_time)
-
-
-def _prepare_body(method: str, kwargs: dict[str, Any]) -> None:
-    """Give a request body its final form: XML gets its type, text becomes UTF-8 bytes."""
-    if method in _XML_BODY_METHODS and kwargs.get("data") is not None:
-        _prepare_xml_body(kwargs)
-    if isinstance(kwargs.get("data"), str):
-        # Text is sent as UTF-8 whatever ``requests`` version is installed
-        # (older ones leave it to ``http.client``, which encodes Latin-1 and
-        # declares a Content-Length that no longer matches the bytes).
-        kwargs["data"] = kwargs["data"].encode("utf-8")
-
-
-def _prepare_xml_body(kwargs: dict[str, Any]) -> None:
-    """Give an XML request body its ``Content-Type`` and, if text, encode it as UTF-8.
-
-    ``requests`` (before 2.32) leaves a ``str`` body to ``http.client``,
-    which encodes it as ISO-8859-1 and fails on anything outside that
-    range - while the body is XML, whose default encoding is UTF-8.
-    """
-    headers = CaseInsensitiveDict(kwargs.get("headers") or {})
-    content_type = headers.get("Content-Type")
-    if content_type is None:
-        headers["Content-Type"] = "application/xml; charset=utf-8"
-    data = kwargs["data"]
-    declares_other_charset = (
-        content_type is not None
-        and "charset" in content_type.lower()
-        and "utf-8" not in content_type.lower()
-    )
-    if isinstance(data, str) and not declares_other_charset:
-        kwargs["data"] = data.encode("utf-8")
-    kwargs["headers"] = dict(headers)
-
-
-def _deadline_error(seconds: "float | None") -> ClientError:
-    return ClientError(
-        f"the request did not complete within the configured time of {seconds} seconds"
-    )
-
-
-def _split(url: str) -> "urllib.parse.SplitResult":
-    """``urlsplit`` that reports an unparseable URL as the library's own error."""
-    try:
-        return urlsplit(url)
-    except ValueError as exc:
-        msg = f"not a valid URL: {redact_url(url)!r}"
-        raise ClientError(msg) from exc
-
-
-def _verification_on(verify: object) -> bool:
-    """Whether ``verify`` means "check the server's certificate" (to ``requests``, anything falsy does not)."""
-    return verify is True or (
-        isinstance(verify, str | os.PathLike) and bool(os.fspath(verify))
-    )
-
-
-def _check_chunk_size(value: object) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        msg = f"chunk_size must be a positive integer, got {value!r}"
-        raise ValueError(msg)
-
-
-def _display(path: str) -> str:
-    """``path`` for a message: a URL loses its userinfo, query and fragment."""
-    return redact_url(path) if _URL_RE.match(path) else path
-
-
-def _strong_etag(value: str) -> str:
-    """``value`` as the entity-tag ``If-Match`` needs (RFC 9110 sec. 13.1.1: strong comparison only).
-
-    A server's own spelling (``"abc"``) and a bare value (``abc``, as some
-    WebDAV servers report ``getetag``) are both written as ``"abc"``;
-    ``*`` is passed through.
-
-    Raises:
-        ValueError: The ETag is weak, or not a valid entity-tag.
-
-    """
-    if value.startswith("W/"):
-        msg = (
-            f"a weak ETag cannot be used in If-Match (RFC 9110 sec. 13.1.1): {value!r}"
-        )
-        raise ValueError(msg)
-    return value if value == "*" else entity_tag(value)
-
-
-def _is_loopback(host: str) -> bool:
-    if host.lower() in _LOOPBACK_NAMES:
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
-class FeatureDetection:
-    """Server features detected via an OPTIONS request.
-
-    Mostly used for detecting ``Accept-Ranges`` support, since some
-    servers (e.g. ownCloud/Nextcloud) don't advertise it on GET responses.
-    """
-
-    supports_ranges: bool
-    dav_compliances: set[str]
-
-    def __init__(self, options_response: "requests.Response | None" = None) -> None:
-        """Build from an OPTIONS response, or an empty/unknown state if ``None``."""
-        dav_compliances = set()
-        supports_ranges = False
-        if options_response is not None:
-            dav_header = options_response.headers.get("dav", "")
-            dav_compliances = _parse_dav_header(dav_header)
-            supports_ranges = options_response.headers.get("accept-ranges") == "bytes"
-
-        self.dav_compliances = dav_compliances
-        self.supports_ranges = supports_ranges
-
-
-def _parse_dav_header(value: str) -> set[str]:
-    """Split a ``DAV`` compliance-class header into its tokens (RFC 4918 §18).
-
-    ``compliance-class = ("1" | "2" | "3" | extend)``, and ``extend`` can
-    be a bare token (``"bind"``) or a ``Coded-URL`` (``<absolute-URI>``) -
-    a comma inside the URI (legal per RFC 3986, unencoded, as a path/query
-    sub-delim) is part of it, not a token separator, so this tracks
-    bracket depth instead of blindly splitting on every comma.
-    """
-    tokens = []
-    depth = 0
-    current: list[str] = []
-    for char in value:
-        if char == "<":
-            depth += 1
-            current.append(char)
-        elif char == ">":
-            depth = max(0, depth - 1)
-            current.append(char)
-        elif char == "," and depth == 0:
-            tokens.append("".join(current))
-            current = []
-        else:
-            current.append(char)
-    tokens.append("".join(current))
-    return {t.strip() for t in tokens if t.strip()}
-
-
-def _configure_tls(
-    transport: "requests.Session",
-    *,
-    cert: "CertTypes",
-    verify: "bool | str",
-    tls: "TLSOptions | None",
-) -> None:
-    """Wire up ``cert``/``verify`` on ``transport`` - plain ``requests`` attrs, or a hardened adapter.
-
-    The hardened :mod:`webdav.transport.tls` adapter is only needed for what plain
-    ``requests`` cannot express (``tls=...``); everything else uses
-    ``requests``' own, well-known ``cert=``/``verify=`` attributes.
-    """
-    verification_on = _verification_on(verify)
-    if tls is None:
-        if not verification_on:
-            warn_hardening_disabled(
-                f"TLS server certificate verification is off (verify={verify!r}) "
-                "for every request this session sends"
+    if len(args) > len(_REQUEST_PARAMS):
+        msg = f"request() takes at most {len(_REQUEST_PARAMS) + 2} positional arguments"
+        raise TypeError(msg)
+    for name, value in zip(_REQUEST_PARAMS, args, strict=False):
+        if name in kwargs:
+            msg = f"request() got multiple values for argument {name!r}"
+            raise TypeError(msg)
+        kwargs[name] = value
+    for flag in ("allow_redirects", "stream"):
+        if kwargs.get(flag) is not None:
+            check_flag(flag, kwargs[flag])
+    for name in kwargs:
+        if name not in _REQUEST_PARAMS:
+            msg = f"request() got an unexpected keyword argument {name!r}"
+            close = difflib.get_close_matches(
+                name, [*_REQUEST_PARAMS, "redirect_policy", "raise_on_error"], n=1
             )
-        transport.cert = cert
-        transport.verify = verify
-        return
-
-    certfile: str | None
-    keyfile: str | None
-    if cert is None:
-        certfile, keyfile = None, None
-    elif isinstance(cert, str):
-        certfile, keyfile = cert, None
-    else:
-        certfile, keyfile = cert[0], cert[1]
-
-    if verification_on and tls.ca_files is None and isinstance(verify, str):
-        tls = dataclasses.replace(tls, ca_files=verify)
-    mount_mtls_adapter(
-        transport,
-        certfile=certfile,
-        keyfile=keyfile,
-        options=tls,
-        verify=verification_on,
-    )
+            if close:
+                msg += f". Did you mean {close[0]!r}?"
+            raise TypeError(msg)
 
 
-#: Methods a transient failure (429, 5xx, a dropped connection) is retried
-#: for: the *safe* ones (RFC 9110 sec. 9.2.1) - ``PROPFIND`` is a read. Never a
-#: write: when the connection drops after the server acted, the retry finds
-#: the work already done and reports the opposite of what happened (MKCOL
-#: "exists", DELETE "not found", COPY "precondition failed"), and a lost
-#: LOCK reply would leave an orphaned lock. Whoever knows a particular
-#: write is safe to repeat can repeat it.
-_RETRY_METHODS = frozenset({Method.GET, Method.HEAD, Method.OPTIONS, Method.PROPFIND})
+class ConnectionOptions(TypedDict, total=False):
+    """The options of :class:`Session` that say how a server is reached and trusted.
+
+    What every file-system function takes beside its own arguments; the keys
+    are exactly ``Session``'s keyword-only constructor arguments (a test
+    compares them), so there is one list of options, not one per entry point.
+    """
+
+    auth: "AuthTypes"
+    cert: "CertTypes"
+    verify: "bool | str"
+    tls: "TLSOptions | None"
+    timeout: "float | tuple[float | None, float | None] | None"
+    redirect_policy: RedirectPolicy
+    trusted_redirect_origins: "Iterable[str] | Callable[[str], bool] | None"
+    max_response_size: "int | None"
+    max_response_time: "float | None"
+    max_redirects: int
+    retry: "RetryFunc | bool"
+    raise_on_error: bool
+
+
+class SessionOptions(ConnectionOptions, total=False):
+    """Every keyword-only option of :class:`Session` - what ``FileSystem(base_url, **options)`` takes."""
+
+    headers: "dict[str, str] | None"
+    chunk_size: int
 
 
 class Session:
@@ -618,7 +267,7 @@ class Session:
 
     Not a :class:`requests.Session` subclass - it holds one (``auth``,
     ``headers``, ``cookies``, ``verify``, ``cert``, ``proxies``, ``hooks``,
-    ``params``, ``stream``, ``trust_env``, ``max_redirects`` all work exactly
+    ``params``, ``stream`` and ``trust_env`` all work exactly
     as documented in ``requests``, forwarded to it) rather than *being* one.
     That is deliberate: ``requests.Session``'s own redirect-following and
     response construction are exactly what this class needs to replace, not
@@ -640,10 +289,12 @@ class Session:
         cert: "CertTypes" = None,
         verify: bool | str = True,
         tls: "TLSOptions | None" = None,
-        timeout: "float | tuple[float, float] | None" = DEFAULT_TIMEOUT,
+        timeout: "float | tuple[float | None, float | None] | None" = DEFAULT_TIMEOUT,
         redirect_policy: RedirectPolicy = RedirectPolicy.SAME_ORIGIN,
         trusted_redirect_origins: "Iterable[str] | Callable[[str], bool] | None" = None,
         max_response_size: "int | None" = DEFAULT_MAX_RESPONSE_SIZE,
+        max_response_time: "float | None" = DEFAULT_MAX_RESPONSE_TIME,
+        max_redirects: int = MAX_REDIRECTS,
         retry: "RetryFunc | bool" = True,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         raise_on_error: bool = False,
@@ -698,9 +349,16 @@ class Session:
                 (``"https://host"``) or a ``Callable[[str], bool]`` given
                 the full target URL. Required with ``WHITELIST`` and
                 rejected with any other policy.
-            max_response_size: Reject a non-streamed response whose
-                (truthful) ``Content-Length`` exceeds this many bytes.
-                ``None`` disables the check.
+            max_response_size: Reject a non-streamed response whose body
+                exceeds this many bytes (declared ``Content-Length``, and the
+                bytes actually read after decoding). ``None`` disables the
+                check.
+            max_response_time: Deadline, in seconds, for the whole exchange
+                of a request that is not streamed - every redirect hop, the
+                headers, the body. ``timeout`` only limits each single read.
+                ``None`` disables the deadline.
+            max_redirects: How many redirects in a row one request follows
+                before it is refused as a loop.
             retry: Retry transient failures (429, 5xx,
                 timeouts, dropped connections) of the safe and idempotent
                 methods - or pass a callable implementing
@@ -711,40 +369,46 @@ class Session:
                 raises for a status code unless asked to).
 
         Raises:
+            TypeError: ``redirect_policy`` is not a
+                :class:`~webdav.transport.redirects.RedirectPolicy`.
             ValueError: ``trusted_redirect_origins`` and ``redirect_policy``
-                disagree - see :func:`~webdav.transport.redirects.validate_policy`.
+                disagree - see :func:`~webdav.transport.redirects.validate_policy` -
+                or ``base_url``, ``timeout``, ``max_response_size``,
+                ``max_response_time``, ``max_redirects`` or ``chunk_size`` is
+                not a usable value.
 
         """
         validate_policy(redirect_policy, trusted_redirect_origins)
-        _check_chunk_size(chunk_size)
-        if max_response_size is not None and (
-            isinstance(max_response_size, bool)
-            or not isinstance(max_response_size, int)
-            or max_response_size <= 0
-        ):
-            msg = f"max_response_size must be a positive integer or None, got {max_response_size!r}"
-            raise ValueError(msg)
         self._transport = requests.Session()
         self.auth = auth
         if headers:
             self.headers.update(headers)
+        self._trusted_arg = trusted_redirect_origins
+        self._base_url: str | None = None
         self.base_url = base_url
+        self._timeout: float | tuple[float | None, float | None] | None = None
         self.timeout = timeout
-        self.redirect_policy = redirect_policy
+        self._redirect_policy = redirect_policy
+        self._max_redirects = MAX_REDIRECTS
+        self.max_redirects = max_redirects
+        self._max_response_size: int | None = None
         self.max_response_size = max_response_size
+        self._raise_on_error = False
         self.raise_on_error = raise_on_error
+        self._chunk_size = DEFAULT_CHUNK_SIZE
         self.chunk_size = chunk_size
         #: Deadline, in seconds, for the whole body of a response that is not
         #: streamed (``None``: none). ``timeout`` only limits each single read.
         self._max_response_time: float | None = None
-        self.max_response_time = DEFAULT_MAX_RESPONSE_TIME
+        self.max_response_time = max_response_time
         #: Names (lower case) of extra per-call headers a redirect to a
         #: trusted *other* origin may carry, beyond the representation and
         #: conditional headers it always keeps - e.g. ``{"x-amz-meta-owner"}``
         #: for a signed upload that has to repeat them.
         self._redirect_forward_headers: frozenset[str] = frozenset()
         self._retry_arg = retry
-        self._trusted_arg = trusted_redirect_origins
+        self._with_retry: RetryFunc
+        self.retry = retry
         self._cert_arg = cert
         self._verify_arg = verify
         self._tls_arg = tls
@@ -765,20 +429,20 @@ class Session:
         # https one with the mTLS adapter, which has the same property.
         self.mount("https://", DeadlineAdapter())
         self.mount("http://", DeadlineAdapter())
-        _configure_tls(
+        configure_tls(
             self._transport,
             cert=self._cert_arg,
             verify=self._verify_arg,
             tls=self._tls_arg,
         )
-        self.with_retry = (
+        self._with_retry = (
             self._retry_arg if callable(self._retry_arg) else _retry(self._retry_arg)
         )
         self.locks = LockRegistry()
         self._is_trusted_redirect_target = build_trust_check(self._trusted_arg)
         self._features: dict[Origin | str, FeatureDetection] = {}
         self._features_lock = threading.RLock()
-        self._insecure_warned: set[str] = set()
+        self._cleartext = CleartextWarner()
         # What a redirect to another origin is sent through: a plain adapter,
         # so that neither a client certificate (mTLS) nor any transport
         # setting meant for *this* server goes with it.
@@ -805,12 +469,12 @@ class Session:
         self._transport.cookies = value
 
     @property
-    def auth(self) -> Any:
+    def auth(self) -> "AuthTypes":
         """See :attr:`requests.Session.auth`."""
-        return self._transport.auth
+        return cast("AuthTypes", self._transport.auth)
 
     @auth.setter
-    def auth(self, value: Any) -> None:
+    def auth(self, value: "AuthTypes") -> None:
         self._transport.auth = value
 
     @property
@@ -847,7 +511,7 @@ class Session:
 
     @stream.setter
     def stream(self, value: bool) -> None:
-        self._transport.stream = value
+        self._transport.stream = check_flag("stream", value)
 
     @property
     def verify(self) -> "bool | str | None":
@@ -859,12 +523,12 @@ class Session:
         self._transport.verify = value
 
     @property
-    def cert(self) -> Any:
+    def cert(self) -> "CertTypes":
         """See :attr:`requests.Session.cert`."""
         return self._transport.cert
 
     @cert.setter
-    def cert(self, value: Any) -> None:
+    def cert(self, value: "CertTypes") -> None:
         self._transport.cert = value
 
     @property
@@ -874,16 +538,7 @@ class Session:
 
     @trust_env.setter
     def trust_env(self, value: bool) -> None:
-        self._transport.trust_env = value
-
-    @property
-    def max_redirects(self) -> int:
-        """See :attr:`requests.Session.max_redirects` - unused: this class never delegates redirect-following to it."""
-        return self._transport.max_redirects
-
-    @max_redirects.setter
-    def max_redirects(self, value: int) -> None:
-        self._transport.max_redirects = value
+        self._transport.trust_env = check_flag("trust_env", value)
 
     def mount(self, prefix: str, adapter: requests.adapters.BaseAdapter) -> None:
         """Mount a transport adapter - see :meth:`requests.Session.mount`."""
@@ -893,9 +548,146 @@ class Session:
         """The adapter mounted for ``url`` - see :meth:`requests.Session.get_adapter`."""
         return self._transport.get_adapter(url)
 
-    def get_redirect_target(self, response: requests.Response) -> "str | None":
-        """The ``Location`` header's value, decoded - see :meth:`requests.Session.get_redirect_target`."""
+    def _redirect_location(self, response: requests.Response) -> "str | None":
+        """The ``Location`` header's value, decoded - what :meth:`requests.Session.get_redirect_target` reads."""
         return self._transport.get_redirect_target(response)
+
+    @property
+    def raise_on_error(self) -> bool:
+        """Whether every response is passed to :meth:`Response.raise_for_status` before it is returned.
+
+        Raises:
+            TypeError: When set to anything but ``True`` or ``False``.
+
+        """
+        return self._raise_on_error
+
+    @raise_on_error.setter
+    def raise_on_error(self, value: bool) -> None:
+        self._raise_on_error = check_flag("raise_on_error", value)
+
+    @property
+    def retry(self) -> "RetryFunc":
+        """The wrapper that retries a transient failure of a safe method (see :class:`~webdav.transport.retry.RetryFunc`).
+
+        Set it to ``False`` (no retries), ``True`` (the default policy) or
+        your own :class:`~webdav.transport.retry.RetryFunc`.
+
+        Raises:
+            TypeError: When set to anything else.
+
+        """
+        return self._with_retry
+
+    @retry.setter
+    def retry(self, value: "RetryFunc | bool") -> None:
+        if not (isinstance(value, bool) or callable(value)):
+            msg = f"retry must be True, False or a RetryFunc, got {value!r}"
+            raise TypeError(msg)
+        self._retry_arg = value
+        self._with_retry = value if callable(value) else _retry(value)
+
+    @property
+    def base_url(self) -> "str | None":
+        """The URL that request paths are relative to (``None``: every URL is a full one).
+
+        Raises:
+            ValueError: When set to anything but ``None`` or one full
+                ``http(s)`` URL without credentials, a query or a fragment.
+
+        """
+        return self._base_url
+
+    @base_url.setter
+    def base_url(self, url: "str | None") -> None:
+        self._base_url = check_base_url(url)
+
+    @property
+    def timeout(self) -> "float | tuple[float | None, float | None] | None":
+        """Default ``timeout`` of a request that does not set its own - see :data:`DEFAULT_TIMEOUT`.
+
+        Raises:
+            ValueError: When set to anything but ``None``, a positive number
+                of seconds, or a ``(connect, read)`` pair of those.
+
+        """
+        return self._timeout
+
+    @timeout.setter
+    def timeout(
+        self, value: "float | tuple[float | None, float | None] | None"
+    ) -> None:
+        self._timeout = check_timeout(value)
+
+    @property
+    def redirect_policy(self) -> RedirectPolicy:
+        """Which redirects to follow - see :class:`~webdav.transport.redirects.RedirectPolicy`.
+
+        Raises:
+            TypeError: When set to anything but a ``RedirectPolicy``.
+            ValueError: When set to ``WHITELIST`` and the session has no
+                ``trusted_redirect_origins``.
+
+        """
+        return self._redirect_policy
+
+    @redirect_policy.setter
+    def redirect_policy(self, policy: RedirectPolicy) -> None:
+        self._redirect_policy = check_redirect_policy(
+            policy, trusted=self._trusted_arg is not None
+        )
+
+    @property
+    def trusted_redirect_origins(
+        self,
+    ) -> "Iterable[str] | Callable[[str], bool] | None":
+        """The redirect targets :data:`RedirectPolicy.WHITELIST` follows - as given to the constructor."""
+        return self._trusted_arg
+
+    @property
+    def max_redirects(self) -> int:
+        """How many redirects in a row one request follows before it is refused as a loop.
+
+        Raises:
+            ValueError: When set to anything but an integer of at least 0.
+
+        """
+        return self._max_redirects
+
+    @max_redirects.setter
+    def max_redirects(self, count: int) -> None:
+        self._max_redirects = check_max_redirects(count)
+
+    @property
+    def chunk_size(self) -> int:
+        """Default chunk size, in bytes, for streaming reads and writes.
+
+        Raises:
+            ValueError: When set to anything but a positive integer.
+
+        """
+        return self._chunk_size
+
+    @chunk_size.setter
+    def chunk_size(self, size: int) -> None:
+        self._chunk_size = check_chunk_size(size)
+
+    @property
+    def max_response_size(self) -> "int | None":
+        """Reject a non-streamed response whose body is larger than this many bytes (``None``: no limit).
+
+        Checked against the declared ``Content-Length`` and, for a body that
+        arrives in pieces, against the bytes actually read after decoding.
+
+        Raises:
+            ValueError: When set to anything but ``None`` or a positive integer.
+
+        """
+        return self._max_response_size
+
+    @max_response_size.setter
+    def max_response_size(self, size: "int | None") -> None:
+        self._max_response_size = check_max_size(size)
 
     @property
     def max_response_time(self) -> "float | None":
@@ -910,15 +702,7 @@ class Session:
 
     @max_response_time.setter
     def max_response_time(self, seconds: "float | None") -> None:
-        if seconds is not None and (
-            isinstance(seconds, bool)
-            or not isinstance(seconds, int | float)
-            or not math.isfinite(seconds)
-            or seconds <= 0
-        ):
-            msg = f"max_response_time must be a positive number of seconds or None, got {seconds!r}"
-            raise ValueError(msg)
-        self._max_response_time = seconds
+        self._max_response_time = check_max_time(seconds)
 
     @property
     def redirect_forward_headers(self) -> "frozenset[str]":
@@ -982,8 +766,9 @@ class Session:
         (locks, caches, adapters) are rebuilt fresh - see :meth:`_init_derived`.
         """
         self._transport = requests.Session()
-        for name, value in state.items():
-            setattr(self, name, value)
+        # The private arguments first: a setter (``redirect_policy``) may need one.
+        for name in sorted(state, key=lambda n: not n.startswith("_")):
+            setattr(self, name, state[name])
         self._init_derived()
 
     # -- URL handling ---------------------------------------------------
@@ -1007,7 +792,7 @@ class Session:
         """
         if self.base_url is None:
             return url
-        if _URL_RE.match(url):
+        if is_url(url):
             if effective_origin(url) is None or effective_origin(
                 url
             ) != effective_origin(self.base_url):
@@ -1033,6 +818,7 @@ class Session:
         url: str,
         *args: Any,
         redirect_policy: "RedirectPolicy | None" = None,
+        raise_on_error: "bool | None" = None,
         **kwargs: Any,
     ) -> Response:
         """Send a request, exactly like :meth:`requests.Session.request`.
@@ -1042,13 +828,18 @@ class Session:
         (``allow_redirects=False`` still disables them, and
         ``redirect_policy=`` overrides the policy for this one call); a
         held lock's token is attached as an ``If`` header; transient
-        failures of safe/idempotent methods are retried; and the default
-        ``timeout`` and ``max_response_size`` apply.
+        failures of safe/idempotent methods are retried; the default
+        ``timeout`` and ``max_response_size`` apply; and
+        :meth:`Response.raise_for_status` is called on the response if the
+        session's ``raise_on_error`` says so (``raise_on_error=`` overrides
+        that for this one call).
         """
+        if raise_on_error is not None:
+            check_flag("raise_on_error", raise_on_error)
         response = self._fetch(
             method, url, *args, redirect_policy=redirect_policy, **kwargs
         )
-        if self.raise_on_error:
+        if self.raise_on_error if raise_on_error is None else raise_on_error:
             response.raise_for_status()
         return response
 
@@ -1058,40 +849,23 @@ class Session:
         url: str,
         *args: Any,
         redirect_policy: "RedirectPolicy | None" = None,
-        absolute: bool = False,
         **kwargs: Any,
     ) -> Response:
-        """:meth:`request` without the ``raise_on_error`` step.
-
-        ``absolute`` says ``url`` is already a full URL the library itself worked
-        out (not something to resolve against ``base_url`` again).
-        """
-        if len(args) > len(_REQUEST_PARAMS):
-            msg = f"request() takes at most {len(_REQUEST_PARAMS) + 2} positional arguments"
-            raise TypeError(msg)
-        for name, value in zip(_REQUEST_PARAMS, args, strict=False):
-            if name in kwargs:
-                msg = f"request() got multiple values for argument {name!r}"
-                raise TypeError(msg)
-            kwargs[name] = value
-
-        if not absolute:
-            url = self.resolve_url(url)
-        self._require_full_url(url)
-        _prepare_body(method, kwargs)
-        allow = kwargs.pop("allow_redirects", None)
-        policy = (
-            RedirectPolicy.NEVER
-            if allow is False
-            else (redirect_policy or self.redirect_policy)
+        """:meth:`request` without the ``raise_on_error`` step."""
+        _merge_arguments(args, kwargs)
+        url = self.resolve_url(url)
+        require_full_url(url, has_base_url=self.base_url is not None)
+        kwargs["data"], kwargs["headers"] = prepare_body(
+            method, kwargs.get("data"), kwargs.get("headers")
         )
+        policy = self._policy_for(kwargs.pop("allow_redirects", None), redirect_policy)
         kwargs.setdefault("timeout", self.timeout)
         self._require_verification(kwargs.get("verify"))
 
         def attempt() -> Response:
             return self._fetch_once(method, url, policy, dict(kwargs))
 
-        if method not in _RETRY_METHODS or not has_replayable_body(kwargs):
+        if method not in RETRYABLE_METHODS or not has_replayable_body(kwargs):
             return attempt()
 
         def checked() -> Response:
@@ -1102,62 +876,24 @@ class Session:
             return response
 
         try:
-            return self.with_retry(checked)
+            return self._with_retry(checked)
         except HTTPStatusError as exc:
             # Out of attempts: hand back the last response, as ``requests`` would.
             return cast("Response", exc.response)
 
-    def _require_full_url(self, url: str) -> None:
-        """Refuse a URL that is not one full, credential-free ``http(s)`` URL - with one error of ours.
-
-        Unparseable, not http(s), ambiguous, or relative without a ``base_url``: not
-        whichever error ``requests`` (or ``urlsplit``) would raise. Credentials
-        belong in ``auth=``, not in a URL, which ends up in logs and messages.
-        """
-        if _URL_RE.match(url) and urlsplit(url).username is not None:
-            msg = "a URL with credentials in it is refused: pass auth=(user, password) instead"
-            raise ClientError(msg)
-        if effective_origin(url) is None:
-            msg = f"not a full http(s) URL: {redact_url(url)!r}" + (
-                "" if self.base_url is not None else " (this session has no base_url)"
-            )
-            raise ClientError(msg)
+    def _policy_for(
+        self, allow_redirects: object, override: "RedirectPolicy | None"
+    ) -> RedirectPolicy:
+        """The redirect policy one request runs under: ``allow_redirects=False`` is "never", then the call's own, then the session's."""
+        if allow_redirects is False:
+            return RedirectPolicy.NEVER
+        if override is None:
+            return self.redirect_policy
+        return check_redirect_policy(override, trusted=self._trusted_arg is not None)
 
     def _require_verification(self, verify: object) -> None:
-        """Warn loudly when talking to a server whose certificate will not be checked.
-
-        ``requests`` reads any falsy ``verify`` as "do not check", per call and
-        as a session attribute. An explicit choice, not refused - see
-        :class:`~webdav.exceptions.TLSHardeningDisabledWarning` - but a session
-        that talks to a server it does not authenticate hands the password to
-        whoever answers, so every occurrence is loud and logged. Prefer naming
-        the CA that signed the server's certificate (``verify="ca.pem"``)
-        over disabling verification when it's just not in the system trust store.
-        """
-        effective = self.verify if verify is None else verify
-        if not _verification_on(effective):
-            warn_hardening_disabled(
-                f"TLS server certificate verification is off (verify={effective!r})"
-            )
-            return
-        if (
-            isinstance(effective, str | os.PathLike)
-            and not pathlib.Path(effective).exists()
-        ):
-            msg = f"the CA bundle {os.fspath(effective)!r} (verify=) does not exist"
-            raise ClientError(msg)
-
-    def _headers_with_locks(
-        self, method: str, url: str, caller_headers: "dict[str, str]"
-    ) -> "dict[str, str]":
-        """``caller_headers`` plus the ``If`` header of any held lock a write to ``url`` needs."""
-        if method not in _WRITE_METHODS or any(
-            k.lower() == "if" for k in caller_headers
-        ):
-            return dict(caller_headers)
-        below = (url,) if method == Method.DELETE else ()
-        header = self.locks.if_header(url, include_below=below)
-        return {**caller_headers, "If": header} if header else dict(caller_headers)
+        """Check (and warn about) the certificate verification a request will use."""
+        check_verify(self.verify if verify is None else verify)
 
     def _fetch_once(
         self, method: str, url: str, policy: RedirectPolicy, kwargs: dict[str, Any]
@@ -1168,49 +904,41 @@ class Session:
         def kwargs_for(target: str) -> dict[str, Any]:
             """The arguments for a request to ``target`` on the origin we started at."""
             hop = {k: v for k, v in kwargs.items() if k != "params"}
-            hop["headers"] = self._headers_with_locks(method, target, caller_headers)
+            hop["headers"] = self.locks.headers_for(method, target, caller_headers)
             return hop
 
         # Always sent as a stream, so that no body (the answer itself, or a
         # redirect's) is read into memory before this session has had its
-        # say on how big it may get - see _read_bounded.
+        # say on how big it may get - see read_bounded.
         caller_streams = kwargs.get("stream")
         if caller_streams is None:
             caller_streams = self.stream
         kwargs["stream"] = True
         first = dict(kwargs)
-        first["headers"] = self._headers_with_locks(method, url, caller_headers)
+        first["headers"] = self.locks.headers_for(method, url, caller_headers)
 
-        budget = self.max_response_time
         # One deadline for the whole exchange - every hop, the headers, the
         # body and its trailers - unless the caller streams: then it covers
         # getting the response (headers) and the caller reads the rest.
-        with watch(budget) as watcher:
-            try:
-                response = self._dispatch(method, url, allow_redirects=False, **first)
-                response = self._follow_redirects(
-                    response, method, policy, kwargs, kwargs_for
+        with enforce(self.max_response_time):
+            response = self._dispatch(method, url, allow_redirects=False, **first)
+            response = self._follow_redirects(
+                response, method, policy, kwargs, kwargs_for
+            )
+            if not caller_streams:
+                read_response(
+                    response, method, max_size=self.max_response_size, max_time=None
                 )
-                if not caller_streams:
-                    _read_response(response, method, self.max_response_size, None)
-            except BaseException:
-                if watcher is not None and watcher.expired.is_set():
-                    raise _deadline_error(budget) from None
-                raise
-            if watcher is not None and watcher.expired.is_set():
-                # A socket shut down mid-body can look like a clean end of the
-                # data (EOF): never hand that back as a complete response.
-                raise _deadline_error(budget)
         return response
 
     def prepare_request(self, request: requests.Request) -> requests.PreparedRequest:
         """Prepare ``request``; with no credentials configured, none are looked up.
 
         ``requests`` would otherwise search ``~/.netrc`` for the host and
-        authenticate with whatever it finds (see :class:`_NoAuth`).
+        authenticate with whatever it finds (see :data:`~webdav.transport.guards.NO_AUTH`).
         """
         if request.auth is None and self.auth is None:
-            request.auth = _NO_AUTH
+            request.auth = NO_AUTH
         return self._transport.prepare_request(request)
 
     def _dispatch(self, method: str, url: str, **kwargs: Any) -> Response:
@@ -1283,31 +1011,24 @@ class Session:
         started = time.perf_counter()
         method = request.method or ""
         adapter = self.get_adapter(url=request.url or "")
-        with watch(self.max_response_time) as watcher:
-            try:
-                response = adapter.send(request, **kwargs)
-                response.elapsed = timedelta(seconds=time.perf_counter() - started)
-                # Before any response hook runs: ``HTTPDigestAuth`` (and any
-                # hook of the caller's) reads ``.content`` of a 401 to answer
-                # it - which would be an unbounded, deadline-free read.
-                hooks = request.hooks.get("response") if request.hooks else None
-                if not kwargs["stream"] or (
-                    hooks and response.status_code in (401, 407)
-                ):
-                    _read_response(response, method, self.max_response_size, None)
-                response = dispatch_hook("response", request.hooks, response, **kwargs)  # type: ignore[no-untyped-call]
-                extract_cookies_to_jar(self.cookies, request, response.raw)  # type: ignore[no-untyped-call]
-            except BaseException:
-                if watcher is not None and watcher.expired.is_set():
-                    raise _deadline_error(self.max_response_time) from None
-                raise
-            if watcher is not None and watcher.expired.is_set():
-                raise _deadline_error(self.max_response_time)
-        # Already a webdav.Response: every adapter this library ever uses is
-        # a DeadlineAdapter, whose build_response() constructs one directly.
-        result = cast("Response", response)
+        with enforce(self.max_response_time):
+            response = adapter.send(request, **kwargs)
+            response.elapsed = timedelta(seconds=time.perf_counter() - started)
+            # Before any response hook runs: ``HTTPDigestAuth`` (and any
+            # hook of the caller's) reads ``.content`` of a 401 to answer
+            # it - which would be an unbounded, deadline-free read.
+            hooks = request.hooks.get("response") if request.hooks else None
+            if not kwargs["stream"] or (hooks and response.status_code in (401, 407)):
+                read_response(
+                    response, method, max_size=self.max_response_size, max_time=None
+                )
+            response = dispatch_hook("response", request.hooks, response, **kwargs)  # type: ignore[no-untyped-call]
+            extract_cookies_to_jar(self.cookies, request, response.raw)  # type: ignore[no-untyped-call]
+        # Nearly always a webdav.Response already (the adapters this library
+        # mounts build one); an adapter a caller mounted may not have.
+        result = Response.adopt(response)
         if allow_redirects and (result.is_redirect or result.is_permanent_redirect):
-            _refuse(
+            refuse(
                 result,
                 "send() sends one request and never follows redirects; use request()",
             )
@@ -1315,40 +1036,13 @@ class Session:
 
     def _warn_if_insecure(self, url: str, kwargs: dict[str, Any]) -> None:
         """Warn (once per host) when credentials are about to go out over plain ``http``."""
-        parts = _split(url)
-        if (
-            parts.scheme.lower() != "http"
-            or not parts.hostname
-            or _is_loopback(parts.hostname)
-        ):
-            return
-        credential_headers = {"authorization", "proxy-authorization", "cookie"}
-        names = {k.lower() for k in (kwargs.get("headers") or {})} | {
-            k.lower() for k in self.headers
-        }
         per_call_auth = kwargs.get("auth")
-        if not (
-            (per_call_auth is not None and per_call_auth is not _NO_AUTH)
-            or self.auth
-            or parts.username is not None
-            or names & credential_headers
-        ):
-            return
-        # Host and port only: the netloc may carry the very password being warned about.
-        host = (
-            f"{parts.hostname.lower()}:{parts.port}"
-            if parts.port
-            else parts.hostname.lower()
-        )
-        with self._features_lock:
-            if host in self._insecure_warned:
-                return
-            self._insecure_warned.add(host)
-        warnings.warn(
-            f"sending credentials to {host} over plain http - anyone on the network "
-            "path can read them; use an https URL",
-            InsecureTransportWarning,
-            stacklevel=6,
+        self._cleartext.check(
+            url,
+            call_headers=kwargs.get("headers"),
+            session_headers=self.headers,
+            has_auth=(per_call_auth is not None and per_call_auth is not NO_AUTH)
+            or bool(self.auth),
         )
 
     # -- redirects ------------------------------------------------------
@@ -1382,21 +1076,34 @@ class Session:
         hops = 0
         while response.is_redirect or response.is_permanent_redirect:
             if policy == RedirectPolicy.NEVER:
-                _refuse(response, "redirects are disabled for this request")
+                refuse(response, "redirects are disabled for this request")
                 break
-            if hops >= MAX_REDIRECTS:
-                _refuse(response, f"more than {MAX_REDIRECTS} redirects in a row")
+            if hops >= self.max_redirects:
+                refuse(response, f"more than {self.max_redirects} redirects in a row")
                 break
-            hop = self._plan_hop(response, method, policy, kwargs, seen, origin_url)
-            if isinstance(hop, str):
-                _refuse(response, hop)
+            decision = plan_hop(
+                response,
+                method,
+                policy,
+                body_replayable=has_replayable_body(kwargs),
+                seen=seen,
+                origin_url=origin_url,
+                is_trusted=self._is_trusted_redirect_target,
+                get_location=self._redirect_location,
+            )
+            if isinstance(decision, Refuse):
+                refuse(response, decision.reason)
                 break
-            target, same_origin = hop
+            target, same_origin = decision.target, decision.same_origin
             previous = response
             # Keep the (small) body of a redirect for ``history``, but never
             # let it be an unbounded read.
             with suppress(ClientError):
-                _read_bounded(previous, _MAX_REDIRECT_BODY, self.max_response_time)
+                read_bounded(
+                    previous,
+                    max_size=MAX_REDIRECT_BODY,
+                    max_time=self.max_response_time,
+                )
             previous.close()
             hops += 1
             seen.add(target)
@@ -1417,81 +1124,6 @@ class Session:
             response.history = [*previous.history, previous]
         return response
 
-    def _plan_hop(
-        self,
-        response: requests.Response,
-        method: str,
-        policy: RedirectPolicy,
-        kwargs: dict[str, Any],
-        seen: "set[str]",
-        origin_url: "str | None" = None,
-    ) -> "tuple[str, bool] | str":
-        """Decide whether ``response``'s redirect may be followed.
-
-        Returns ``(target URL, stays on the origin the request started at)``,
-        or - if it may not be followed - a sentence saying why.
-        """
-        target = self._hop_target(response, method)
-        if target.startswith(_REASON_PREFIX):
-            return target.removeprefix(_REASON_PREFIX)
-        if target in seen:
-            return "the redirect leads back to a URL already visited (a loop)"
-        if not has_replayable_body(kwargs):
-            return "the request body cannot be sent a second time"
-        same_origin = self._may_follow(origin_url or response.url, target, policy)
-        if isinstance(same_origin, str):
-            return same_origin
-        return target, same_origin
-
-    def _hop_target(self, response: requests.Response, method: str) -> str:
-        """The absolute URL ``response`` redirects to - or ``_REASON_PREFIX`` plus why it can't be used."""
-        # RFC 9110 sec. 15.4.4: 303 means "retrieve the result with GET".
-        # Re-sending a write (or a PROPFIND) to it would be wrong, and
-        # silently turning it into a GET would report a write as done.
-        if response.status_code == requests.codes.see_other and method not in (
-            Method.GET,
-            Method.HEAD,
-        ):
-            return (
-                _REASON_PREFIX
-                + "a 303 is only followed for GET/HEAD (RFC 9110 sec. 15.4.4)"
-            )
-        try:
-            location = self.get_redirect_target(response)
-            target = urljoin(response.url, location) if location else ""
-        except (UnicodeError, ValueError):
-            return _REASON_PREFIX + "the Location header is malformed"
-        return target or _REASON_PREFIX + "the redirect has no Location"
-
-    def _may_follow(
-        self, source: str, target: str, policy: RedirectPolicy
-    ) -> "bool | str":
-        """Whether ``policy`` lets a request for ``source`` be redirected to ``target``.
-
-        ``True``: yes, same origin. ``False``: yes, but to another origin
-        (so nothing of ours may go along). A string: no, and why.
-        """
-        source_origin = effective_origin(source)
-        target_origin = effective_origin(target)
-        if source_origin is None or target_origin is None:
-            return "the target is not one unambiguous http(s) URL"
-        if source_origin == target_origin:
-            return True
-        trusted = (
-            policy == RedirectPolicy.WHITELIST
-            and self._is_trusted_redirect_target(target)
-        )
-        # Never step down from https to http on the strength of a policy
-        # alone - not even a whitelisted target, not even ALL: trusting a
-        # target with credentials is a different question from accepting
-        # that the same bytes cross the network in clear text, and there is
-        # no legitimate reason to want the latter. No browser allows it either.
-        if source_origin[0] == "https" and target_origin[0] == "http":
-            return "the redirect would downgrade https to http"
-        if policy == RedirectPolicy.ALL or trusted:
-            return False
-        return "the target is on another origin and redirect_policy does not allow that"
-
     def _send_stripped(self, method: str, url: str, kwargs: dict[str, Any]) -> Response:
         """Send one request to another origin, carrying nothing that is ours.
 
@@ -1501,13 +1133,12 @@ class Session:
         may include a custom API-key header this can't recognise as a
         credential), no client certificate, no hooks. Of the caller's own
         per-call headers only the representation/conditional ones in
-        :data:`_FORWARD_HEADERS` (plus ``redirect_forward_headers``) are kept.
+        :data:`~webdav.transport.redirects.FORWARD_HEADERS` (plus ``redirect_forward_headers``) are kept.
         """
-        allowed = (_FORWARD_HEADERS | self._redirect_forward_headers) - _NEVER_FORWARD
         headers = default_headers()
-        for name, value in (kwargs.get("headers") or {}).items():
-            if name.lower() in allowed:
-                headers[name] = value
+        headers.update(
+            cross_origin_headers(kwargs.get("headers"), self._redirect_forward_headers)
+        )
         prepared = requests.PreparedRequest()
         prepared.prepare(
             method=method,
@@ -1588,7 +1219,7 @@ class Session:
             if overwrite is False:
                 msg = "if_match requires the resource to exist, overwrite=False forbids it"
                 raise ValueError(msg)
-            extra["If-Match"] = _strong_etag(if_match)
+            extra["If-Match"] = strong_etag(if_match)
         if overwrite is False:
             extra["If-None-Match"] = "*"
         return self._with_headers(Method.PUT, url, kwargs, extra, data=data)
@@ -1603,7 +1234,7 @@ class Session:
         """
         extra: dict[str, str | None] = {}
         if if_match is not None:
-            extra["If-Match"] = _strong_etag(if_match)
+            extra["If-Match"] = strong_etag(if_match)
         return self._with_headers(Method.DELETE, url, kwargs, extra)
 
     # -- WebDAV verbs ---------------------------------------------------
@@ -1616,6 +1247,7 @@ class Session:
         depth: "int | str | None",
         props: "Iterable[str | PropName] | None" = None,
         all_prop: bool = False,
+        prop_name: bool = False,
         include: "Iterable[str | PropName] | None" = None,
         **kwargs: Any,
     ) -> Response:
@@ -1635,6 +1267,8 @@ class Session:
             props: Property names to request instead of writing the body
                 yourself - see :func:`~webdav.dav.properties.build_propfind_body`.
             all_prop: Request ``<d:allprop/>`` explicitly.
+            prop_name: Request ``<d:propname/>``: the *names* of the
+                properties the resource has, without their values.
             include: Additional named properties to request alongside
                 ``all_prop``.
             depth: Required, by keyword. ``0``: the resource itself. ``1``:
@@ -1647,15 +1281,23 @@ class Session:
 
         Raises:
             ValueError: ``data`` is combined with ``props``/``all_prop``/
-                ``include``, or ``depth`` is not ``0``, ``1`` or ``infinity``.
+                ``prop_name``/``include``, more than one of ``props``,
+                ``all_prop`` and ``prop_name`` is given, or ``depth`` is not
+                ``0``, ``1`` or ``infinity``.
 
         """
-        if props is not None or all_prop or include is not None:
+        if props is not None or all_prop or prop_name or include is not None:
             if data is not None:
-                msg = "pass either data or props/all_prop/include, not both"
+                msg = "pass either data or props/all_prop/prop_name/include, not both"
+                raise ValueError(msg)
+            if (props is not None) + all_prop + prop_name > 1:
+                msg = "pass only one of props, all_prop and prop_name"
                 raise ValueError(msg)
             data = build_propfind_body(
-                props, all_prop=all_prop or props is None, include=include
+                props,
+                all_prop=all_prop or (props is None and not prop_name),
+                prop_name=prop_name,
+                include=include,
             )
         return self._with_headers(
             Method.PROPFIND,
@@ -1663,9 +1305,7 @@ class Session:
             kwargs,
             {
                 "Depth": (
-                    _check_depth(depth, _DEPTHS, Method.PROPFIND)
-                    if depth is not None
-                    else None
+                    depth_header(depth, Method.PROPFIND) if depth is not None else None
                 )
             },
             data=data,
@@ -1758,13 +1398,22 @@ class Session:
         depth: "int | str" = "infinity",
         lock_timeout: "int | Iterable[int | None] | None" = DEFAULT_LOCK_TIMEOUT,
         refresh: "str | None" = None,
+        track: bool = True,
         **kwargs: Any,
     ) -> Response:
         """Send a ``LOCK`` (RFC 4918 sec. 9.10).
 
         Returns the raw response; ``response.active_lock`` is the parsed
-        lock. This does *not* record the lock for automatic ``If``
-        headers - add it to :attr:`locks` for that.
+        lock. A lock that was granted (``200``/``201``) is recorded in
+        :attr:`locks`, under the URL that was asked for - never under a
+        ``lockroot`` the server names - so the writes that follow carry its
+        token in an ``If`` header until :meth:`unlock` releases it. (A refresh
+        keeps the token; there is nothing to record.)
+
+        A granted lock this session cannot read or record (no usable token, a
+        body that is not a lock) is released again, as far as its
+        ``Lock-Token`` header allows, and the error is raised: a lock nobody
+        knows the token of would only block everyone else until it times out.
 
         Args:
             url: The resource.
@@ -1777,100 +1426,90 @@ class Session:
                 with ``requests``' own network ``timeout=``).
             refresh: A lock token; sends a bodiless refresh request
                 instead of creating a lock (sec. 9.10.2).
+            track: ``False`` leaves :attr:`locks` alone and the response
+                unread: what you get is the server's answer, and the token in
+                it is yours to keep and to release.
             **kwargs: Anything :meth:`requests.Session.request` takes.
+
+        Raises:
+            ValueError: ``refresh`` is not a usable lock token, or ``depth``,
+                ``scope`` or ``lock_timeout`` is not a legal value.
+            MalformedResponseError: The server granted a lock but the answer
+                has no usable lock in it (with ``track=True``).
 
         """
         headers = {"Timeout": format_timeout(lock_timeout)}
         if refresh is not None:
-            headers["If"] = f"(<{check_token(refresh)}>)"
+            headers["If"] = f"(<{validate_token(refresh)}>)"
             return self._with_headers(Method.LOCK, url, kwargs, headers)
-        headers["Depth"] = _check_depth(depth, ("0", "infinity"), Method.LOCK)
+        headers["Depth"] = depth_header(depth, Method.LOCK)
         headers["Content-Type"] = "application/xml; charset=utf-8"
-        return self._with_headers(
+        response = self._with_headers(
             Method.LOCK, url, kwargs, headers, data=build_lock_body(scope, owner)
         )
-
-    def unlock(self, url: str, token: str, **kwargs: Any) -> Response:
-        """Send an ``UNLOCK`` for ``token`` (RFC 4918 sec. 9.11)."""
-        check_token(token.strip("<>"))
-        return self._with_headers(
-            Method.UNLOCK, url, kwargs, {"Lock-Token": f"<{token.strip('<>')}>"}
-        )
-
-    # -- file-system operations: plain values, errors raised -----------------
-    #
-    # ``path`` is relative to ``base_url``; without a ``base_url`` it is a
-    # full URL. Every operation raises a WebDAVError on failure, with the
-    # ``path`` in its message.
-
-    def _locate(
-        self, path: str, add_trailing_slash: bool = False
-    ) -> "tuple[str, URL, str]":
-        """Resolve ``path`` to ``(full URL, base URL, path relative to that base)``."""
-        if self.base_url is not None:
-            url = self.resolve_url(path, add_trailing_slash=add_trailing_slash)
-            base = URL(self.base_url)
-            if _URL_RE.match(path):
-                try:
-                    return url, base, relative_url_to(base, URL(url).path)
-                except ValueError as exc:
-                    raise ClientError(str(exc)) from exc
-            return url, base, path
-        parsed = URL(path)
-        if not parsed.is_absolute_url:
-            msg = f"{path!r} is not a full http(s) URL and this session has no base_url"
-            raise ClientError(msg)
-        base = parsed.copy_with(path="/", query="")
-        suffix = "/" if add_trailing_slash and not parsed.path.endswith("/") else ""
-        return str(parsed.copy_with(path=parsed.path + suffix)), base, parsed.path
-
-    def _send(
-        self,
-        method: str,
-        path: str,
-        *,
-        add_trailing_slash: bool = False,
-        error_path: "str | None" = None,
-        multistatus: bool = True,
-        **kwargs: Any,
-    ) -> Response:
-        """Send ``method`` for ``path``, raising the matching exception on failure.
-
-        With ``multistatus`` (the default) a ``207`` reporting a failure
-        for any individual resource raises too; a ``PROPFIND`` turns
-        that off, since a per-property 404 there is just data.
-        """
-        url = self._locate(path, add_trailing_slash)[0]
-        response = self._fetch(method, url, **kwargs)
-        raise_for_status(response, path=_display(error_path or path))
-        if multistatus and response.status_code == HTTPStatus.MULTI_STATUS:
-            parse_multistatus_response(response).raise_for_status()
+        if track and response.status_code in (HTTPStatus.OK, HTTPStatus.CREATED):
+            self._record_granted(url, str(headers["Depth"]), response)
         return response
 
-    def _propfind_parsed(
-        self,
-        path: str,
-        data: "str | None" = None,
-        headers: "dict[str, str] | None" = None,
-        redirect_policy: "RedirectPolicy | None" = None,
-    ) -> "MultiStatusResponse":
-        """Send a ``PROPFIND`` and parse the multistatus response."""
-        extra: dict[str, Any] = {}
-        if redirect_policy is not None:
-            extra["redirect_policy"] = redirect_policy
-        response = self._send(
-            Method.PROPFIND,
-            path,
-            multistatus=False,
-            data=data,
-            headers=headers,
-            **extra,
+    def _record_granted(self, url: str, depth: str, response: Response) -> None:
+        """Record the lock ``response`` granted on ``url`` - or release it, and raise, if that cannot be done."""
+        try:
+            self.locks.add(self.resolve_url(url), response.active_lock.token, depth)
+        except ClientError:  # MalformedResponseError is one
+            # Granted by the server, unusable here: release it (with the token of
+            # the Lock-Token header, if that is a usable one) instead of leaving
+            # it until it times out.
+            header_token = response.headers.get("Lock-Token", "").strip().strip("<>")
+            with suppress(ValueError, requests.RequestException):
+                self.unlock(url, header_token, raise_on_error=False)
+            raise
+
+    def unlock(self, url: str, token: str, **kwargs: Any) -> Response:
+        """Send an ``UNLOCK`` for ``token`` (RFC 4918 sec. 9.11).
+
+        A token in :attr:`locks` is dropped from it once the server has
+        released the lock: a released token must not go on being attached to
+        the writes that follow.
+
+        RFC 4918 sec. 9.11: the lock is named by the ``Lock-Token`` header
+        alone (no ``If`` header is needed), ``url`` must be within the scope of
+        the lock, and ``204`` is the normal answer. A ``403`` means the
+        principal may not remove the lock, a ``409`` that the resource was not
+        locked (the lock may have timed out) or that ``url`` is outside the
+        lock's scope. A ``404``/``409`` for the very URL a lock was recorded
+        for means the lock is gone (it may have timed out) and drops it from
+        :attr:`locks` too - a dead token must not go on making every later write
+        fail with ``412`` - while anywhere else, or on ``403``, the token stays,
+        since the lock may still exist. An UNLOCK is idempotent but never retried
+        here: the repeat of one whose answer was lost would be answered ``409``.
+
+        Raises:
+            ValueError: ``token`` is not a usable lock token.
+
+        """
+        token = validate_token(token.strip("<>"))
+        response = self._with_headers(
+            Method.UNLOCK, url, kwargs, {"Lock-Token": f"<{token}>"}
         )
-        return parse_multistatus_response(response)
+        status = response.status_code
+        if HTTPStatus.OK <= status < HTTPStatus.MULTIPLE_CHOICES:
+            self.locks.discard_token(token)
+        elif status in (HTTPStatus.NOT_FOUND, HTTPStatus.CONFLICT):
+            with suppress(ClientError):
+                self.locks.discard_token(token, url=self.resolve_url(url))
+        return response
 
     def features_for(self, path: str = "") -> FeatureDetection:
-        """Features of the server ``path`` is on (cached per origin once a probe has answered)."""
-        url = self._locate(path)[0]
+        """Features of the server ``path`` is on (cached per origin once a probe has answered).
+
+        A server that cannot be reached - or that does not answer ``OPTIONS`` -
+        is "nothing known" (``FeatureDetection()``), not an error, and is not
+        remembered; a ``path`` that cannot be requested at all *is* an error.
+        :meth:`FileSystem.dav_compliance <webdav.fs.client.FileSystem.dav_compliance>`
+        asks afresh and raises instead.
+        """
+        url = self.resolve_url(path)
+        require_full_url(url, has_base_url=self.base_url is not None)
         key: Origin | str = effective_origin(url) or url
         with self._features_lock:
             cached = self._features.get(key)
@@ -1881,8 +1520,8 @@ class Session:
         try:
             response = self._fetch(Method.OPTIONS, url)
         except requests.RequestException:
-            return FeatureDetection(None)
-        detected = FeatureDetection(response)
+            return FeatureDetection()
+        detected = FeatureDetection.from_response(response)
         with self._features_lock:
             return self._features.setdefault(key, detected)
 
@@ -1911,78 +1550,27 @@ class Session:
         kwargs: dict[str, Any],
     ) -> Response:
         source_url = self.resolve_url(url)
-        destination_header = self._destination(destination)
-        extra: dict[str, str | None] = {"Destination": destination_header}
+        destination_value = destination_header(
+            destination, base_url=self.base_url, resolve=self.resolve_url
+        )
+        extra: dict[str, str | None] = {"Destination": destination_value}
         if overwrite is not None:
             extra["Overwrite"] = "T" if overwrite else "F"
         if depth is not None:
-            extra["Depth"] = _check_depth(depth, ("0", "infinity"), method)
+            extra["Depth"] = depth_header(depth, method)
         # A path-absolute Destination names a resource on the source's server.
-        destination_url = urljoin(source_url, destination_header)
-        extra["If"] = self._if_for_transfer(
+        destination_url = urljoin(source_url, destination_value)
+        extra["If"] = self.locks.if_header_for_transfer(
             source_url, destination_url, moves=method == Method.MOVE
         )
         return self._with_headers(method, url, kwargs, extra)
 
-    def _if_for_transfer(
-        self, from_url: str, to_url: str, *, moves: bool = False
-    ) -> "str | None":
-        """Build an ``If`` header covering both sides of a COPY/MOVE.
-
-        RFC 4918 sec. 10.2: "If a source or destination resource within
-        the scope of the Depth header is locked in such a way as to
-        prevent the successful execution of the method, then the lock
-        token for that resource MUST be submitted with the request in the
-        If request header." That includes a lock on the *parent* of either
-        (sec. 7.4: a lock on a collection covers its membership: the
-        source's parent loses a member on a MOVE, the destination's gains
-        one), and - for a MOVE, which takes the source and all it holds away -
-        locks on members of the source. Every lock touched is presented as a
-        tagged list of its own resource - a plain token would only speak about
-        the request's.
-        """
-        return self.locks.if_header(
-            from_url, to_url, include_below=(from_url,) if moves else ()
-        )
-
-    def _destination(self, destination: str) -> str:
-        """The ``Destination`` header value: an absolute URI or path-absolute (RFC 4918 sec. 10.3).
-
-        A path is a plain path (encoded here, like every path); a full URL is
-        made a valid URI (a space or a lone ``%`` in it is encoded) and, with
-        a ``base_url``, must be on that server: a ``Destination`` on another
-        origin is a cross-server COPY/MOVE nobody has asked for.
-        """
-        if destination.startswith("//"):
-            msg = "a scheme-relative Destination is not allowed (RFC 4918 sec. 10.3)"
-            raise ClientError(msg)
-        if _URL_RE.match(destination):
-            parts = _split(destination)
-            if parts.query or parts.fragment or "\\" in destination:
-                # Not part of a resource's address here - and exactly where a
-                # parser that reads the URL differently would find another host.
-                msg = f"a Destination has no query, fragment or backslash: {redact_url(destination)!r}"
-                raise ClientError(msg)
-            origin = effective_origin(destination)
-            if origin is None or (
-                self.base_url is not None and origin != effective_origin(self.base_url)
-            ):
-                msg = f"Destination {redact_url(destination)!r} is not on this session's base_url"
-                raise ClientError(msg)
-            # ``requote_uri`` leaves a "%" that is not a valid escape as it is;
-            # in a URI it can only mean a literal percent sign.
-            return str(requote_uri(re.sub(r"%(?![0-9A-Fa-f]{2})", "%25", destination)))
-        if self.base_url is not None:
-            return self.resolve_url(destination)
-        if destination.startswith("/"):
-            return quote(destination, safe="/")
-        msg = "a Destination is a full URL, or - with a base_url - a path"
-        raise ClientError(msg)
-
 
 __all__ = [
     "DEFAULT_MAX_RESPONSE_SIZE",
+    "DEFAULT_MAX_RESPONSE_TIME",
     "DEFAULT_TIMEOUT",
-    "Method",
+    "ConnectionOptions",
     "Session",
+    "SessionOptions",
 ]

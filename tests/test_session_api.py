@@ -11,8 +11,8 @@ import pytest
 import requests
 
 import webdav
+from tests.credentials import AUTH
 from tests.scripted_server import NO_CONTENT_LENGTH, OK, Seen, always, scripted_server
-from tests.server import AUTH
 from webdav import (
     FileSystem,
     RedirectPolicy,
@@ -120,14 +120,15 @@ def test_session_locks_and_unlocks(server_url: str) -> None:
     with Session(base_url=server_url) as session:
         session.auth = AUTH
         session.put("/f.txt", data=b"x")
-        response = session.lock("/f.txt", owner="me", lock_timeout=60)
+        response = session.lock("/f.txt", owner="me", lock_timeout=60, track=False)
         assert response.status_code == 200
         lock = response.active_lock
         assert lock.token.startswith("opaquelocktoken:")
 
-        # Without the token the resource is locked for everyone else...
+        # Not recorded (track=False): the resource is locked for everyone else...
+        assert not session.locks
         assert session.put("/f.txt", data=b"y").status_code == 423
-        # ...with it (registered, so it is attached automatically) it is not.
+        # ...with the token (registered, so it is attached automatically) it is not.
         session.locks.add(session.resolve_url("/f.txt"), lock.token, "infinity")
         assert session.put("/f.txt", data=b"y").status_code in (200, 204)
         session.locks.discard(session.resolve_url("/f.txt"), lock.token, "infinity")

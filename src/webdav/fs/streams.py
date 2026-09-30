@@ -1,4 +1,4 @@
-"""Resumable streaming downloads.
+"""Streaming file objects over a session: resumable downloads, and uploads of a known size.
 
 A network hiccup mid-download reopens the connection with a ``Range``
 request instead of failing the whole transfer - but only after verifying
@@ -17,9 +17,9 @@ from typing import TYPE_CHECKING
 
 import requests.exceptions
 
-from webdav.dav.parse_utils import parse_uint
 from webdav.exceptions import ClientError, raise_for_status
 from webdav.methods import Method
+from webdav.transport.parse_utils import parse_uint
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -30,7 +30,6 @@ if TYPE_CHECKING:
 
     from webdav.session import Session
 
-DEFAULT_CHUNK_SIZE = 2**22
 MAX_RESUME_ATTEMPTS = 5
 RESUME_BACKOFF_SECONDS = 1.0
 

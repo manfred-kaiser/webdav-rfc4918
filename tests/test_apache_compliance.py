@@ -97,6 +97,6 @@ def test_apache_set_and_get_custom_property(apache_client: FileSystem) -> None:
     )
 
     props = apache_client.get_props(
-        "compliance/p.txt", names=[("https://example.org/ns", "color")]
+        "compliance/p.txt", props=[("https://example.org/ns", "color")]
     )
     assert props.text("https://example.org/ns", "color") == "blue"

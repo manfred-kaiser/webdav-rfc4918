@@ -14,7 +14,6 @@ from xml.etree.ElementTree import Element
 
 from webdav.dav.date_utils import from_rfc1123, fromisoformat
 from webdav.dav.locks import ActiveLock, LockEntry
-from webdav.dav.parse_utils import parse_uint
 from webdav.dav.xml_utils import (
     DAV_NAMESPACE,
     clark,
@@ -24,6 +23,7 @@ from webdav.dav.xml_utils import (
     to_xml_string,
 )
 from webdav.exceptions import MalformedResponseError
+from webdav.transport.parse_utils import parse_uint
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -192,7 +192,7 @@ class DAVProperties:
 
 
 def build_propfind_body(
-    names: "Iterable[str | PropName] | None" = None,
+    props: "Iterable[str | PropName] | None" = None,
     *,
     all_prop: bool = False,
     prop_name: bool = False,
@@ -201,7 +201,7 @@ def build_propfind_body(
     """Build a PROPFIND request body (RFC 4918 §9.1).
 
     Args:
-        names: Property names to request. Each is either a convenience
+        props: Property names to request. Each is either a convenience
             name (``"etag"``), a bare ``DAV:`` local name
             (``"getetag"``), or a ``(namespace, local_name)`` tuple for a
             property outside the ``DAV:`` namespace.
@@ -216,7 +216,7 @@ def build_propfind_body(
             ignored otherwise (the grammar doesn't allow it alongside a
             named-``prop``/``propname`` request).
 
-    Exactly one of ``names``, ``all_prop``, ``prop_name`` should be given;
+    Exactly one of ``props``, ``all_prop``, ``prop_name`` should be given;
     with none of them, an empty ``<d:prop/>`` is sent (equivalent to
     requesting no properties at all - callers typically want ``all_prop``
     instead).
@@ -233,7 +233,7 @@ def build_propfind_body(
                 include_el.append(Element(clark(namespace, local_name)))
     else:
         prop_el = sub_dav_element(root, "prop")
-        for namespace, local_name in _names(names, "names"):
+        for namespace, local_name in _names(props, "props"):
             prop_el.append(Element(clark(namespace, local_name)))
     return to_xml_string(root)
 

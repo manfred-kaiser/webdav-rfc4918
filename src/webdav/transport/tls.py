@@ -24,14 +24,17 @@ notice one.
 import logging
 import os
 import ssl
-import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import requests
 
-from webdav.exceptions import TLSConfigError, TLSHardeningDisabledWarning
+from webdav.exceptions import (
+    TLSConfigError,
+    TLSHardeningDisabledWarning,
+    warn_at_caller,
+)
 from webdav.transport.deadline import DeadlineAdapter
 
 if TYPE_CHECKING:
@@ -42,6 +45,9 @@ if TYPE_CHECKING:
 
     StrPath = str | PathLike[str]
 
+#: What ``cert=`` accepts: one combined PEM, or a ``(certfile, keyfile)`` pair.
+CertTypes = str | tuple[str, str] | None
+
 DEFAULT_MINIMUM_TLS_VERSION = ssl.TLSVersion.TLSv1_2
 
 _LOGGER = logging.getLogger("webdav")
@@ -50,9 +56,7 @@ _LOGGER = logging.getLogger("webdav")
 def warn_hardening_disabled(reason: str) -> None:
     """Raise :class:`TLSHardeningDisabledWarning` and log it - see the module docstring."""
     _LOGGER.warning("TLS hardening disabled: %s", reason)
-    warnings.warn(
-        f"TLS hardening disabled: {reason}", TLSHardeningDisabledWarning, stacklevel=3
-    )
+    warn_at_caller(f"TLS hardening disabled: {reason}", TLSHardeningDisabledWarning)
 
 
 @dataclass(frozen=True)
@@ -311,3 +315,54 @@ def mount_mtls_adapter(
         verify=verify,
     )
     session.mount("https://", adapter)
+
+
+def verification_on(verify: object) -> bool:
+    """Whether ``verify`` means "check the server's certificate" (to ``requests``, anything falsy does not)."""
+    return verify is True or (
+        isinstance(verify, str | os.PathLike) and bool(os.fspath(verify))
+    )
+
+
+def configure_tls(
+    transport: "requests.Session",
+    *,
+    cert: "CertTypes",
+    verify: "bool | str",
+    tls: "TLSOptions | None",
+) -> None:
+    """Wire up ``cert``/``verify`` on ``transport`` - plain ``requests`` attrs, or a hardened adapter.
+
+    The hardened :mod:`webdav.transport.tls` adapter is only needed for what plain
+    ``requests`` cannot express (``tls=...``); everything else uses
+    ``requests``' own, well-known ``cert=``/``verify=`` attributes.
+    """
+    verify_certificates = verification_on(verify)
+    if tls is None:
+        if not verify_certificates:
+            warn_hardening_disabled(
+                f"TLS server certificate verification is off (verify={verify!r}) "
+                "for every request this session sends"
+            )
+        transport.cert = cert
+        transport.verify = verify
+        return
+
+    certfile: str | None
+    keyfile: str | None
+    if cert is None:
+        certfile, keyfile = None, None
+    elif isinstance(cert, str):
+        certfile, keyfile = cert, None
+    else:
+        certfile, keyfile = cert[0], cert[1]
+
+    if verify_certificates and tls.ca_files is None and isinstance(verify, str):
+        tls = replace(tls, ca_files=verify)
+    mount_mtls_adapter(
+        transport,
+        certfile=certfile,
+        keyfile=keyfile,
+        options=tls,
+        verify=verify_certificates,
+    )
