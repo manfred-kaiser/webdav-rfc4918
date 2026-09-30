@@ -295,3 +295,44 @@ def test_any_false_allow_redirects_means_never(falsy: object) -> None:
     else:
         assert response.status_code == 307
         assert b_rec.requests == []
+
+
+# ---------------------------------------------------------------------------
+# PROPFIND request kinds (RFC 4918 sec. 9.1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("options", "element"),
+    [
+        ({"prop_name": True}, "propname"),
+        ({"all_prop": True}, "allprop"),
+        ({"props": ["etag"]}, "prop"),
+        ({}, None),  # no body at all is an allprop request (sec. 9.1)
+    ],
+)
+def test_propfind_sends_the_kind_of_request_that_was_asked_for(
+    options: "dict[str, Any]", element: "str | None"
+) -> None:
+    with scripted_server(always(OK)) as (url, rec):
+        Session(retry=False).propfind(f"{url}/x", depth=0, **options)
+    body = rec.requests[0].body.decode()
+    if element is None:
+        assert body == ""
+    else:
+        assert f":{element}" in body or f"<{element}" in body
+    assert rec.requests[0].headers["depth"] == "0"
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"prop_name": True, "all_prop": True},
+        {"prop_name": True, "props": ["etag"]},
+        {"all_prop": True, "props": ["etag"]},
+        {"prop_name": True, "data": b"<x/>"},
+    ],
+)
+def test_propfind_refuses_to_mix_request_kinds(options: "dict[str, Any]") -> None:
+    with pytest.raises(ValueError, match="only one|either data"):
+        Session("http://dav.example").propfind("/x", depth=0, **options)

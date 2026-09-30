@@ -91,7 +91,7 @@ if TYPE_CHECKING:
     from typing import Self
     from xml.etree.ElementTree import Element
 
-    from webdav.dav.multistatus import Response as ResourceResponse
+    from webdav.dav.multistatus import ResourceResponse
     from webdav.dav.properties import DAVProperties, PropName
 
 _LOGGER = logging.getLogger("webdav")
@@ -273,7 +273,7 @@ class FileSystem:
         self,
         path: str,
         *,
-        names: "Iterable[str | PropName] | None" = None,
+        props: "Iterable[str | PropName] | None" = None,
         all_prop: bool = False,
         include: "Iterable[str | PropName] | None" = None,
     ) -> "DAVProperties":
@@ -281,7 +281,7 @@ class FileSystem:
 
         Args:
             path: Resource path.
-            names: Specific property names to request - see
+            props: Specific property names to request - see
                 :func:`~webdav.dav.properties.build_propfind_body`. Requests
                 all properties when omitted (and ``all_prop`` is falsy).
             all_prop: Explicitly request ``<d:allprop/>``.
@@ -292,7 +292,7 @@ class FileSystem:
         """
         _url, base, rel = self._remote.locate(path)
         data = build_propfind_body(
-            names, all_prop=all_prop or not names, include=include
+            props, all_prop=all_prop or not props, include=include
         )
         # Depth: 0 - this is a single-resource lookup, not a traversal.
         headers = {"Content-Type": "application/xml; charset=utf-8", "Depth": "0"}
@@ -313,27 +313,27 @@ class FileSystem:
 
     def content_length(self, path: str) -> "int | None":
         """Return the ``getcontentlength`` property."""
-        return self.get_props(path, names=["content_length"]).content_length
+        return self.get_props(path, props=["content_length"]).content_length
 
     def created(self, path: str) -> "datetime | None":
         """Return the ``creationdate`` property."""
-        return self.get_props(path, names=["created"]).created
+        return self.get_props(path, props=["created"]).created
 
     def modified(self, path: str) -> "datetime | None":
         """Return the ``getlastmodified`` property."""
-        return self.get_props(path, names=["modified"]).modified
+        return self.get_props(path, props=["modified"]).modified
 
     def etag(self, path: str) -> "str | None":
         """Return the ``getetag`` property."""
-        return self.get_props(path, names=["etag"]).etag
+        return self.get_props(path, props=["etag"]).etag
 
     def content_type(self, path: str) -> "str | None":
         """Return the ``getcontenttype`` property."""
-        return self.get_props(path, names=["content_type"]).content_type
+        return self.get_props(path, props=["content_type"]).content_type
 
     def content_language(self, path: str) -> "str | None":
         """Return the ``getcontentlanguage`` property."""
-        return self.get_props(path, names=["content_language"]).content_language
+        return self.get_props(path, props=["content_language"]).content_language
 
     # -- locking ----------------------------------------------------------
 
@@ -578,7 +578,7 @@ class FileSystem:
     def _is_collection(self, path: str) -> "bool | None":
         """``True`` for a collection, ``False`` for anything else, ``None`` if there is nothing."""
         try:
-            return bool(self.get_props(path, names=["resourcetype"]).collection)
+            return bool(self.get_props(path, props=["resourcetype"]).collection)
         except ResourceNotFoundError:
             return None
 

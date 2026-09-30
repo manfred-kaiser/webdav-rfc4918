@@ -144,7 +144,7 @@ _SESSION_METHODS = {
     "move": "(self:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD, destination:POSITIONAL_OR_KEYWORD, overwrite:KEYWORD_ONLY=False, kwargs:VAR_KEYWORD)",
     "options": "(self:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD, kwargs:VAR_KEYWORD)",
     "prepare_request": "(self:POSITIONAL_OR_KEYWORD, request:POSITIONAL_OR_KEYWORD)",
-    "propfind": "(self:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD, data:POSITIONAL_OR_KEYWORD=None, depth:KEYWORD_ONLY, props:KEYWORD_ONLY=None, all_prop:KEYWORD_ONLY=False, include:KEYWORD_ONLY=None, kwargs:VAR_KEYWORD)",
+    "propfind": "(self:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD, data:POSITIONAL_OR_KEYWORD=None, depth:KEYWORD_ONLY, props:KEYWORD_ONLY=None, all_prop:KEYWORD_ONLY=False, prop_name:KEYWORD_ONLY=False, include:KEYWORD_ONLY=None, kwargs:VAR_KEYWORD)",
     "proppatch": "(self:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD, data:POSITIONAL_OR_KEYWORD=None, set_props:KEYWORD_ONLY=None, remove_props:KEYWORD_ONLY=None, kwargs:VAR_KEYWORD)",
     "put": "(self:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD, data:POSITIONAL_OR_KEYWORD=None, if_match:KEYWORD_ONLY=None, overwrite:KEYWORD_ONLY=None, kwargs:VAR_KEYWORD)",
     "request": "(self:POSITIONAL_OR_KEYWORD, method:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD, args:VAR_POSITIONAL, redirect_policy:KEYWORD_ONLY=None, raise_on_error:KEYWORD_ONLY=None, kwargs:VAR_KEYWORD)",

@@ -1172,6 +1172,7 @@ class Session:
         depth: "int | str | None",
         props: "Iterable[str | PropName] | None" = None,
         all_prop: bool = False,
+        prop_name: bool = False,
         include: "Iterable[str | PropName] | None" = None,
         **kwargs: Any,
     ) -> Response:
@@ -1191,6 +1192,8 @@ class Session:
             props: Property names to request instead of writing the body
                 yourself - see :func:`~webdav.dav.properties.build_propfind_body`.
             all_prop: Request ``<d:allprop/>`` explicitly.
+            prop_name: Request ``<d:propname/>``: the *names* of the
+                properties the resource has, without their values.
             include: Additional named properties to request alongside
                 ``all_prop``.
             depth: Required, by keyword. ``0``: the resource itself. ``1``:
@@ -1203,15 +1206,23 @@ class Session:
 
         Raises:
             ValueError: ``data`` is combined with ``props``/``all_prop``/
-                ``include``, or ``depth`` is not ``0``, ``1`` or ``infinity``.
+                ``prop_name``/``include``, more than one of ``props``,
+                ``all_prop`` and ``prop_name`` is given, or ``depth`` is not
+                ``0``, ``1`` or ``infinity``.
 
         """
-        if props is not None or all_prop or include is not None:
+        if props is not None or all_prop or prop_name or include is not None:
             if data is not None:
-                msg = "pass either data or props/all_prop/include, not both"
+                msg = "pass either data or props/all_prop/prop_name/include, not both"
+                raise ValueError(msg)
+            if (props is not None) + all_prop + prop_name > 1:
+                msg = "pass only one of props, all_prop and prop_name"
                 raise ValueError(msg)
             data = build_propfind_body(
-                props, all_prop=all_prop or props is None, include=include
+                props,
+                all_prop=all_prop or (props is None and not prop_name),
+                prop_name=prop_name,
+                include=include,
             )
         return self._with_headers(
             Method.PROPFIND,

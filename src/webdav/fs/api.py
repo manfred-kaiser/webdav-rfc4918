@@ -213,7 +213,7 @@ def move(
 def get_props(
     path: str,
     *,
-    names: "Iterable[str | PropName] | None" = None,
+    props: "Iterable[str | PropName] | None" = None,
     all_prop: bool = False,
     include: "Iterable[str | PropName] | None" = None,
     **kwargs: Unpack[_Options],
@@ -226,7 +226,7 @@ def get_props(
         FileSystem.get_props,
         kwargs,
         path,
-        names=names,
+        props=props,
         all_prop=all_prop,
         include=include,
     )

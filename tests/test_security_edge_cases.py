@@ -216,7 +216,7 @@ def test_owner_with_crlf_stays_inside_the_xml_body() -> None:
 
 def test_an_empty_file_has_size_zero_not_none(fs: FileSystem) -> None:
     fs.upload_fileobj(io.BytesIO(b""), "empty.txt")
-    assert fs.get_props("empty.txt", names=["content_length"]).content_length == 0
+    assert fs.get_props("empty.txt", props=["content_length"]).content_length == 0
     assert fs.info("empty.txt").size == 0
     assert fs.content_length("empty.txt") == 0
 

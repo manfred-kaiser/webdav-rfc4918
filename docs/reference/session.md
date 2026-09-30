@@ -41,7 +41,7 @@ requests and interprets the answers.
 Both kinds take a full URL - or a path, if the session/filesystem was given a
 `base_url`. Verbs take a `url`, file-system operations a `path`; uploads are
 `(local_path, path)`, downloads `(path, local_path)`. Everything after the first
-argument(s) of a file-system operation - `names=`, `set_props=`, `data=`,
+argument(s) of a file-system operation - `props=`, `set_props=`, `data=`,
 `overwrite=`, ... - is keyword-only.
 
 ## `ls`, `info` and `walk`: one type

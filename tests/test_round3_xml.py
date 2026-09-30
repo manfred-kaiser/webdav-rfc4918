@@ -70,7 +70,7 @@ def test_a_single_string_is_not_a_list_of_characters() -> None:
     with pytest.raises(TypeError, match="not a single"):
         build_propfind_body("etag")  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="not a single"):
-        FileSystem("http://unused.invalid").get_props("/a", names="etag")  # type: ignore[arg-type]
+        FileSystem("http://unused.invalid").get_props("/a", props="etag")  # type: ignore[arg-type]
 
 
 def test_ordinary_names_still_work() -> None:

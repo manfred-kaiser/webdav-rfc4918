@@ -21,7 +21,7 @@ from webdav.dav.locks import (
     build_lock_body,
     format_timeout,
 )
-from webdav.dav.multistatus import MultiStatusResponse, Response
+from webdav.dav.multistatus import MultiStatusResponse, ResourceResponse
 from webdav.dav.properties import DAVProperties, build_propfind_body
 from webdav.dav.xml_utils import parse_xml
 from webdav.exceptions import (
@@ -42,7 +42,7 @@ def test_response_location_parses_the_nested_href() -> None:
         "<d:status>HTTP/1.1 200 OK</d:status>"
         "<d:location><d:href>/b</d:href></d:location></d:response>"
     )
-    response = Response(parse_xml(xml))
+    response = ResourceResponse(parse_xml(xml))
     assert response.location == "/b"
 
 
