@@ -167,3 +167,24 @@ def test_a_chunk_size_that_is_no_positive_integer_is_refused_when_it_is_set(
     with pytest.raises(ValueError, match="chunk_size"):
         session.chunk_size = size  # type: ignore[assignment]
     assert session.chunk_size == before
+
+
+def test_the_deadline_of_an_outer_block_wins_over_an_inner_one() -> None:
+    from webdav.transport.deadline import enforce  # noqa: PLC0415
+
+    started = time.monotonic()
+    with pytest.raises(ClientError, match="configured time of 0.2 seconds"):
+        with enforce(0.2):
+            with enforce(30):
+                time.sleep(0.3)
+    assert time.monotonic() - started < 5
+
+
+def test_a_block_without_a_deadline_is_left_alone() -> None:
+    from webdav.transport.deadline import enforce  # noqa: PLC0415
+
+    with enforce(None):
+        pass
+    with pytest.raises(ZeroDivisionError):
+        with enforce(None):
+            1 / 0  # noqa: B018

@@ -80,7 +80,7 @@ from webdav.transport.body import (
     read_bounded,
     read_response,
 )
-from webdav.transport.deadline import DeadlineAdapter, watch
+from webdav.transport.deadline import DeadlineAdapter, enforce
 from webdav.transport.redirects import (
     MAX_REDIRECT_BODY,
     MAX_REDIRECTS,
@@ -304,12 +304,6 @@ def _prepare_xml_body(kwargs: dict[str, Any]) -> None:
     if isinstance(data, str) and not declares_other_charset:
         kwargs["data"] = data.encode("utf-8")
     kwargs["headers"] = dict(headers)
-
-
-def _deadline_error(seconds: "float | None") -> ClientError:
-    return ClientError(
-        f"the request did not complete within the configured time of {seconds} seconds"
-    )
 
 
 def _split(url: str) -> "urllib.parse.SplitResult":
@@ -1036,28 +1030,18 @@ class Session:
         first = dict(kwargs)
         first["headers"] = self._headers_with_locks(method, url, caller_headers)
 
-        budget = self.max_response_time
         # One deadline for the whole exchange - every hop, the headers, the
         # body and its trailers - unless the caller streams: then it covers
         # getting the response (headers) and the caller reads the rest.
-        with watch(budget) as watcher:
-            try:
-                response = self._dispatch(method, url, allow_redirects=False, **first)
-                response = self._follow_redirects(
-                    response, method, policy, kwargs, kwargs_for
+        with enforce(self.max_response_time):
+            response = self._dispatch(method, url, allow_redirects=False, **first)
+            response = self._follow_redirects(
+                response, method, policy, kwargs, kwargs_for
+            )
+            if not caller_streams:
+                read_response(
+                    response, method, max_size=self.max_response_size, max_time=None
                 )
-                if not caller_streams:
-                    read_response(
-                        response, method, max_size=self.max_response_size, max_time=None
-                    )
-            except BaseException:
-                if watcher is not None and watcher.expired.is_set():
-                    raise _deadline_error(budget) from None
-                raise
-            if watcher is not None and watcher.expired.is_set():
-                # A socket shut down mid-body can look like a clean end of the
-                # data (EOF): never hand that back as a complete response.
-                raise _deadline_error(budget)
         return response
 
     def prepare_request(self, request: requests.Request) -> requests.PreparedRequest:
@@ -1140,28 +1124,19 @@ class Session:
         started = time.perf_counter()
         method = request.method or ""
         adapter = self.get_adapter(url=request.url or "")
-        with watch(self.max_response_time) as watcher:
-            try:
-                response = adapter.send(request, **kwargs)
-                response.elapsed = timedelta(seconds=time.perf_counter() - started)
-                # Before any response hook runs: ``HTTPDigestAuth`` (and any
-                # hook of the caller's) reads ``.content`` of a 401 to answer
-                # it - which would be an unbounded, deadline-free read.
-                hooks = request.hooks.get("response") if request.hooks else None
-                if not kwargs["stream"] or (
-                    hooks and response.status_code in (401, 407)
-                ):
-                    read_response(
-                        response, method, max_size=self.max_response_size, max_time=None
-                    )
-                response = dispatch_hook("response", request.hooks, response, **kwargs)  # type: ignore[no-untyped-call]
-                extract_cookies_to_jar(self.cookies, request, response.raw)  # type: ignore[no-untyped-call]
-            except BaseException:
-                if watcher is not None and watcher.expired.is_set():
-                    raise _deadline_error(self.max_response_time) from None
-                raise
-            if watcher is not None and watcher.expired.is_set():
-                raise _deadline_error(self.max_response_time)
+        with enforce(self.max_response_time):
+            response = adapter.send(request, **kwargs)
+            response.elapsed = timedelta(seconds=time.perf_counter() - started)
+            # Before any response hook runs: ``HTTPDigestAuth`` (and any
+            # hook of the caller's) reads ``.content`` of a 401 to answer
+            # it - which would be an unbounded, deadline-free read.
+            hooks = request.hooks.get("response") if request.hooks else None
+            if not kwargs["stream"] or (hooks and response.status_code in (401, 407)):
+                read_response(
+                    response, method, max_size=self.max_response_size, max_time=None
+                )
+            response = dispatch_hook("response", request.hooks, response, **kwargs)  # type: ignore[no-untyped-call]
+            extract_cookies_to_jar(self.cookies, request, response.raw)  # type: ignore[no-untyped-call]
         # Already a webdav.Response: every adapter this library ever uses is
         # a DeadlineAdapter, whose build_response() constructs one directly.
         result = cast("Response", response)
