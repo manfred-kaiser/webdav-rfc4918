@@ -27,6 +27,7 @@ from webdav.dav.xml_utils import (
     to_xml_string,
 )
 from webdav.exceptions import ClientError, MalformedResponseError
+from webdav.methods import WRITE_METHODS, Method
 from webdav.transport.parse_utils import parse_uint
 from webdav.url_safety import effective_origin
 
@@ -54,7 +55,7 @@ def check_token(token: str) -> str:
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
 
     from requests import Response as HTTPResponse
 
@@ -472,4 +473,40 @@ class LockRegistry:
                 build_if_header_single([Condition(token=h.token)], resource=h.url)
                 for h in held_locks
             )
+        )
+
+    def headers_for(
+        self, method: str, url: str, headers: "Mapping[str, str]"
+    ) -> dict[str, str]:
+        """``headers`` plus the ``If`` header of any held lock a ``method`` request to ``url`` needs.
+
+        Only a write carries one - a read has no use for a lock token, and
+        sending one anyway would put a capability on the wire for nothing -
+        and never on top of an ``If`` header the caller wrote themselves.
+        """
+        if method not in WRITE_METHODS or any(k.lower() == "if" for k in headers):
+            return dict(headers)
+        below = (url,) if method == Method.DELETE else ()
+        header = self.if_header(url, include_below=below)
+        return {**headers, "If": header} if header else dict(headers)
+
+    def if_header_for_transfer(
+        self, source: str, destination: str, *, moves: bool
+    ) -> str | None:
+        """The ``If`` header a COPY/MOVE from ``source`` to ``destination`` needs, or ``None``.
+
+        RFC 4918 sec. 10.2: "If a source or destination resource within
+        the scope of the Depth header is locked in such a way as to
+        prevent the successful execution of the method, then the lock
+        token for that resource MUST be submitted with the request in the
+        If request header." That includes a lock on the *parent* of either
+        (sec. 7.4: a lock on a collection covers its membership: the
+        source's parent loses a member on a MOVE, the destination's gains
+        one), and - for a MOVE, which takes the source and all it holds away -
+        locks on members of the source. Every lock touched is presented as a
+        tagged list of its own resource - a plain token would only speak about
+        the request's.
+        """
+        return self.if_header(
+            source, destination, include_below=(source,) if moves else ()
         )

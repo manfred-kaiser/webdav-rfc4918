@@ -12,6 +12,7 @@ import pytest
 
 from webdav import FileSystem, Session
 from webdav.dav.conditional import Condition, build_if_header
+from webdav.dav.features import parse_dav_header
 from webdav.dav.locks import (
     EXCLUSIVE,
     SHARED,
@@ -28,7 +29,6 @@ from webdav.exceptions import (
     MultiStatusError,
     UnsupportedMediaTypeError,
 )
-from webdav.session import _parse_dav_header
 
 # ---------------------------------------------------------------------------
 # XML/grammar-level fixes - no server needed
@@ -129,7 +129,7 @@ def test_resourcetype_preserves_non_collection_types() -> None:
 
 def test_dav_header_comma_inside_coded_url_is_not_a_separator() -> None:
     """RFC 3986 permits an unencoded comma in a URI path/query sub-delim."""
-    tokens = _parse_dav_header("1, 2, <http://example.com/ext,ended>")
+    tokens = parse_dav_header("1, 2, <http://example.com/ext,ended>")
     assert tokens == {"1", "2", "<http://example.com/ext,ended>"}
 
 

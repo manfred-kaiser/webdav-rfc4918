@@ -27,7 +27,6 @@ failures, and a cap on how large a response body may be declared.
 """
 
 import logging
-import re
 import threading
 import time
 from contextlib import suppress
@@ -38,17 +37,18 @@ from typing import (
     Any,
     cast,
 )
-from urllib.parse import quote, urljoin, urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
 import requests.adapters
 import requests.auth
 from requests.cookies import extract_cookies_to_jar
 from requests.hooks import dispatch_hook
-from requests.structures import CaseInsensitiveDict
-from requests.utils import default_headers, requote_uri, resolve_proxies
+from requests.utils import default_headers, resolve_proxies
 
-from webdav.dav.conditional import entity_tag
+from webdav.dav.body import prepare_body
+from webdav.dav.features import FeatureDetection
+from webdav.dav.headers import depth_header, destination_header, strong_etag
 from webdav.dav.locks import (
     DEFAULT_LOCK_TIMEOUT,
     EXCLUSIVE,
@@ -66,7 +66,7 @@ from webdav.exceptions import (
     HTTPStatusError,
     raise_for_status,
 )
-from webdav.methods import RETRYABLE_METHODS, WRITE_METHODS, XML_BODY_METHODS, Method
+from webdav.methods import RETRYABLE_METHODS, Method
 from webdav.response import Response
 from webdav.transport.body import (
     check_max_size,
@@ -80,7 +80,6 @@ from webdav.transport.guards import (
     CleartextWarner,
     check_verify,
     require_full_url,
-    split_url,
 )
 from webdav.transport.redirects import (
     MAX_REDIRECT_BODY,
@@ -104,6 +103,7 @@ if TYPE_CHECKING:
 
     from requests.auth import AuthBase
     from requests.cookies import RequestsCookieJar
+    from requests.structures import CaseInsensitiveDict
 
     from webdav.dav.multistatus import MultiStatusResponse
     from webdav.dav.properties import PropName
@@ -231,17 +231,6 @@ _TRANSPORT_PICKLED = (
     "max_redirects",
 )
 
-_DEPTHS = ("0", "1", "infinity")
-
-
-def _check_depth(depth: "int | str", allowed: "Iterable[str]", method: str) -> str:
-    value = str(depth)
-    if value not in allowed:
-        msg = f"{method} Depth must be one of {', '.join(allowed)}, got {depth!r}"
-        raise ValueError(msg)
-    return value
-
-
 _LOGGER = logging.getLogger("webdav")
 
 
@@ -256,109 +245,6 @@ def _refuse(response: requests.Response, reason: str) -> None:
         redact_url(response.headers.get("Location", "")),
         reason,
     )
-
-
-def _prepare_body(method: str, kwargs: dict[str, Any]) -> None:
-    """Give a request body its final form: XML gets its type, text becomes UTF-8 bytes."""
-    if method in XML_BODY_METHODS and kwargs.get("data") is not None:
-        _prepare_xml_body(kwargs)
-    if isinstance(kwargs.get("data"), str):
-        # Text is sent as UTF-8 whatever ``requests`` version is installed
-        # (older ones leave it to ``http.client``, which encodes Latin-1 and
-        # declares a Content-Length that no longer matches the bytes).
-        kwargs["data"] = kwargs["data"].encode("utf-8")
-
-
-def _prepare_xml_body(kwargs: dict[str, Any]) -> None:
-    """Give an XML request body its ``Content-Type`` and, if text, encode it as UTF-8.
-
-    ``requests`` (before 2.32) leaves a ``str`` body to ``http.client``,
-    which encodes it as ISO-8859-1 and fails on anything outside that
-    range - while the body is XML, whose default encoding is UTF-8.
-    """
-    headers = CaseInsensitiveDict(kwargs.get("headers") or {})
-    content_type = headers.get("Content-Type")
-    if content_type is None:
-        headers["Content-Type"] = "application/xml; charset=utf-8"
-    data = kwargs["data"]
-    declares_other_charset = (
-        content_type is not None
-        and "charset" in content_type.lower()
-        and "utf-8" not in content_type.lower()
-    )
-    if isinstance(data, str) and not declares_other_charset:
-        kwargs["data"] = data.encode("utf-8")
-    kwargs["headers"] = dict(headers)
-
-
-def _strong_etag(value: str) -> str:
-    """``value`` as the entity-tag ``If-Match`` needs (RFC 9110 sec. 13.1.1: strong comparison only).
-
-    A server's own spelling (``"abc"``) and a bare value (``abc``, as some
-    WebDAV servers report ``getetag``) are both written as ``"abc"``;
-    ``*`` is passed through.
-
-    Raises:
-        ValueError: The ETag is weak, or not a valid entity-tag.
-
-    """
-    if value.startswith("W/"):
-        msg = (
-            f"a weak ETag cannot be used in If-Match (RFC 9110 sec. 13.1.1): {value!r}"
-        )
-        raise ValueError(msg)
-    return value if value == "*" else entity_tag(value)
-
-
-class FeatureDetection:
-    """Server features detected via an OPTIONS request.
-
-    Mostly used for detecting ``Accept-Ranges`` support, since some
-    servers (e.g. ownCloud/Nextcloud) don't advertise it on GET responses.
-    """
-
-    supports_ranges: bool
-    dav_compliances: set[str]
-
-    def __init__(self, options_response: "requests.Response | None" = None) -> None:
-        """Build from an OPTIONS response, or an empty/unknown state if ``None``."""
-        dav_compliances = set()
-        supports_ranges = False
-        if options_response is not None:
-            dav_header = options_response.headers.get("dav", "")
-            dav_compliances = _parse_dav_header(dav_header)
-            supports_ranges = options_response.headers.get("accept-ranges") == "bytes"
-
-        self.dav_compliances = dav_compliances
-        self.supports_ranges = supports_ranges
-
-
-def _parse_dav_header(value: str) -> set[str]:
-    """Split a ``DAV`` compliance-class header into its tokens (RFC 4918 §18).
-
-    ``compliance-class = ("1" | "2" | "3" | extend)``, and ``extend`` can
-    be a bare token (``"bind"``) or a ``Coded-URL`` (``<absolute-URI>``) -
-    a comma inside the URI (legal per RFC 3986, unencoded, as a path/query
-    sub-delim) is part of it, not a token separator, so this tracks
-    bracket depth instead of blindly splitting on every comma.
-    """
-    tokens = []
-    depth = 0
-    current: list[str] = []
-    for char in value:
-        if char == "<":
-            depth += 1
-            current.append(char)
-        elif char == ">":
-            depth = max(0, depth - 1)
-            current.append(char)
-        elif char == "," and depth == 0:
-            tokens.append("".join(current))
-            current = []
-        else:
-            current.append(char)
-    tokens.append("".join(current))
-    return {t.strip() for t in tokens if t.strip()}
 
 
 class Session:
@@ -843,7 +729,9 @@ class Session:
         if not absolute:
             url = self.resolve_url(url)
         require_full_url(url, has_base_url=self.base_url is not None)
-        _prepare_body(method, kwargs)
+        kwargs["data"], kwargs["headers"] = prepare_body(
+            method, kwargs.get("data"), kwargs.get("headers")
+        )
         allow = kwargs.pop("allow_redirects", None)
         policy = (
             RedirectPolicy.NEVER
@@ -876,18 +764,6 @@ class Session:
         """Check (and warn about) the certificate verification a request will use."""
         check_verify(self.verify if verify is None else verify)
 
-    def _headers_with_locks(
-        self, method: str, url: str, caller_headers: "dict[str, str]"
-    ) -> "dict[str, str]":
-        """``caller_headers`` plus the ``If`` header of any held lock a write to ``url`` needs."""
-        if method not in WRITE_METHODS or any(
-            k.lower() == "if" for k in caller_headers
-        ):
-            return dict(caller_headers)
-        below = (url,) if method == Method.DELETE else ()
-        header = self.locks.if_header(url, include_below=below)
-        return {**caller_headers, "If": header} if header else dict(caller_headers)
-
     def _fetch_once(
         self, method: str, url: str, policy: RedirectPolicy, kwargs: dict[str, Any]
     ) -> Response:
@@ -897,7 +773,7 @@ class Session:
         def kwargs_for(target: str) -> dict[str, Any]:
             """The arguments for a request to ``target`` on the origin we started at."""
             hop = {k: v for k, v in kwargs.items() if k != "params"}
-            hop["headers"] = self._headers_with_locks(method, target, caller_headers)
+            hop["headers"] = self.locks.headers_for(method, target, caller_headers)
             return hop
 
         # Always sent as a stream, so that no body (the answer itself, or a
@@ -908,7 +784,7 @@ class Session:
             caller_streams = self.stream
         kwargs["stream"] = True
         first = dict(kwargs)
-        first["headers"] = self._headers_with_locks(method, url, caller_headers)
+        first["headers"] = self.locks.headers_for(method, url, caller_headers)
 
         # One deadline for the whole exchange - every hop, the headers, the
         # body and its trailers - unless the caller streams: then it covers
@@ -1279,7 +1155,7 @@ class Session:
             if overwrite is False:
                 msg = "if_match requires the resource to exist, overwrite=False forbids it"
                 raise ValueError(msg)
-            extra["If-Match"] = _strong_etag(if_match)
+            extra["If-Match"] = strong_etag(if_match)
         if overwrite is False:
             extra["If-None-Match"] = "*"
         return self._with_headers(Method.PUT, url, kwargs, extra, data=data)
@@ -1294,7 +1170,7 @@ class Session:
         """
         extra: dict[str, str | None] = {}
         if if_match is not None:
-            extra["If-Match"] = _strong_etag(if_match)
+            extra["If-Match"] = strong_etag(if_match)
         return self._with_headers(Method.DELETE, url, kwargs, extra)
 
     # -- WebDAV verbs ---------------------------------------------------
@@ -1354,9 +1230,7 @@ class Session:
             kwargs,
             {
                 "Depth": (
-                    _check_depth(depth, _DEPTHS, Method.PROPFIND)
-                    if depth is not None
-                    else None
+                    depth_header(depth, Method.PROPFIND) if depth is not None else None
                 )
             },
             data=data,
@@ -1475,7 +1349,7 @@ class Session:
         if refresh is not None:
             headers["If"] = f"(<{check_token(refresh)}>)"
             return self._with_headers(Method.LOCK, url, kwargs, headers)
-        headers["Depth"] = _check_depth(depth, ("0", "infinity"), Method.LOCK)
+        headers["Depth"] = depth_header(depth, Method.LOCK)
         headers["Content-Type"] = "application/xml; charset=utf-8"
         return self._with_headers(
             Method.LOCK, url, kwargs, headers, data=build_lock_body(scope, owner)
@@ -1572,8 +1446,8 @@ class Session:
         try:
             response = self._fetch(Method.OPTIONS, url)
         except requests.RequestException:
-            return FeatureDetection(None)
-        detected = FeatureDetection(response)
+            return FeatureDetection()
+        detected = FeatureDetection.from_response(response)
         with self._features_lock:
             return self._features.setdefault(key, detected)
 
@@ -1602,73 +1476,20 @@ class Session:
         kwargs: dict[str, Any],
     ) -> Response:
         source_url = self.resolve_url(url)
-        destination_header = self._destination(destination)
-        extra: dict[str, str | None] = {"Destination": destination_header}
+        destination_value = destination_header(
+            destination, base_url=self.base_url, resolve=self.resolve_url
+        )
+        extra: dict[str, str | None] = {"Destination": destination_value}
         if overwrite is not None:
             extra["Overwrite"] = "T" if overwrite else "F"
         if depth is not None:
-            extra["Depth"] = _check_depth(depth, ("0", "infinity"), method)
+            extra["Depth"] = depth_header(depth, method)
         # A path-absolute Destination names a resource on the source's server.
-        destination_url = urljoin(source_url, destination_header)
-        extra["If"] = self._if_for_transfer(
+        destination_url = urljoin(source_url, destination_value)
+        extra["If"] = self.locks.if_header_for_transfer(
             source_url, destination_url, moves=method == Method.MOVE
         )
         return self._with_headers(method, url, kwargs, extra)
-
-    def _if_for_transfer(
-        self, from_url: str, to_url: str, *, moves: bool = False
-    ) -> "str | None":
-        """Build an ``If`` header covering both sides of a COPY/MOVE.
-
-        RFC 4918 sec. 10.2: "If a source or destination resource within
-        the scope of the Depth header is locked in such a way as to
-        prevent the successful execution of the method, then the lock
-        token for that resource MUST be submitted with the request in the
-        If request header." That includes a lock on the *parent* of either
-        (sec. 7.4: a lock on a collection covers its membership: the
-        source's parent loses a member on a MOVE, the destination's gains
-        one), and - for a MOVE, which takes the source and all it holds away -
-        locks on members of the source. Every lock touched is presented as a
-        tagged list of its own resource - a plain token would only speak about
-        the request's.
-        """
-        return self.locks.if_header(
-            from_url, to_url, include_below=(from_url,) if moves else ()
-        )
-
-    def _destination(self, destination: str) -> str:
-        """The ``Destination`` header value: an absolute URI or path-absolute (RFC 4918 sec. 10.3).
-
-        A path is a plain path (encoded here, like every path); a full URL is
-        made a valid URI (a space or a lone ``%`` in it is encoded) and, with
-        a ``base_url``, must be on that server: a ``Destination`` on another
-        origin is a cross-server COPY/MOVE nobody has asked for.
-        """
-        if destination.startswith("//"):
-            msg = "a scheme-relative Destination is not allowed (RFC 4918 sec. 10.3)"
-            raise ClientError(msg)
-        if is_url(destination):
-            parts = split_url(destination)
-            if parts.query or parts.fragment or "\\" in destination:
-                # Not part of a resource's address here - and exactly where a
-                # parser that reads the URL differently would find another host.
-                msg = f"a Destination has no query, fragment or backslash: {redact_url(destination)!r}"
-                raise ClientError(msg)
-            origin = effective_origin(destination)
-            if origin is None or (
-                self.base_url is not None and origin != effective_origin(self.base_url)
-            ):
-                msg = f"Destination {redact_url(destination)!r} is not on this session's base_url"
-                raise ClientError(msg)
-            # ``requote_uri`` leaves a "%" that is not a valid escape as it is;
-            # in a URI it can only mean a literal percent sign.
-            return str(requote_uri(re.sub(r"%(?![0-9A-Fa-f]{2})", "%25", destination)))
-        if self.base_url is not None:
-            return self.resolve_url(destination)
-        if destination.startswith("/"):
-            return quote(destination, safe="/")
-        msg = "a Destination is a full URL, or - with a base_url - a path"
-        raise ClientError(msg)
 
 
 __all__ = [

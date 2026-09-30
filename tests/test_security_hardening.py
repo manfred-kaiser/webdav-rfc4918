@@ -22,8 +22,8 @@ from webdav.dav.conditional import Condition, build_if_header_single
 from webdav.dav.locks import LockRegistry
 from webdav.dav.properties import build_proppatch_body
 from webdav.exceptions import ClientError, TLSConfigError
-from webdav.url_safety import effective_origin
 from webdav.transport.tls import SSLContextAdapter, TLSOptions, build_ssl_context
+from webdav.url_safety import effective_origin
 
 # ---------------------------------------------------------------------------
 # Certificate verification is on by default, and disabling it is never quiet

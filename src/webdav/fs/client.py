@@ -48,7 +48,9 @@ from typing import (
 import requests
 
 from webdav.dav.conditional import token_condition
+from webdav.dav.features import FeatureDetection
 from webdav.dav.fs_utils import peek_filelike_length
+from webdav.dav.headers import depth_header
 from webdav.dav.locks import (
     _TOKEN_RE,
     DEFAULT_LOCK_TIMEOUT,
@@ -75,9 +77,7 @@ from webdav.methods import Method
 from webdav.resource import Resource
 from webdav.session import (
     _LOGGER,
-    FeatureDetection,
     Session,
-    _check_depth,
 )
 from webdav.transport.streaming import IterStream, SizedIterator, check_chunk_size
 from webdav.url_safety import display_url, redact_url
@@ -258,7 +258,7 @@ class FileSystem:
     def dav_compliance(self, path: str = "") -> set[str]:
         """Return the ``DAV:`` compliance classes the server advertises."""
         response = self._session._fetch(Method.OPTIONS, self._session._locate(path)[0])
-        return FeatureDetection(response).dav_compliances
+        return set(FeatureDetection.from_response(response).dav_compliances)
 
     def get_props(
         self,
@@ -364,7 +364,7 @@ class FileSystem:
             MalformedResponseError: The server sent an unusable lock answer.
 
         """
-        depth = _check_depth(depth, ("0", "infinity"), "LOCK")
+        depth = depth_header(depth, Method.LOCK)
         headers = {
             "Depth": depth,
             "Timeout": format_timeout(lock_timeout),
