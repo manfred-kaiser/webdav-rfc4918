@@ -301,7 +301,7 @@ def _plan(
         body_replayable=has_replayable_body(kwargs or {}),
         seen=seen if seen is not None else set(),
         is_trusted=build_trust_check(trusted),
-        get_location=Session().get_redirect_target,
+        get_location=requests.Session().get_redirect_target,
     )
 
 
@@ -369,7 +369,7 @@ def test_a_redirect_is_judged_against_where_the_request_started() -> None:
         seen=set(),
         origin_url="https://a.example/start",
         is_trusted=build_trust_check(None),
-        get_location=Session().get_redirect_target,
+        get_location=requests.Session().get_redirect_target,
     )
     assert isinstance(decision, Refuse)
     assert "another origin" in decision.reason

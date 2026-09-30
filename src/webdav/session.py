@@ -371,6 +371,8 @@ class Session:
         #: for a signed upload that has to repeat them.
         self._redirect_forward_headers: frozenset[str] = frozenset()
         self._retry_arg = retry
+        self._with_retry: RetryFunc
+        self.retry = retry
         self._cert_arg = cert
         self._verify_arg = verify
         self._tls_arg = tls
@@ -397,7 +399,7 @@ class Session:
             verify=self._verify_arg,
             tls=self._tls_arg,
         )
-        self.with_retry = (
+        self._with_retry = (
             self._retry_arg if callable(self._retry_arg) else _retry(self._retry_arg)
         )
         self.locks = LockRegistry()
@@ -431,12 +433,12 @@ class Session:
         self._transport.cookies = value
 
     @property
-    def auth(self) -> Any:
+    def auth(self) -> "AuthTypes":
         """See :attr:`requests.Session.auth`."""
-        return self._transport.auth
+        return cast("AuthTypes", self._transport.auth)
 
     @auth.setter
-    def auth(self, value: Any) -> None:
+    def auth(self, value: "AuthTypes") -> None:
         self._transport.auth = value
 
     @property
@@ -485,12 +487,12 @@ class Session:
         self._transport.verify = value
 
     @property
-    def cert(self) -> Any:
+    def cert(self) -> "CertTypes":
         """See :attr:`requests.Session.cert`."""
         return self._transport.cert
 
     @cert.setter
-    def cert(self, value: Any) -> None:
+    def cert(self, value: "CertTypes") -> None:
         self._transport.cert = value
 
     @property
@@ -510,9 +512,30 @@ class Session:
         """The adapter mounted for ``url`` - see :meth:`requests.Session.get_adapter`."""
         return self._transport.get_adapter(url)
 
-    def get_redirect_target(self, response: requests.Response) -> "str | None":
-        """The ``Location`` header's value, decoded - see :meth:`requests.Session.get_redirect_target`."""
+    def _redirect_location(self, response: requests.Response) -> "str | None":
+        """The ``Location`` header's value, decoded - what :meth:`requests.Session.get_redirect_target` reads."""
         return self._transport.get_redirect_target(response)
+
+    @property
+    def retry(self) -> "RetryFunc":
+        """The wrapper that retries a transient failure of a safe method (see :class:`~webdav.transport.retry.RetryFunc`).
+
+        Set it to ``False`` (no retries), ``True`` (the default policy) or
+        your own :class:`~webdav.transport.retry.RetryFunc`.
+
+        Raises:
+            TypeError: When set to anything else.
+
+        """
+        return self._with_retry
+
+    @retry.setter
+    def retry(self, value: "RetryFunc | bool") -> None:
+        if not (isinstance(value, bool) or callable(value)):
+            msg = f"retry must be True, False or a RetryFunc, got {value!r}"
+            raise TypeError(msg)
+        self._retry_arg = value
+        self._with_retry = value if callable(value) else _retry(value)
 
     @property
     def base_url(self) -> "str | None":
@@ -801,7 +824,7 @@ class Session:
             return response
 
         try:
-            return self.with_retry(checked)
+            return self._with_retry(checked)
         except HTTPStatusError as exc:
             # Out of attempts: hand back the last response, as ``requests`` would.
             return cast("Response", exc.response)
@@ -1014,7 +1037,7 @@ class Session:
                 seen=seen,
                 origin_url=origin_url,
                 is_trusted=self._is_trusted_redirect_target,
-                get_location=self.get_redirect_target,
+                get_location=self._redirect_location,
             )
             if isinstance(decision, Refuse):
                 refuse(response, decision.reason)
@@ -1433,7 +1456,7 @@ class Session:
 
 __all__ = [
     "DEFAULT_MAX_RESPONSE_SIZE",
+    "DEFAULT_MAX_RESPONSE_TIME",
     "DEFAULT_TIMEOUT",
-    "Method",
     "Session",
 ]

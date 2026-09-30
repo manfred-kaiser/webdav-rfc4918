@@ -241,3 +241,43 @@ def test_what_cannot_be_pickled_says_so() -> None:
                 trusted_redirect_origins=lambda _url: True,
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# retry is a setting like the others
+# ---------------------------------------------------------------------------
+
+
+def test_retry_can_be_switched_and_replaced_after_construction() -> None:
+    calls: list[str] = []
+
+    def mine(attempt: Any) -> Any:
+        calls.append("mine")
+        return attempt()
+
+    with scripted_server(always(OK)) as (url, _rec):
+        session = Session(retry=False)
+        session.get(f"{url}/x")
+        assert calls == []
+        session.retry = mine
+        assert session.retry is mine
+        session.get(f"{url}/x")
+        assert calls == ["mine"]
+        session.retry = True
+        assert session.retry is not mine
+
+
+@pytest.mark.parametrize("value", ["yes", 1, None])
+def test_a_retry_that_is_neither_a_bool_nor_callable_is_refused(value: object) -> None:
+    with pytest.raises(TypeError, match="retry"):
+        Session(retry=value)  # type: ignore[arg-type]
+    session = Session(retry=False)
+    with pytest.raises(TypeError, match="retry"):
+        session.retry = value  # type: ignore[assignment]
+
+
+def test_a_changed_retry_survives_a_copy() -> None:
+    session = Session(retry=True)
+    session.retry = False
+    assert copy.copy(session).retry is not session.retry  # rebuilt, not shared
+    assert copy.copy(session)._retry_arg is False

@@ -14,16 +14,21 @@ import webdav.session
 from webdav import Session
 
 _PACKAGE_ALL = [
+    "ActiveLock",
     "ClientError",
+    "FeatureDetection",
     "FileSystem",
     "ForbiddenError",
     "HTTPStatusError",
+    "InsecureTransportWarning",
     "InsufficientStorageError",
     "IsACollectionError",
     "IsAResourceError",
     "LockError",
     "MalformedResponseError",
+    "Method",
     "MultiStatusError",
+    "PreconditionFailedError",
     "RedirectNotFollowedError",
     "RedirectPolicy",
     "Resource",
@@ -34,6 +39,8 @@ _PACKAGE_ALL = [
     "Response",
     "Session",
     "TLSConfigError",
+    "TLSHardeningDisabledWarning",
+    "TLSOptions",
     "WebDAVError",
     "__version__",
     "content_language",
@@ -94,13 +101,17 @@ _FS_ALL = [
     "walk",
 ]
 
-_SESSION_ALL = ["DEFAULT_MAX_RESPONSE_SIZE", "DEFAULT_TIMEOUT", "Method", "Session"]
+_SESSION_ALL = [
+    "DEFAULT_MAX_RESPONSE_SIZE",
+    "DEFAULT_MAX_RESPONSE_TIME",
+    "DEFAULT_TIMEOUT",
+    "Session",
+]
 
 #: Attributes ``Session()`` carries on the instance.
 _SESSION_INSTANCE_ATTRIBUTES = [
     "locks",
     "raise_on_error",
-    "with_retry",
 ]
 
 #: The properties ``Session`` forwards to (or derives from) its transport.
@@ -119,6 +130,7 @@ _SESSION_PROPERTIES = [
     "proxies",
     "redirect_forward_headers",
     "redirect_policy",
+    "retry",
     "stream",
     "timeout",
     "trust_env",
@@ -135,7 +147,6 @@ _SESSION_METHODS = {
     "features_for": "(self:POSITIONAL_OR_KEYWORD, path:POSITIONAL_OR_KEYWORD='')",
     "get": "(self:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD, params:POSITIONAL_OR_KEYWORD=None, kwargs:VAR_KEYWORD)",
     "get_adapter": "(self:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD)",
-    "get_redirect_target": "(self:POSITIONAL_OR_KEYWORD, response:POSITIONAL_OR_KEYWORD)",
     "head": "(self:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD, kwargs:VAR_KEYWORD)",
     "lock": "(self:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD, scope:KEYWORD_ONLY='exclusive', owner:KEYWORD_ONLY=None, depth:KEYWORD_ONLY='infinity', lock_timeout:KEYWORD_ONLY=600, refresh:KEYWORD_ONLY=None, kwargs:VAR_KEYWORD)",
     "merge_environment_settings": "(self:POSITIONAL_OR_KEYWORD, url:POSITIONAL_OR_KEYWORD, proxies:POSITIONAL_OR_KEYWORD, stream:POSITIONAL_OR_KEYWORD, verify:POSITIONAL_OR_KEYWORD, cert:POSITIONAL_OR_KEYWORD)",
