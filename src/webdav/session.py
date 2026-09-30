@@ -718,7 +718,7 @@ class Session:
 
         # Always sent as a stream, so that no body (the answer itself, or a
         # redirect's) is read into memory before this session has had its
-        # say on how big it may get - see _read_bounded.
+        # say on how big it may get - see read_bounded.
         caller_streams = kwargs.get("stream")
         if caller_streams is None:
             caller_streams = self.stream

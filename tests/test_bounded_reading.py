@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 # ---------------------------------------------------------------------------
-# The time budget of _read_bounded
+# The time budget of read_bounded
 # ---------------------------------------------------------------------------
 
 
