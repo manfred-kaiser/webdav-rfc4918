@@ -165,7 +165,7 @@ def test_redirect_forward_headers_accepts_any_iterable_and_any_case() -> None:
 
 def test_a_lock_refresh_token_is_validated_like_every_other_token() -> None:
     session = Session()
-    with pytest.raises(MalformedResponseError):
+    with pytest.raises(ValueError, match="not a usable lock token"):
         session.lock("http://unused.invalid/a", refresh="x>) (<y")
 
 

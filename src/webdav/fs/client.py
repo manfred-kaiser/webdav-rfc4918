@@ -58,9 +58,9 @@ from webdav.dav.locks import (
     EXCLUSIVE,
     ActiveLock,
     build_lock_body,
-    check_token,
     format_timeout,
     parse_lock_response,
+    validate_token,
 )
 from webdav.dav.properties import build_propfind_body, build_proppatch_body
 from webdav.dav.urls import URL, path_key
@@ -371,6 +371,13 @@ class FileSystem:
         held lock's token in an ``If`` header. The lock is released on
         exit, even if the block raised.
 
+        Locking a ``path`` that does not exist yet creates an empty resource
+        there (RFC 4918 sec. 9.10.4) that stays after the lock is gone. The
+        lock times out (see ``lock_timeout`` and the granted
+        :attr:`~webdav.dav.locks.ActiveLock.timeout`) and is not refreshed for
+        you - use :meth:`refresh_lock`; writes made after it timed out fail with
+        ``412``.
+
         Args:
             path: Resource to lock.
             scope: :data:`~webdav.dav.locks.EXCLUSIVE` or
@@ -386,6 +393,9 @@ class FileSystem:
 
         Raises:
             ValueError: ``depth`` is neither ``"0"`` nor ``"infinity"``.
+            ResourceLockedError: A conflicting lock is held (423).
+            MultiStatusError: A ``Depth: infinity`` lock could not cover every
+                member (207 - it names the member that stopped it).
             ClientError: The server did not grant the lock.
             MalformedResponseError: The server sent an unusable lock answer.
 
@@ -399,10 +409,11 @@ class FileSystem:
         # The URL that is locked - fixed now, so that whatever happens to the
         # session (a changed base_url, ...) the UNLOCK goes to the same place.
         url = self._remote.locate(path).url
+        # A 207 is not a granted lock: for ``Depth: infinity`` it names the member
+        # that could not be locked (RFC 4918 sec. 9.10.6) and raises here.
         response = self._remote.send(
             Method.LOCK,
             path,
-            multistatus=False,
             data=build_lock_body(scope, owner),
             headers=headers,
         )
@@ -439,16 +450,28 @@ class FileSystem:
                 "could not release the lock on %s: %s", redact_url(url), exc
             )
             return
-        if not HTTPStatus.OK <= response.status_code < HTTPStatus.MULTIPLE_CHOICES:
-            # RFC 4918 sec. 9.11.1: 403 - not permitted to remove it; 409 - the
-            # resource was not locked (it may have timed out) or the URL is outside
-            # the lock's scope. Either way the server did not release it now.
+        status = response.status_code
+        if HTTPStatus.OK <= status < HTTPStatus.MULTIPLE_CHOICES:
+            return
+        if status in (HTTPStatus.NOT_FOUND, HTTPStatus.CONFLICT):
+            # RFC 4918 sec. 9.11.1: 409 - the resource was not locked (the URL is
+            # the one that was locked, so: it may have timed out) - or it is gone.
+            # Nothing to release any more, but writes since may have lost the lock.
             _LOGGER.warning(
-                "could not release the lock on %s: the server answered %s %s",
+                "the lock on %s was already gone when it was released (the server "
+                "answered %s %s) - it may have timed out",
                 redact_url(url),
-                response.status_code,
+                status,
                 response.reason or "",
             )
+            return
+        # 403: not permitted to remove it; anything else: the server did not release it.
+        _LOGGER.warning(
+            "could not release the lock on %s: the server answered %s %s",
+            redact_url(url),
+            status,
+            response.reason or "",
+        )
 
     def refresh_lock(
         self,
@@ -472,14 +495,12 @@ class FileSystem:
         refreshed timeout (the one an open block is already holding does
         not update itself - use this method's return value instead).
         """
-        check_token(token)
+        validate_token(token)
         headers = {
             "If": token_condition(token),
             "Timeout": format_timeout(lock_timeout),
         }
-        response = self._remote.send(
-            Method.LOCK, path, multistatus=False, headers=headers
-        )
+        response = self._remote.send(Method.LOCK, path, headers=headers)
         active_lock = parse_lock_response(response, expected_token=token)
         self._session.locks.replace_token(token, active_lock.token)
         return active_lock

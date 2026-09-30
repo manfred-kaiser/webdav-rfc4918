@@ -469,7 +469,7 @@ def test_unlock_strips_angle_brackets_and_validates() -> None:
     with scripted_server(always(OK)) as (url, rec):
         session = Session(retry=False)
         session.unlock(f"{url}/a", "<opaquelocktoken:t>")
-        with pytest.raises(exceptions.MalformedResponseError):
+        with pytest.raises(ValueError, match="not a usable lock token"):
             session.unlock(f"{url}/a", "x>) (<y")
     assert rec.requests[0].headers["lock-token"] == "<opaquelocktoken:t>"
     assert len(rec.requests) == 1

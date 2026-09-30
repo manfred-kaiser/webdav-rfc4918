@@ -42,7 +42,7 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]{1,1024}")
 
 
 def check_token(token: str) -> str:
-    """Return ``token`` if it is a usable lock token.
+    """Return ``token``, a lock token the *server* sent, if it is usable.
 
     Raises:
         MalformedResponseError: It is not (see ``_TOKEN_RE``).
@@ -51,6 +51,22 @@ def check_token(token: str) -> str:
     if not _TOKEN_RE.fullmatch(token):
         msg = f"server returned an unusable lock token: {token[:60]!r}"
         raise MalformedResponseError(msg)
+    return token
+
+
+def validate_token(token: str) -> str:
+    """Return ``token``, a lock token the *caller* gave, if it is usable.
+
+    The same test as :func:`check_token`, but a bad token here is the caller's
+    mistake, not a malformed answer from the server.
+
+    Raises:
+        ValueError: It is not a usable lock token (see ``_TOKEN_RE``).
+
+    """
+    if not _TOKEN_RE.fullmatch(token):
+        msg = f"not a usable lock token: {token[:60]!r}"
+        raise ValueError(msg)
     return token
 
 
@@ -209,7 +225,14 @@ class ActiveLock:
             else EXCLUSIVE
         )
         depth = element.findtext(dav("depth")) or "0"
-        owner = element.findtext(dav("owner"))
+        # ``owner`` may hold anything (sec. 14.17; the RFC's own example is an
+        # ``<href>``): its text, including that of its children.
+        owner_el = element.find(dav("owner"))
+        owner = (
+            "".join(owner_el.itertext()).strip() or None
+            if owner_el is not None
+            else None
+        )
         lock_root = element.findtext(f"{dav('lockroot')}/{dav('href')}")
 
         timeout_text = element.findtext(dav("timeout")) or timeout_header
@@ -349,10 +372,16 @@ class LockRegistry:
             if not entries:
                 del self._held[key]
 
-    def discard_token(self, token: str) -> None:
-        """Forget every held lock with this ``token``, wherever it was recorded; a no-op if there is none."""
+    def discard_token(self, token: str, *, url: "str | None" = None) -> None:
+        """Forget every held lock with this ``token``; a no-op if there is none.
+
+        Wherever it was recorded - or, with ``url``, only there.
+        """
+        only = self._key(url) if url is not None else None
         with self._mutex:
             for key in list(self._held):
+                if only is not None and key != only:
+                    continue
                 entries = self._held[key]
                 entries[:] = [e for e in entries if e.token != token]
                 if not entries:

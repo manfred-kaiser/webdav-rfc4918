@@ -94,7 +94,10 @@ they were fixed):
   hrefs (an encoded `/` is refused; a listing entry outside the listed collection is refused; an
   unparseable or duplicate `<response>` can no longer hide a failure), 416 handling in resumed
   downloads. Nothing escapes as a bare `ValueError`. `Session.unlock()` drops a released token from
-  `session.locks`; the table of status-code exceptions (what a retry repeats) is read-only.
+  `session.locks` (also when the server says it is gone: `404`/`409` for the URL it was recorded for);
+  `FileSystem.locked()` reports an UNLOCK the server refused (`403`) or found no lock for (`409`), and a
+  `207` answer to a `Depth: infinity` LOCK is a `MultiStatusError` naming the member, not a "malformed response"; a
+  lock token the caller passes that is unusable is a `ValueError`, not a "malformed server response"; the table of status-code exceptions (what a retry repeats) is read-only.
 - **The local side**: `download_file` writes a temporary file and moves it into place when complete
   (`overwrite=False` by default, atomic no-clobber, never through a symlink, permissions of a replaced
   file kept, no process-wide `umask` change); `dav rm` refuses a non-empty collection

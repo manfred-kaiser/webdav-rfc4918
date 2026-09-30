@@ -55,8 +55,8 @@ from webdav.dav.locks import (
     EXCLUSIVE,
     LockRegistry,
     build_lock_body,
-    check_token,
     format_timeout,
+    validate_token,
 )
 from webdav.dav.properties import build_propfind_body, build_proppatch_body
 from webdav.dav.urls import URL, join_url
@@ -1422,7 +1422,7 @@ class Session:
         """
         headers = {"Timeout": format_timeout(lock_timeout)}
         if refresh is not None:
-            headers["If"] = f"(<{check_token(refresh)}>)"
+            headers["If"] = f"(<{validate_token(refresh)}>)"
             return self._with_headers(Method.LOCK, url, kwargs, headers)
         headers["Depth"] = depth_header(depth, Method.LOCK)
         headers["Content-Type"] = "application/xml; charset=utf-8"
@@ -1442,17 +1442,27 @@ class Session:
         the lock, and ``204`` is the normal answer. A ``403`` means the
         principal may not remove the lock, a ``409`` that the resource was not
         locked (the lock may have timed out) or that ``url`` is outside the
-        lock's scope - in that case the token stays in :attr:`locks`, since the
-        lock may still exist. An UNLOCK is idempotent but never retried here: the
-        repeat of one whose answer was lost would be answered ``409``.
+        lock's scope. A ``404``/``409`` for the very URL a lock was recorded
+        for means the lock is gone (it may have timed out) and drops it from
+        :attr:`locks` too - a dead token must not go on making every later write
+        fail with ``412`` - while anywhere else, or on ``403``, the token stays,
+        since the lock may still exist. An UNLOCK is idempotent but never retried
+        here: the repeat of one whose answer was lost would be answered ``409``.
+
+        Raises:
+            ValueError: ``token`` is not a usable lock token.
+
         """
-        token = token.strip("<>")
-        check_token(token)
+        token = validate_token(token.strip("<>"))
         response = self._with_headers(
             Method.UNLOCK, url, kwargs, {"Lock-Token": f"<{token}>"}
         )
-        if HTTPStatus.OK <= response.status_code < HTTPStatus.MULTIPLE_CHOICES:
+        status = response.status_code
+        if HTTPStatus.OK <= status < HTTPStatus.MULTIPLE_CHOICES:
             self.locks.discard_token(token)
+        elif status in (HTTPStatus.NOT_FOUND, HTTPStatus.CONFLICT):
+            with suppress(ClientError):
+                self.locks.discard_token(token, url=self.resolve_url(url))
         return response
 
     def features_for(self, path: str = "") -> FeatureDetection:
