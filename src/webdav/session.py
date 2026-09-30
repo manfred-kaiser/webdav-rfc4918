@@ -26,7 +26,6 @@ automatic ``If`` headers for locks the session holds, retries of transient
 failures, and a cap on how large a response body may be declared.
 """
 
-import dataclasses
 import ipaddress
 import logging
 import os
@@ -91,7 +90,11 @@ from webdav.transport.redirects import (
 )
 from webdav.transport.retry import retry as _retry
 from webdav.transport.streaming import DEFAULT_CHUNK_SIZE, check_chunk_size
-from webdav.transport.tls import mount_mtls_adapter, warn_hardening_disabled
+from webdav.transport.tls import (
+    configure_tls,
+    verification_on,
+    warn_hardening_disabled,
+)
 from webdav.url_safety import display_url, effective_origin, is_url, redact_url
 
 if TYPE_CHECKING:
@@ -106,11 +109,10 @@ if TYPE_CHECKING:
     from webdav.dav.multistatus import MultiStatusResponse
     from webdav.dav.properties import PropName
     from webdav.transport.retry import RetryFunc
-    from webdav.transport.tls import TLSOptions
+    from webdav.transport.tls import CertTypes, TLSOptions
     from webdav.url_safety import Origin
 
     AuthTypes = AuthBase | tuple[str, str] | None
-    CertTypes = str | tuple[str, str] | None
 
 #: Applied whenever a call site doesn't set its own ``timeout=`` -
 #: ``requests`` itself defaults to *no* timeout, which lets a stalled
@@ -315,13 +317,6 @@ def _split(url: str) -> "urllib.parse.SplitResult":
         raise ClientError(msg) from exc
 
 
-def _verification_on(verify: object) -> bool:
-    """Whether ``verify`` means "check the server's certificate" (to ``requests``, anything falsy does not)."""
-    return verify is True or (
-        isinstance(verify, str | os.PathLike) and bool(os.fspath(verify))
-    )
-
-
 def _strong_etag(value: str) -> str:
     """``value`` as the entity-tag ``If-Match`` needs (RFC 9110 sec. 13.1.1: strong comparison only).
 
@@ -399,50 +394,6 @@ def _parse_dav_header(value: str) -> set[str]:
             current.append(char)
     tokens.append("".join(current))
     return {t.strip() for t in tokens if t.strip()}
-
-
-def _configure_tls(
-    transport: "requests.Session",
-    *,
-    cert: "CertTypes",
-    verify: "bool | str",
-    tls: "TLSOptions | None",
-) -> None:
-    """Wire up ``cert``/``verify`` on ``transport`` - plain ``requests`` attrs, or a hardened adapter.
-
-    The hardened :mod:`webdav.transport.tls` adapter is only needed for what plain
-    ``requests`` cannot express (``tls=...``); everything else uses
-    ``requests``' own, well-known ``cert=``/``verify=`` attributes.
-    """
-    verification_on = _verification_on(verify)
-    if tls is None:
-        if not verification_on:
-            warn_hardening_disabled(
-                f"TLS server certificate verification is off (verify={verify!r}) "
-                "for every request this session sends"
-            )
-        transport.cert = cert
-        transport.verify = verify
-        return
-
-    certfile: str | None
-    keyfile: str | None
-    if cert is None:
-        certfile, keyfile = None, None
-    elif isinstance(cert, str):
-        certfile, keyfile = cert, None
-    else:
-        certfile, keyfile = cert[0], cert[1]
-
-    if verification_on and tls.ca_files is None and isinstance(verify, str):
-        tls = dataclasses.replace(tls, ca_files=verify)
-    mount_mtls_adapter(
-        transport,
-        certfile=certfile,
-        keyfile=keyfile,
-        options=tls,
-        verify=verification_on,
-    )
 
 
 class Session:
@@ -591,7 +542,7 @@ class Session:
         # https one with the mTLS adapter, which has the same property.
         self.mount("https://", DeadlineAdapter())
         self.mount("http://", DeadlineAdapter())
-        _configure_tls(
+        configure_tls(
             self._transport,
             cert=self._cert_arg,
             verify=self._verify_arg,
@@ -984,7 +935,7 @@ class Session:
         over disabling verification when it's just not in the system trust store.
         """
         effective = self.verify if verify is None else verify
-        if not _verification_on(effective):
+        if not verification_on(effective):
             warn_hardening_disabled(
                 f"TLS server certificate verification is off (verify={effective!r})"
             )
