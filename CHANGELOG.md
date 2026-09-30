@@ -19,7 +19,7 @@ The first release.
   and the module functions are typed - and completed by your IDE - like the methods); `Session` has no
   module-level mirror, open one explicitly for protocol-level control. The HTTP verbs take a `url`, the
   file-system operations a `path`; uploads are `(local_path, path)`, downloads `(path, local_path)`;
-  everything beyond the first argument(s) of a file-system operation - `names=`, `set_props=`, `data=`,
+  everything beyond the first argument(s) of a file-system operation - `props=`, `set_props=`, `data=`,
   `overwrite=`, ... - is keyword-only;
   - the HTTP/WebDAV **verbs** (`get`, `put`, `delete`, `head`, `options`, `propfind`, `proppatch`,
     `mkcol`, `copy`, `move`, `lock`, `unlock`) return a `webdav.Response` (a `requests.Response` with
@@ -73,7 +73,8 @@ they were fixed):
   given as `ca_files` is not widened by the public ones; `key_password` is hidden from `repr`.
 - **Credentials in a URL are refused** (`https://user:pw@host/`): pass `auth=`. A pickled `Session`
   carries its credentials in clear - treat it like a password file. (Pickling and copying are supported
-  because `fsspec` and `multiprocessing` need them; a callable you pass has to be picklable too.)
+  so a session can be handed to another process - `multiprocessing`, `concurrent.futures`, file-system
+  front ends; a callable you pass has to be picklable too.)
 - **A mistake fails loudly instead of doing the opposite**: an unknown keyword argument (`allow_redirect=False`,
   `verfiy=True`, `timout=5`) is a `TypeError` like in `requests`, not silently ignored; every limit and
   setting (`timeout`, `base_url`, `redirect_policy`, `max_response_size`, `max_response_time`,

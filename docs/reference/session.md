@@ -118,8 +118,8 @@ gave, including `tls=TLSOptions(...)` (mTLS with a client certificate can be
 pickled too, unlike a raw `ssl.SSLContext`). Its `auth`, headers and cookies
 are copied *as they are*: a pickled session contains its credentials in clear
 text - do not write it to disk or send it anywhere untrusted. (Pickling is
-supported because tools such as `fsspec` and `multiprocessing` need it; like
-them, it serialises the options you configured.) A callable you passed -
+supported so that a session can be handed to another process - `multiprocessing`,
+`concurrent.futures`, file-system front ends; it serialises the options you configured.) A callable you passed -
 `trusted_redirect_origins=` or `retry=` as a function - has to be picklable
 too: a module-level function, not a lambda.
 
