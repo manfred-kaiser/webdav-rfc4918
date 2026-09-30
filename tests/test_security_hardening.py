@@ -19,9 +19,9 @@ from tests.mtls_server import Certificates
 from tests.scripted_server import OK, Seen, always, redirect, scripted_server
 from webdav import FileSystem, RedirectPolicy, Session, exceptions
 from webdav.dav.conditional import Condition, build_if_header_single
-from webdav.exceptions import ClientError, InsecureConfigurationError, TLSConfigError
 from webdav.dav.locks import LockRegistry
 from webdav.dav.properties import build_proppatch_body
+from webdav.exceptions import ClientError, InsecureConfigurationError, TLSConfigError
 from webdav.transport.redirects import effective_origin
 from webdav.transport.tls import SSLContextAdapter, TLSOptions, build_ssl_context
 

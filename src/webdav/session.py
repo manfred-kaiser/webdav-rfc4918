@@ -78,7 +78,7 @@ from webdav.exceptions import (
     raise_for_status,
 )
 from webdav.methods import Method
-from webdav.response import Response, adopt
+from webdav.response import Response
 from webdav.transport.deadline import DeadlineAdapter, watch
 from webdav.transport.redirects import (
     MAX_REDIRECTS,
@@ -1088,7 +1088,7 @@ class Session(requests.Session):
                 raise
             if watcher is not None and watcher.expired.is_set():
                 raise _deadline_error(self.max_response_time)
-        result = adopt(response)
+        result = Response.adopt(response)
         if allow_redirects and (result.is_redirect or result.is_permanent_redirect):
             _refuse(
                 result,
@@ -1314,7 +1314,7 @@ class Session(requests.Session):
             cert=None,
             proxies=settings["proxies"],
         )
-        return adopt(response)
+        return Response.adopt(response)
 
     # -- HTTP verbs, typed to return a webdav Response --------------------
 

@@ -1,40 +1,44 @@
-# Session and module-level API
+# Session and FileSystem
 
-There is one class, {class}`~webdav.session.Session` - a
-{class}`requests.Session` that speaks WebDAV - and the module-level
-functions built on it, exactly as `requests.get` is built on
-`requests.Session`. `webdav.get(url)`, `webdav.propfind(url, depth=1)` and
-`webdav.ls(url)` take a full URL, open a session, do one thing and close it
-again; for several calls use a `Session` - the names, arguments and return
-values are the same (a test compares the signatures). The module-level
-functions also take the connection options - `auth=`, `verify=`, `timeout=`,
-`retry=`, ... - as keyword arguments.
+Two peer classes, one rule each - neither lives inside the other, like `os`
+and `pathlib.Path`. {class}`~webdav.fs.client.FileSystem` treats a server
+like a local filesystem, and every one of its operations is also a
+module-level one-off, exactly as `os.path.exists` is built on `os`:
+`webdav.ls(url)`, `webdav.upload_file(...)` take a full URL, open a
+throwaway `FileSystem`, do one thing and close it again; for several calls
+use `FileSystem` itself - the names, arguments and return values are the
+same (a test compares the signatures). {class}`~webdav.session.Session` is
+a {class}`requests.Session` that speaks WebDAV - `get`, `propfind`,
+`lock`, ... - for protocol-level control (the raw `Response`, a status
+code, a header). It has no module-level mirror: open one explicitly with
+`with webdav.Session(...) as session: ...`.
 
 ```python
 import webdav
 
-r = webdav.propfind("https://webdav.example.org/Photos/", depth=1, auth=("user", "pw"))
-r.raise_for_status()
-for href, resource in r.multistatus.responses.items():
-    print(href, resource.properties.content_length)
+with webdav.FileSystem("https://webdav.example.org", auth=("user", "pw")) as fs:
+    fs.ls("Photos")
+    fs.upload_file("Gorilla.jpg", "Photos/Gorilla.jpg")
 
 with webdav.Session("https://webdav.example.org", auth=("user", "pw")) as session:
-    session.ls("Photos")
-    session.upload_file("Gorilla.jpg", "Photos/Gorilla.jpg")
+    r = session.propfind("/Photos/", depth=1)
+    r.raise_for_status()
+    for href, resource in r.multistatus.responses.items():
+        print(href, resource.properties.content_length)
 ```
 
 ## One naming rule
 
 | Kind | Names | Returns | On an error status |
 |---|---|---|---|
-| **Verbs** | `get`, `put`, `delete`, `head`, `options`, `propfind`, `proppatch`, `mkcol`, `copy`, `move`, `lock`, `unlock`, `request` | a {class}`~webdav.response.Response` | nothing raised, like `requests` - call `raise_for_status()`, or set `raise_on_error=True` |
-| **File-system operations** | `ls`, `info`, `exists`, `isdir`, `isfile`, `get_props`, `set_props`, `mkdir`, `remove`, `open`, `upload_file`, `download_file`, `locked`, ... | plain Python values | a {class}`~webdav.exceptions.WebDAVError` is raised |
+| **Verbs** (`Session` only, no module-level mirror) | `get`, `put`, `delete`, `head`, `options`, `propfind`, `proppatch`, `mkcol`, `copy`, `move`, `lock`, `unlock`, `request` | a {class}`~webdav.response.Response` | nothing raised, like `requests` - call `raise_for_status()`, or set `raise_on_error=True` |
+| **File-system operations** (`FileSystem`, and `webdav.<name>` module-level) | `ls`, `info`, `exists`, `isdir`, `isfile`, `get_props`, `set_props`, `mkdir`, `remove`, `open`, `upload_file`, `download_file`, `locked`, ... | plain Python values | a {class}`~webdav.exceptions.WebDAVError` is raised |
 
 A name that is an HTTP/WebDAV method behaves the same everywhere. A name
 from the file-system vocabulary is a convenience that sends one or several
 requests and interprets the answers.
 
-Both kinds take a full URL - or a path, if the session was given a
+Both kinds take a full URL - or a path, if the session/filesystem was given a
 `base_url`. Verbs take a `url`, file-system operations a `path`; uploads are
 `(local_path, path)`, downloads `(path, local_path)`. Everything after the first
 argument(s) of a file-system operation - `names=`, `set_props=`, `data=`,
@@ -42,18 +46,18 @@ argument(s) of a file-system operation - `names=`, `set_props=`, `data=`,
 
 ## `ls`, `info` and `walk`: one type
 
-{meth}`~webdav.session.Session.ls` returns a list of
-{class}`~webdav.resource.Resource`, {meth}`~webdav.session.Session.info` returns one, and
-{meth}`~webdav.session.Session.walk` yields `(path, directories, files)` whose members are
+{meth}`~webdav.fs.client.FileSystem.ls` returns a list of
+{class}`~webdav.resource.Resource`, {meth}`~webdav.fs.client.FileSystem.info` returns one, and
+{meth}`~webdav.fs.client.FileSystem.walk` yields `(path, directories, files)` whose members are
 the same `Resource` objects - always the same fields, whatever the call. A `Resource` *is*
 its name (a `str`, relative to `base_url` or to the server root without one), so it can be
-passed unchanged to `get`, `info`, `remove`, ...; `.is_dir`, `.size`, `.modified`, `.etag`,
+passed unchanged to `info`, `remove`, `download_file`, ...; `.is_dir`, `.size`, `.modified`, `.etag`,
 `.content_type`, ... carry what the server reported. `walk` yields full names, not
 `os.walk`'s basenames; prune with `dirs[:] = [d for d in dirs if d != "a/tmp"]`.
 
 ## Arguments
 
-The verbs take the keyword arguments of {meth}`requests.Session.request`
+The `Session` verbs take the keyword arguments of {meth}`requests.Session.request`
 (`auth=`, `headers=`, `timeout=`, `verify=`, `cert=`, `stream=`, ...) plus
 `redirect_policy=` for one call. A `copy`/`move` takes
 `destination=`/`overwrite=`; a `PROPFIND` takes `depth=`; a `LOCK` takes
@@ -61,7 +65,8 @@ The verbs take the keyword arguments of {meth}`requests.Session.request`
 you pass yourself always win over these conveniences. The session-level
 options - `redirect_policy`, `trusted_redirect_origins`,
 `max_response_size`, `retry`, `chunk_size`, `raise_on_error` - are
-arguments of `Session(...)`, and of the module-level functions.
+arguments of `Session(...)` and `FileSystem(...)` alike, and of the
+module-level file-system functions.
 
 ## Limits on what a server can make the client do
 
@@ -80,15 +85,15 @@ reason to refuse it. Credentials in a URL (`https://user:pw@host/`) are refused
 
 A path is the plain name - `a%20b.txt` is a file called `a%20b.txt` - and is
 percent-encoded exactly once, entirely (`%`, `?`, `#`, `;`, `+` included).
-A full URL is used as written. What `ls` and `walk` return is what `get`, `info`
-and the others take. Unicode is never re-normalised on the way out.
+A full URL is used as written. What `ls` and `walk` return is what `info`,
+`download_file` and the others take. Unicode is never re-normalised on the way out.
 
 ## Locks
 
-`session.locked(path)` (or `session.locks.add(...)`) makes later writes carry the
-`If` header of the lock. A lock on a collection - `Depth: 0` or `infinity` -
-also covers adding and removing its members (RFC 4918 §7.4); such a write gets
-a tagged list naming the collection. Reads never carry a token. A lock is
+`fs.locked(path)` (or `session.locks.add(...)` at the lower `Session` level) makes
+later writes carry the `If` header of the lock. A lock on a collection - `Depth: 0`
+or `infinity` - also covers adding and removing its members (RFC 4918 §7.4); such a
+write gets a tagged list naming the collection. Reads never carry a token. A lock is
 requested for 600 s unless you say `lock_timeout=` (`None`: infinite).
 
 ## Retries
@@ -110,10 +115,13 @@ credentials in clear text - do not write it to disk or send it anywhere untruste
 ```{eval-rst}
 .. autoclass:: webdav.session.Session
    :members:
-   :exclude-members: locked, refresh_lock
+
+.. autoclass:: webdav.fs.client.FileSystem
+   :members:
 
 .. autoclass:: webdav.response.Response
    :members:
+   :exclude-members: adopt
 
 .. autoclass:: webdav.resource.Resource
    :members:

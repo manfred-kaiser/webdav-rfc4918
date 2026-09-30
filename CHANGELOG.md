@@ -11,13 +11,15 @@ The first release.
 
 ### Added
 
-- An RFC 4918 WebDAV client on top of `requests`, in the shape of `requests`:
-  - module-level functions for one-off calls (`webdav.get(url)`, `webdav.propfind(url, depth=1)`,
-    `webdav.ls(url)`, ...) and one class, `webdav.Session` - a `requests.Session` - with the same names
-    and arguments (a test keeps every `webdav.<name>` signature and return type identical to `Session.<name>`, and the
-    module functions are typed - and completed by your IDE - like the methods; the HTTP verbs take a `url`, the file-system operations a `path`; uploads are
-    `(local_path, path)`, downloads `(path, local_path)`; everything beyond the first argument(s) of a file-system
-    operation - `names=`, `set_props=`, `data=`, `overwrite=`, ... - is keyword-only);
+- An RFC 4918 WebDAV client with two peer classes, like `os`/`pathlib.Path`: `webdav.Session` - a
+  `requests.Session` that also speaks the WebDAV verbs - and `webdav.FileSystem`, which treats a server
+  like a local filesystem. Every `FileSystem` operation is also a module-level one-off
+  (`webdav.ls(url)`, `webdav.upload_file(...)`, ...) with an identical signature (a test compares them,
+  and the module functions are typed - and completed by your IDE - like the methods); `Session` has no
+  module-level mirror, open one explicitly for protocol-level control. The HTTP verbs take a `url`, the
+  file-system operations a `path`; uploads are `(local_path, path)`, downloads `(path, local_path)`;
+  everything beyond the first argument(s) of a file-system operation - `names=`, `set_props=`, `data=`,
+  `overwrite=`, ... - is keyword-only;
   - the HTTP/WebDAV **verbs** (`get`, `put`, `delete`, `head`, `options`, `propfind`, `proppatch`,
     `mkcol`, `copy`, `move`, `lock`, `unlock`) return a `webdav.Response` (a `requests.Response` with
     `.multistatus`, `.active_lock` and a WebDAV-aware `raise_for_status()`) and, like `requests`, do
@@ -30,7 +32,7 @@ The first release.
     a `WebDAVError` on failure;
   - `Session(base_url)` takes paths, without one every call takes a full URL. Paths are plain names,
     percent-encoded exactly once, and what `ls` returns can be passed straight back.
-- Class 2 locking (`Session.locked()`, `refresh_lock()`): a held lock's token is attached to writes
+- Class 2 locking (`FileSystem.locked()`, `refresh_lock()`): a held lock's token is attached to writes
   automatically, also for the members of a locked collection (RFC 4918 §7.4) and for COPY/MOVE, as
   tagged `If` lists (§10.4); reads never carry one. Locks are requested for 600 s unless told otherwise.
 - Conditional writes (`put(if_match=..., overwrite=False)`, `delete(if_match=...)`), extended MKCOL,

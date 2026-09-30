@@ -1,7 +1,9 @@
 """HTTP/WebDAV method name constants."""
 
+from enum import StrEnum
 
-class Method:
+
+class Method(StrEnum):
     """HTTP/WebDAV method name constants, to avoid typos in call sites."""
 
     GET = "GET"

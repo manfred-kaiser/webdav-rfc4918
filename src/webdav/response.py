@@ -89,14 +89,16 @@ class Response(requests.Response):
         ):
             self.multistatus.raise_for_status()
 
+    @classmethod
+    def adopt(cls, response: requests.Response) -> "Response":
+        """Turn a plain ``requests`` response into a :class:`Response`, in place.
 
-def adopt(response: requests.Response) -> Response:
-    """Turn a plain ``requests`` response into a :class:`Response`, in place.
-
-    Done in place (not by copying) so the connection, ``history`` and
-    streaming state stay attached to the one object the caller holds.
-    """
-    # Exactly this class - not a subclass, which has been adopted already.
-    if response.__class__ is requests.Response:
-        response.__class__ = Response
-    return cast("Response", response)
+        Done in place (not by copying) so the connection, ``history`` and
+        streaming state stay attached to the one object the caller holds.
+        Called only by :class:`~webdav.session.Session`, the only place a
+        plain ``requests.Response`` is ever produced.
+        """
+        # Exactly this class - not a subclass, which has been adopted already.
+        if response.__class__ is requests.Response:
+            response.__class__ = cls
+        return cast("Response", response)

@@ -12,11 +12,6 @@ import pytest
 
 from webdav import FileSystem, Session
 from webdav.dav.conditional import Condition, build_if_header
-from webdav.exceptions import (
-    STATUS_CODE_EXCEPTIONS,
-    MultiStatusError,
-    UnsupportedMediaTypeError,
-)
 from webdav.dav.locks import (
     EXCLUSIVE,
     SHARED,
@@ -27,8 +22,13 @@ from webdav.dav.locks import (
 )
 from webdav.dav.multistatus import MultiStatusResponse, Response
 from webdav.dav.properties import DAVProperties, build_propfind_body
-from webdav.session import _parse_dav_header
 from webdav.dav.xml_utils import parse_xml
+from webdav.exceptions import (
+    STATUS_CODE_EXCEPTIONS,
+    MultiStatusError,
+    UnsupportedMediaTypeError,
+)
+from webdav.session import _parse_dav_header
 
 # ---------------------------------------------------------------------------
 # XML/grammar-level fixes - no server needed

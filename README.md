@@ -1,7 +1,7 @@
 <h1 align="center">webdav-rfc4918</h1>
 
 <p align="center">
-  <strong>WebDAV with the API you already know from <code>requests</code>.</strong><br>
+  <strong>Treats a WebDAV server like a local filesystem.</strong><br>
   RFC 4918 compliant, secure by default - with a <code>dav</code> command.
 </p>
 
@@ -15,12 +15,12 @@
 
 ---
 
-`webdav-rfc4918` is a WebDAV client ([RFC 4918](https://www.rfc-editor.org/rfc/rfc4918)) built *on* [`requests`](https://requests.readthedocs.io/), not next to it: `webdav.Session` **is** a `requests.Session`, `webdav.get(url)` works like `requests.get(url)`, and everything you know - `auth=`, `verify=`, adapters, hooks - keeps working. On top of that it speaks the WebDAV vocabulary (`propfind`, `mkcol`, `copy`, `move`, `lock`, ...), and a peer class, `webdav.FileSystem`, treats the same server like a local filesystem (`ls`, `open`, `walk`, `upload_file`, ...) - the same relationship `os` and `pathlib.Path` have for the local one.
+`webdav-rfc4918` is a WebDAV client ([RFC 4918](https://www.rfc-editor.org/rfc/rfc4918)) for Python: `webdav.FileSystem` treats a server like a local filesystem (`ls`, `open`, `walk`, `upload_file`, ...) - the same relationship `os` and `pathlib.Path` have for the local one - and every one of its operations is also a module-level one-off, `webdav.ls(url)`, `webdav.upload_file(...)`, no connection to manage yourself. For protocol-level control it's built *on* [`requests`](https://requests.readthedocs.io/), not next to it: `webdav.Session` **is** a `requests.Session` that additionally speaks the WebDAV vocabulary (`propfind`, `mkcol`, `copy`, `move`, `lock`, ...), and everything you know from `requests` - `auth=`, `verify=`, adapters, hooks - keeps working.
 
-- **One API, two ways to call it**: module-level functions for a single request, `Session`/`FileSystem` for several - same names, same arguments, same return values (a test compares the signatures)
+- **One filesystem API, two ways to call it**: module-level functions for a single request, `FileSystem` for several - same names, same arguments, same return values (a test compares the signatures)
 - **Secure by default**: a malicious server is the attacker this library is written against - TLS verification cannot be switched off, redirects never carry your credentials to another origin, responses are bounded in size and time ([details below](#security))
 - **RFC 4918 to the letter**: multistatus parsing, `Depth`, `Overwrite`, class 2 locking with `If` headers, conditional writes, extended MKCOL
-- **Consistent return types**: the verbs return a `Response`, the file-system operations return plain values and raise a `WebDAVError` - no call changes its result type depending on its arguments
+- **Consistent return types**: `FileSystem` operations return plain values and raise a `WebDAVError`; `Session` verbs (for when you need them) return a `Response` and never raise unless asked - no call changes its result type depending on its arguments
 
 
 ## Quick Start
@@ -34,22 +34,22 @@ import webdav
 
 auth = ("username", "password")
 
-# One-off calls, like requests.get()
-response = webdav.get("https://webdav.example.org/a.txt", auth=auth)
-response = webdav.propfind("https://webdav.example.org/Photos/", depth=1, auth=auth)
-response.multistatus.responses            # the parsed 207 body
-webdav.mkcol("https://webdav.example.org/New/", auth=auth)
+# One-off calls, like os.path / pathlib functions
+webdav.mkdir("https://webdav.example.org/New/", auth=auth)
+webdav.upload_file("Gorilla.jpg", "https://webdav.example.org/Photos/Gorilla.jpg", auth=auth)
+webdav.ls("https://webdav.example.org/Photos/", auth=auth)   # a list of Resource objects
 
-# Several calls: a Session keeps the connection open
-with webdav.Session("https://webdav.example.org", auth=auth) as session:
-    session.put("/a.txt", data=b"hello")
-
-# Filesystem-shaped access, either its own connection or sharing a Session's:
+# Several calls: a FileSystem keeps the connection open
 with webdav.FileSystem("https://webdav.example.org", auth=auth) as fs:
     fs.exists("Documents/Readme.md")
-    fs.ls("Photos")                   # a list of Resource objects
+    fs.ls("Photos")
     fs.upload_file("Gorilla.jpg", "Photos/Gorilla.jpg")
     fs.download_file("Photos/Gorilla.jpg", "copy.jpg")
+
+# Protocol-level control: a Session is a requests.Session that speaks WebDAV
+with webdav.Session("https://webdav.example.org", auth=auth) as session:
+    response = session.propfind("/Photos/", depth=1)
+    response.multistatus.responses            # the parsed 207 body
 ```
 
 
@@ -62,7 +62,7 @@ Two peer classes, one rule each - neither lives inside the other, like `os` and 
 | **`Session`** (verbs) | `get` `put` `delete` `head` `options` `propfind` `proppatch` `mkcol` `copy` `move` `lock` `unlock` `request` | a `webdav.Response` (a `requests.Response`) | nothing is raised, like `requests` - call `raise_for_status()` or pass `raise_on_error=True` |
 | **`FileSystem`** | `ls` `info` `exists` `isdir` `isfile` `get_props` `set_props` `mkdir` `remove` `copy` `move` `open` `walk` `upload_file` `download_file` `locked` ... | plain values | a `WebDAVError` is raised (also an `HTTPError`, where a status caused it) |
 
-Default to `FileSystem` - it reads like ordinary Python filesystem code. Reach for `Session` directly only when you need the raw `Response`/status code, or there's no file-system operation for what you want yet. Use both together, sharing one connection (and its locks), with `FileSystem.from_session(session)`.
+Default to `FileSystem` (or its module-level mirror) - it reads like ordinary Python filesystem code. Reach for `Session` directly only when you need the raw `Response`/status code, or there's no file-system operation for what you want yet - there's no module-level one-off for it, open one explicitly. Use both together, sharing one connection (and its locks), with `FileSystem.from_session(session)`.
 
 `ls` returns a list of `Resource` objects and `info` returns one. A `Resource` **is** its name (a `str`), so it can be handed to any other method unchanged, and it carries what the server reported:
 
@@ -152,7 +152,7 @@ Also `info`, `cat`, `mkdir`, `rm`, `mv` and `cp`. Authentication is `--user` and
 
 ## Documentation
 
-[Session and module-level API](docs/reference/session.md) · [Locking](docs/reference/locking.md) · [Redirects](docs/reference/redirects.md) · [TLS](docs/reference/tls.md) · [CLI](docs/reference/cli.md)
+[Session and FileSystem](docs/reference/session.md) · [Locking](docs/reference/locking.md) · [Redirects](docs/reference/redirects.md) · [TLS](docs/reference/tls.md) · [CLI](docs/reference/cli.md)
 
 Build the docs yourself with `hatch run docs:build`.
 

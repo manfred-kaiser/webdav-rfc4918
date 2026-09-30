@@ -1,4 +1,4 @@
-"""The requests-shaped API: ``webdav.get(url)``, ``Session``, ``Response`` - against a real server."""
+"""The requests-shaped API: ``Session``, ``Response`` - against a real server."""
 
 import copy
 import gzip
@@ -24,21 +24,15 @@ from webdav import (
 from webdav.exceptions import InsecureTransportWarning, MultiStatusError
 
 
-def test_module_level_verbs_roundtrip(server_url: str) -> None:
-    auth: dict[str, Any] = {"auth": AUTH}
-    assert webdav.mkcol(f"{server_url}/docs/", **auth).status_code == 201
-    assert (
-        webdav.put(f"{server_url}/docs/a.txt", data=b"hello", **auth).status_code == 201
-    )
-    assert webdav.get(f"{server_url}/docs/a.txt", **auth).content == b"hello"
-    assert (
-        webdav.head(f"{server_url}/docs/a.txt", **auth).headers["Content-Length"] == "5"
-    )
+def test_session_verbs_roundtrip(server_url: str) -> None:
+    # No module-level one-off for any of these: a Session is what gives you
+    # the raw Response, for all of them, not just move/copy - see webdav.fs.api.
+    verbs = Session(auth=AUTH)
+    assert verbs.mkcol(f"{server_url}/docs/").status_code == 201
+    assert verbs.put(f"{server_url}/docs/a.txt", data=b"hello").status_code == 201
+    assert verbs.get(f"{server_url}/docs/a.txt").content == b"hello"
+    assert verbs.head(f"{server_url}/docs/a.txt").headers["Content-Length"] == "5"
 
-    # `move`/`copy` have no module-level *verb* one-off (webdav.move/.copy are
-    # the raising file-system operations instead, see webdav.fs) - a Session
-    # is what gives you the raw Response for these two.
-    verbs = Session(**auth)
     moved = verbs.move(
         f"{server_url}/docs/a.txt",
         destination=f"{server_url}/docs/b.txt",
@@ -51,22 +45,22 @@ def test_module_level_verbs_roundtrip(server_url: str) -> None:
         depth=0,
     )
     assert copied.status_code == 201
-    verbs.close()
 
-    listing = webdav.propfind(f"{server_url}/docs/", depth=1, **auth)
+    listing = verbs.propfind(f"{server_url}/docs/", depth=1)
     assert listing.status_code == 207
     hrefs = {r.href for r in listing.multistatus.responses.values()}
     assert {"/docs/b.txt", "/docs/c.txt"} <= hrefs
 
-    assert webdav.delete(f"{server_url}/docs/", **auth).status_code == 204
-    assert "options" in dir(webdav)
-    assert "DAV" in webdav.options(server_url, **auth).headers
+    assert verbs.delete(f"{server_url}/docs/").status_code == 204
+    assert "DAV" in verbs.options(server_url).headers
+    verbs.close()
 
 
 def test_module_level_convenience_matches_the_verbs(server_url: str) -> None:
     auth: dict[str, Any] = {"auth": AUTH}
     webdav.mkdir(f"{server_url}/docs", **auth)
-    webdav.put(f"{server_url}/docs/a.txt", data=b"hello", **auth)
+    with webdav.open(f"{server_url}/docs/a.txt", "wb", **auth) as fobj:
+        fobj.write(b"hello")
 
     assert webdav.exists(f"{server_url}/docs/a.txt", **auth)
     assert not webdav.exists(f"{server_url}/docs/nope.txt", **auth)
@@ -93,7 +87,7 @@ def test_upload_and_download_file(server_url: str, tmp_path: Path) -> None:
 def test_response_is_a_requests_response_and_its_errors_are_requests_errors(
     server_url: str,
 ) -> None:
-    response = webdav.get(f"{server_url}/missing.txt", auth=AUTH)
+    response = Session(auth=AUTH).get(f"{server_url}/missing.txt")
     assert isinstance(response, requests.Response)
     assert isinstance(response, Response)
     assert response.status_code == 404
@@ -107,7 +101,7 @@ def test_response_is_a_requests_response_and_its_errors_are_requests_errors(
 
 def test_raise_on_error_option(server_url: str) -> None:
     with pytest.raises(requests.HTTPError):
-        webdav.get(f"{server_url}/missing.txt", auth=AUTH, raise_on_error=True)
+        Session(auth=AUTH, raise_on_error=True).get(f"{server_url}/missing.txt")
 
 
 def test_session_with_base_url_takes_paths(server_url: str) -> None:
@@ -647,8 +641,6 @@ def test_response_errors_carry_the_path() -> None:
 def test_propfind_makes_you_say_which_depth() -> None:
     with pytest.raises(TypeError, match="depth"):
         Session().propfind("http://unused.invalid/")  # type: ignore[call-arg]
-    with pytest.raises(TypeError, match="depth"):
-        webdav.propfind("http://unused.invalid/")  # type: ignore[call-arg]
 
 
 def test_depth_none_is_the_only_way_to_send_no_depth_header() -> None:

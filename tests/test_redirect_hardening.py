@@ -21,8 +21,8 @@ from webdav import (
     RedirectPolicy,
     Session,
 )
-from webdav.exceptions import ClientError
 from webdav.dav.locks import LockRegistry
+from webdav.exceptions import ClientError
 from webdav.transport.redirects import effective_origin, redact_url
 
 # ---------------------------------------------------------------------------

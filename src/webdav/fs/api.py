@@ -1,10 +1,12 @@
 """Module-level file-system API: ``webdav.ls(url)``, ``webdav.mkdir(url)``, ...
 
-Mirrors :class:`~webdav.fs.client.FileSystem` exactly as :mod:`webdav.api`
-mirrors :class:`~webdav.session.Session` - same names, arguments and return
-values (``tests/test_api_consistency.py`` compares them); each function
-opens a throwaway :class:`~webdav.fs.client.FileSystem`, does one thing,
-closes it again.
+Mirrors :class:`~webdav.fs.client.FileSystem` exactly - same names,
+arguments and return values (``tests/test_api_consistency.py`` compares
+them); each function opens a throwaway :class:`~webdav.fs.client.FileSystem`,
+does one thing, closes it again. There is no equivalent for
+:class:`~webdav.session.Session`: its verbs are protocol-level tools for
+callers who already need a ``Session`` open, not one-off calls, so use
+``with webdav.Session(...) as session: session.get(...)`` directly instead.
 """
 
 # Parameters mirror FileSystem, so they shadow module-level names (open, set_props).
@@ -85,7 +87,9 @@ def _new_filesystem(session_options: "dict[str, Any]") -> FileSystem:
     filesystem = FileSystem(**session_options)
     if max_response_time is not None:
         # FileSystem *is* the internal API Session's file-system layer composes against.
-        filesystem._session.max_response_time = max_response_time  # noqa: SLF001  # pylint: disable=protected-access
+        # pylint: disable-next=protected-access
+        session = filesystem._session  # noqa: SLF001
+        session.max_response_time = max_response_time
     return filesystem
 
 

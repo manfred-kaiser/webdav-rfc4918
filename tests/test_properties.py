@@ -16,8 +16,8 @@ from hypothesis import strategies as st
 
 from webdav import RedirectPolicy, Session
 from webdav.dav.locks import LockRegistry
-from webdav.transport.redirects import effective_origin, redact_url
 from webdav.dav.urls import join_url_path
+from webdav.transport.redirects import effective_origin, redact_url
 
 pytestmark = pytest.mark.filterwarnings("ignore")
 

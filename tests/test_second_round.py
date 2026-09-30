@@ -592,18 +592,21 @@ def test_valid_response_limits_are_accepted() -> None:
     assert session.max_response_time == 12.5
 
 
-def test_the_module_level_functions_take_max_response_time_and_reject_typos_at_the_call() -> (
-    None
-):
+def test_the_module_level_functions_reject_typos_at_the_call() -> None:
     import webdav
 
+    with pytest.raises(TypeError, match="bogus"):
+        webdav.walk("http://unused.invalid/", bogus=1)  # type: ignore[call-arg]
+
+
+def test_a_session_takes_max_response_time_after_construction() -> None:
     with scripted_server(always((200, {NO_CONTENT_LENGTH: "1"}, b"x" * 100))) as (
         url,
         _rec,
     ):
-        assert webdav.get(f"{url}/f", max_response_time=30).content == b"x" * 100
-    with pytest.raises(TypeError, match="bogus"):
-        webdav.walk("http://unused.invalid/", bogus=1)  # type: ignore[call-arg]
+        session = Session()
+        session.max_response_time = 30
+        assert session.get(f"{url}/f").content == b"x" * 100
 
 
 def test_cli_urls_are_percent_decoded_and_ipv6_hosts_keep_their_brackets() -> None:

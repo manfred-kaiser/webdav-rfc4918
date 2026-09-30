@@ -164,7 +164,7 @@ disable = [
   # (FeatureDetection, Method, PropStat, RetryFunc) - a near-universal
   # pylint nitpick against small, single-purpose classes.
   "too-few-public-methods",
-  # api.py mirrors Session on purpose (same signatures, thin delegation).
+  # fs/api.py mirrors FileSystem on purpose (same signatures, thin delegation).
   "duplicate-code",
   # urllib3 connections get request/getresponse from http.client; pylint cannot see it.
   "no-member",

@@ -16,14 +16,14 @@ $ pip install webdav-rfc4918
 ```python
 import webdav
 
-# One-off call, like requests.get()
-webdav.get("https://webdav.example.org/a.txt", auth=("username", "password"))
+# One-off call, like os.path.exists()
+webdav.exists("https://webdav.example.org/a.txt", auth=("username", "password"))
 
-# Several calls: a Session - same names, same arguments, same results
-with webdav.Session("https://webdav.example.org", auth=("username", "password")) as session:
-    session.exists("Documents/Readme.md")
-    session.ls("Photos")                   # a list of Resource objects
-    session.upload_file("Gorilla.jpg", "Photos/Gorilla.jpg")
+# Several calls: a FileSystem - same names, same arguments, same results
+with webdav.FileSystem("https://webdav.example.org", auth=("username", "password")) as fs:
+    fs.exists("Documents/Readme.md")
+    fs.ls("Photos")                   # a list of Resource objects
+    fs.upload_file("Gorilla.jpg", "Photos/Gorilla.jpg")
 ```
 
 ```{toctree}
