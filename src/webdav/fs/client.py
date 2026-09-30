@@ -430,13 +430,24 @@ class FileSystem:
     def _unlock_quietly(self, url: str, token: str) -> None:
         """Release the lock ``token`` on ``url``, never raising (and never hiding that it failed)."""
         try:
-            self._session.unlock(url, token, raise_on_error=False)
+            response = self._session.unlock(url, token, raise_on_error=False)
         except requests.RequestException as exc:
             # A failed UNLOCK (a dropped connection, a refusal) must not
             # replace whatever the ``with`` body raised - nor hide that the
             # lock is still there: say so, and go on.
             _LOGGER.warning(
                 "could not release the lock on %s: %s", redact_url(url), exc
+            )
+            return
+        if not HTTPStatus.OK <= response.status_code < HTTPStatus.MULTIPLE_CHOICES:
+            # RFC 4918 sec. 9.11.1: 403 - not permitted to remove it; 409 - the
+            # resource was not locked (it may have timed out) or the URL is outside
+            # the lock's scope. Either way the server did not release it now.
+            _LOGGER.warning(
+                "could not release the lock on %s: the server answered %s %s",
+                redact_url(url),
+                response.status_code,
+                response.reason or "",
             )
 
     def refresh_lock(

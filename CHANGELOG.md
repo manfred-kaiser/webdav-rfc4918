@@ -77,7 +77,9 @@ they were fixed):
 - **A mistake fails loudly instead of doing the opposite**: an unknown keyword argument (`allow_redirect=False`,
   `verfiy=True`, `timout=5`) is a `TypeError` like in `requests`, not silently ignored; every limit and
   setting (`timeout`, `base_url`, `redirect_policy`, `max_response_size`, `max_response_time`,
-  `max_redirects`, `chunk_size`, `retry`) is checked when it is set, in the constructor and later;
+  `max_redirects`, `chunk_size`, `retry`) is checked when it is set, in the constructor and later; a
+  flag (`allow_redirects`, `stream`, `raise_on_error`, `trust_env`) has to be a real `bool` - `0`, `""` or
+  `"no"` is a `TypeError`, not quietly read as false (or `"false"` as true);
   `RedirectPolicy.WHITELIST` needs trusted origins also when set later or for one call.
 - **Credentials do not leak**: not into exception messages, warnings or logs (URL userinfo and the query
   of a signed URL are redacted); an `InsecureTransportWarning` names host and port only.

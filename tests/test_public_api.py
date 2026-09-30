@@ -113,7 +113,6 @@ _SESSION_ALL = [
 #: Attributes ``Session()`` carries on the instance.
 _SESSION_INSTANCE_ATTRIBUTES = [
     "locks",
-    "raise_on_error",
 ]
 
 #: The properties ``Session`` forwards to (or derives from) its transport.
@@ -130,6 +129,7 @@ _SESSION_PROPERTIES = [
     "max_response_time",
     "params",
     "proxies",
+    "raise_on_error",
     "redirect_forward_headers",
     "redirect_policy",
     "retry",

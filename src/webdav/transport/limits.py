@@ -20,6 +20,23 @@ def _is_positive_seconds(value: object) -> bool:
     return _is_number(value) and math.isfinite(value) and value > 0  # type: ignore[operator,arg-type]
 
 
+def check_flag(name: str, value: object) -> bool:
+    """Return ``value`` if it is exactly ``True`` or ``False``.
+
+    ``0``, ``""`` or ``"no"`` would be read as a flag by ``requests`` (and
+    ``"false"`` as true); for an option that decides whether a redirect is
+    followed or an error raised, a value that is not one is a mistake.
+
+    Raises:
+        TypeError: It is not a ``bool``.
+
+    """
+    if not isinstance(value, bool):
+        msg = f"{name} must be True or False, got {value!r}"
+        raise TypeError(msg)
+    return value
+
+
 def check_chunk_size(value: int) -> int:
     """Return ``value`` if it is a usable chunk size.
 
@@ -102,6 +119,7 @@ def check_max_redirects(value: int) -> int:
 __all__ = [
     "DEFAULT_CHUNK_SIZE",
     "check_chunk_size",
+    "check_flag",
     "check_max_redirects",
     "check_max_size",
     "check_max_time",

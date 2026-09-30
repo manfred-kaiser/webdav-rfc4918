@@ -284,17 +284,44 @@ def test_a_name_that_resembles_nothing_is_refused_without_a_suggestion() -> None
         Session("http://dav.example").get("/x", zzz=1)
 
 
-@pytest.mark.parametrize("falsy", [False, 0, None])
-def test_any_false_allow_redirects_means_never(falsy: object) -> None:
+def test_allow_redirects_false_means_never_and_true_or_absent_means_the_policy() -> (
+    None
+):
     with scripted_server(always(OK)) as (b_url, b_rec):
         with scripted_server(lambda _r: redirect(307, f"{b_url}/x")) as (a_url, _a):
             session = Session(retry=False, redirect_policy=RedirectPolicy.ALL)
-            response = session.get(f"{a_url}/x", allow_redirects=falsy)
-    if falsy is None:  # not given: the session's policy applies
-        assert b_rec.requests
-    else:
-        assert response.status_code == 307
-        assert b_rec.requests == []
+            assert session.get(f"{a_url}/x", allow_redirects=False).status_code == 307
+            assert b_rec.requests == []
+            for given in (True, None):
+                assert (
+                    session.get(f"{a_url}/x", allow_redirects=given).status_code == 204
+                )
+            assert len(b_rec.requests) == 2
+
+
+@pytest.mark.parametrize("value", [0, 1, "", "no", "False", [], object()])
+@pytest.mark.parametrize("option", ["allow_redirects", "stream", "raise_on_error"])
+def test_a_flag_that_is_not_a_bool_is_refused_and_nothing_is_sent(
+    option: str, value: object
+) -> None:
+    options: dict[str, Any] = {option: value}
+    with scripted_server(always(OK)) as (url, rec):
+        with pytest.raises(TypeError, match=f"{option} must be True or False"):
+            Session(retry=False).get(f"{url}/x", **options)
+    assert rec.requests == []
+
+
+@pytest.mark.parametrize("value", [0, 1, "", "no", None])
+@pytest.mark.parametrize("option", ["raise_on_error", "stream", "trust_env"])
+def test_a_flag_of_the_session_has_to_be_a_bool_too(option: str, value: object) -> None:
+    session = Session()
+    before = getattr(session, option)
+    with pytest.raises(TypeError, match=f"{option} must be True or False"):
+        setattr(session, option, value)
+    assert getattr(session, option) == before
+    if option == "raise_on_error":
+        with pytest.raises(TypeError, match=option):
+            Session(raise_on_error=value)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

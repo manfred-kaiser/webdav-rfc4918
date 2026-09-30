@@ -79,6 +79,7 @@ from webdav.transport.guards import (
 from webdav.transport.limits import (
     DEFAULT_CHUNK_SIZE,
     check_chunk_size,
+    check_flag,
     check_max_redirects,
     check_max_size,
     check_max_time,
@@ -205,8 +206,9 @@ def _merge_arguments(args: "tuple[Any, ...]", kwargs: "dict[str, Any]") -> None:
     that quietly does the opposite of what was asked.
 
     Raises:
-        TypeError: Too many positional arguments, one given twice, or an
-            unknown keyword argument.
+        TypeError: Too many positional arguments, one given twice, an
+            unknown keyword argument, or ``allow_redirects``/``stream`` that
+            is not a ``bool``.
 
     """
     if len(args) > len(_REQUEST_PARAMS):
@@ -217,6 +219,9 @@ def _merge_arguments(args: "tuple[Any, ...]", kwargs: "dict[str, Any]") -> None:
             msg = f"request() got multiple values for argument {name!r}"
             raise TypeError(msg)
         kwargs[name] = value
+    for flag in ("allow_redirects", "stream"):
+        if kwargs.get(flag) is not None:
+            check_flag(flag, kwargs[flag])
     for name in kwargs:
         if name not in _REQUEST_PARAMS:
             msg = f"request() got an unexpected keyword argument {name!r}"
@@ -388,6 +393,7 @@ class Session:
         self.max_redirects = max_redirects
         self._max_response_size: int | None = None
         self.max_response_size = max_response_size
+        self._raise_on_error = False
         self.raise_on_error = raise_on_error
         self._chunk_size = DEFAULT_CHUNK_SIZE
         self.chunk_size = chunk_size
@@ -505,7 +511,7 @@ class Session:
 
     @stream.setter
     def stream(self, value: bool) -> None:
-        self._transport.stream = value
+        self._transport.stream = check_flag("stream", value)
 
     @property
     def verify(self) -> "bool | str | None":
@@ -532,7 +538,7 @@ class Session:
 
     @trust_env.setter
     def trust_env(self, value: bool) -> None:
-        self._transport.trust_env = value
+        self._transport.trust_env = check_flag("trust_env", value)
 
     def mount(self, prefix: str, adapter: requests.adapters.BaseAdapter) -> None:
         """Mount a transport adapter - see :meth:`requests.Session.mount`."""
@@ -545,6 +551,20 @@ class Session:
     def _redirect_location(self, response: requests.Response) -> "str | None":
         """The ``Location`` header's value, decoded - what :meth:`requests.Session.get_redirect_target` reads."""
         return self._transport.get_redirect_target(response)
+
+    @property
+    def raise_on_error(self) -> bool:
+        """Whether every response is passed to :meth:`Response.raise_for_status` before it is returned.
+
+        Raises:
+            TypeError: When set to anything but ``True`` or ``False``.
+
+        """
+        return self._raise_on_error
+
+    @raise_on_error.setter
+    def raise_on_error(self, value: bool) -> None:
+        self._raise_on_error = check_flag("raise_on_error", value)
 
     @property
     def retry(self) -> "RetryFunc":
@@ -814,6 +834,8 @@ class Session:
         session's ``raise_on_error`` says so (``raise_on_error=`` overrides
         that for this one call).
         """
+        if raise_on_error is not None:
+            check_flag("raise_on_error", raise_on_error)
         response = self._fetch(
             method, url, *args, redirect_policy=redirect_policy, **kwargs
         )
@@ -863,7 +885,7 @@ class Session:
         self, allow_redirects: object, override: "RedirectPolicy | None"
     ) -> RedirectPolicy:
         """The redirect policy one request runs under: ``allow_redirects=False`` is "never", then the call's own, then the session's."""
-        if allow_redirects is not None and not allow_redirects:
+        if allow_redirects is False:
             return RedirectPolicy.NEVER
         if override is None:
             return self.redirect_policy
@@ -1414,6 +1436,15 @@ class Session:
         A token in :attr:`locks` is dropped from it once the server has
         released the lock: a released token must not go on being attached to
         the writes that follow.
+
+        RFC 4918 sec. 9.11: the lock is named by the ``Lock-Token`` header
+        alone (no ``If`` header is needed), ``url`` must be within the scope of
+        the lock, and ``204`` is the normal answer. A ``403`` means the
+        principal may not remove the lock, a ``409`` that the resource was not
+        locked (the lock may have timed out) or that ``url`` is outside the
+        lock's scope - in that case the token stays in :attr:`locks`, since the
+        lock may still exist. An UNLOCK is idempotent but never retried here: the
+        repeat of one whose answer was lost would be answered ``409``.
         """
         token = token.strip("<>")
         check_token(token)

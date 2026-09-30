@@ -7,7 +7,7 @@ import requests
 import requests.adapters
 
 from tests.scripted_server import Seen, scripted_server
-from webdav import Response, Session
+from webdav import FileSystem, Response, Session
 from webdav.exceptions import STATUS_CODE_EXCEPTIONS, ResourceNotFoundError
 
 TOKEN = "opaquelocktoken:abc"  # noqa: S105
@@ -85,3 +85,36 @@ def test_send_hands_back_a_webdav_response_even_from_an_adapter_the_caller_mount
         response = session.send(prepared)
     assert type(response) is Response
     assert response.redirect_refusal is None
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"), [(403, "Forbidden"), (409, "Conflict"), (500, "Internal")]
+)
+def test_a_lock_the_server_would_not_release_is_reported_not_swallowed(
+    caplog: pytest.LogCaptureFixture, status: int, reason: str
+) -> None:
+    # RFC 4918 sec. 9.11.1: 403 (may not remove it) and 409 (not locked, or out of scope).
+    with scripted_server(_server(unlock_status=status)) as (url, rec):
+        fs = FileSystem(retry=False)
+        with caplog.at_level("WARNING", logger="webdav"):
+            with fs.locked(f"{url}/f"):
+                pass
+    assert [r.method for r in rec.requests] == ["LOCK", "UNLOCK"]
+    assert f"the server answered {status}" in caplog.text
+    assert "could not release the lock" in caplog.text
+
+
+def test_a_released_lock_is_not_reported(caplog: pytest.LogCaptureFixture) -> None:
+    with scripted_server(_server()) as (url, rec):
+        with caplog.at_level("WARNING", logger="webdav"):
+            with FileSystem(retry=False).locked(f"{url}/f"):
+                pass
+    assert rec.requests[1].headers["lock-token"] == f"<{TOKEN}>"
+    assert "if" not in rec.requests[1].headers  # sec. 9.11: no If header is needed
+    assert caplog.text == ""
+
+
+def test_unlock_is_never_retried() -> None:
+    with scripted_server(_server(unlock_status=503)) as (url, rec):
+        assert Session().unlock(f"{url}/f", TOKEN).status_code == 503
+    assert [r.method for r in rec.requests] == ["UNLOCK"]
