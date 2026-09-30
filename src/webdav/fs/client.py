@@ -81,8 +81,8 @@ from webdav.session import (
     _check_depth,
     _display,
 )
-from webdav.transport.redirects import redact_url
 from webdav.transport.streaming import IterStream, SizedIterator
+from webdav.url_safety import redact_url
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable

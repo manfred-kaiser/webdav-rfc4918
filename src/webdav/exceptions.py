@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 import requests.exceptions
 
-from webdav.transport.redirects import redact_url
+from webdav.url_safety import redact_url
 
 if TYPE_CHECKING:
     from requests import Response

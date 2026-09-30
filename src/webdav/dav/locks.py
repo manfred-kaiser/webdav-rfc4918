@@ -28,7 +28,7 @@ from webdav.dav.xml_utils import (
     to_xml_string,
 )
 from webdav.exceptions import ClientError, MalformedResponseError
-from webdav.transport.redirects import effective_origin
+from webdav.url_safety import effective_origin
 
 #: What a lock token may look like. A token is a Coded-URL (RFC 4918 sec.
 #: 10.4): an absolute URI, in ASCII, that this library puts between ``<`` and
@@ -58,7 +58,7 @@ if TYPE_CHECKING:
 
     from requests import Response as HTTPResponse
 
-    from webdav.transport.redirects import Origin
+    from webdav.url_safety import Origin
 
 #: How long a lock is requested for when the caller says nothing, in seconds.
 #: Deliberately finite: a client that crashes or loses the network never

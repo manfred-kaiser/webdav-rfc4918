@@ -23,7 +23,7 @@ from webdav import (
 )
 from webdav.dav.locks import LockRegistry
 from webdav.exceptions import ClientError
-from webdav.transport.redirects import effective_origin, redact_url
+from webdav.url_safety import effective_origin, redact_url
 
 # ---------------------------------------------------------------------------
 # effective_origin: the one place that decides "same server or not"

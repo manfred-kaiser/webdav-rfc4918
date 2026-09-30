@@ -83,14 +83,13 @@ from webdav.transport.redirects import (
     MAX_REDIRECTS,
     RedirectPolicy,
     build_trust_check,
-    effective_origin,
     has_replayable_body,
-    redact_url,
     validate_policy,
 )
 from webdav.transport.retry import retry as _retry
 from webdav.transport.streaming import DEFAULT_CHUNK_SIZE
 from webdav.transport.tls import mount_mtls_adapter, warn_hardening_disabled
+from webdav.url_safety import effective_origin, redact_url
 
 if TYPE_CHECKING:
     import urllib.parse
@@ -103,9 +102,9 @@ if TYPE_CHECKING:
 
     from webdav.dav.multistatus import MultiStatusResponse
     from webdav.dav.properties import PropName
-    from webdav.transport.redirects import Origin
     from webdav.transport.retry import RetryFunc
     from webdav.transport.tls import TLSOptions
+    from webdav.url_safety import Origin
 
     AuthTypes = AuthBase | tuple[str, str] | None
     CertTypes = str | tuple[str, str] | None
