@@ -9,10 +9,10 @@ import pytest
 
 from tests.scripted_server import OK, Seen, always, scripted_server
 from webdav import FileSystem, Session
-from webdav.date_utils import from_rfc1123, fromisoformat
+from webdav.dav.date_utils import from_rfc1123, fromisoformat
 from webdav.exceptions import MalformedResponseError
-from webdav.locks import LockRegistry
-from webdav.properties import build_propfind_body, build_proppatch_body
+from webdav.dav.locks import LockRegistry
+from webdav.dav.properties import build_propfind_body, build_proppatch_body
 
 # ---------------------------------------------------------------------------
 # Property names and values cannot change the shape of the XML

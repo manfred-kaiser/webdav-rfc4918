@@ -11,7 +11,7 @@ from webdav import (
     ResourceLockedError,
     ResourceNotFoundError,
 )
-from webdav.locks import EXCLUSIVE
+from webdav.dav.locks import EXCLUSIVE
 
 
 def test_mkdir_and_ls(fs: FileSystem) -> None:

@@ -12,16 +12,18 @@ from http.client import responses as _reason_phrases
 from typing import TYPE_CHECKING
 from xml.etree.ElementTree import Element
 
-from webdav.exceptions import MalformedResponseError, MultiStatusError
-from webdav.properties import DAVProperties, PropStat
-from webdav.urls import (
+import requests
+
+from webdav.dav.properties import DAVProperties, PropStat
+from webdav.dav.urls import (
     URL,
     join_url_path,
     path_key,
     relative_url_to,
     strip_trailing_slash,
 )
-from webdav.xml_utils import dav, parse_xml, split_clark
+from webdav.dav.xml_utils import dav, parse_xml, split_clark
+from webdav.exceptions import MalformedResponseError, MultiStatusError
 
 if TYPE_CHECKING:
     from requests import Response as HTTPResponse
@@ -159,7 +161,7 @@ class MultiStatusResponse:
 
     Note that a PROPFIND/PROPPATCH response can be partial - properties
     not requested, or not supported by a resource, simply won't appear;
-    see :attr:`~webdav.properties.DAVProperties.failed` for properties the
+    see :attr:`~webdav.dav.properties.DAVProperties.failed` for properties the
     server explicitly rejected.
     """
 
@@ -288,7 +290,7 @@ def parse_multistatus_response(http_response: "HTTPResponse") -> MultiStatusResp
             PROPFIND) or its body is not a well-formed multistatus.
 
     """
-    if http_response.status_code != 207:
+    if http_response.status_code != requests.codes.multi_status:
         msg = f"the server answered {http_response.status_code}, not a 207 Multi-Status - is this a WebDAV server?"
         raise MalformedResponseError(msg)
     return MultiStatusResponse(http_response.content)

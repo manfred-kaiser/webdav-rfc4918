@@ -11,13 +11,13 @@ from xml.etree.ElementTree import Element
 import pytest
 
 from webdav import FileSystem, Session
-from webdav.conditional import Condition, build_if_header
+from webdav.dav.conditional import Condition, build_if_header
 from webdav.exceptions import (
     STATUS_CODE_EXCEPTIONS,
     MultiStatusError,
     UnsupportedMediaTypeError,
 )
-from webdav.locks import (
+from webdav.dav.locks import (
     EXCLUSIVE,
     SHARED,
     ActiveLock,
@@ -25,10 +25,10 @@ from webdav.locks import (
     build_lock_body,
     format_timeout,
 )
-from webdav.multistatus import MultiStatusResponse, Response
-from webdav.properties import DAVProperties, build_propfind_body
+from webdav.dav.multistatus import MultiStatusResponse, Response
+from webdav.dav.properties import DAVProperties, build_propfind_body
 from webdav.session import _parse_dav_header
-from webdav.xml_utils import parse_xml
+from webdav.dav.xml_utils import parse_xml
 
 # ---------------------------------------------------------------------------
 # XML/grammar-level fixes - no server needed

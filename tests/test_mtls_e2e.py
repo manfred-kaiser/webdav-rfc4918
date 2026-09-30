@@ -9,7 +9,7 @@ import requests.exceptions
 from tests.mtls_server import Certificates, mtls_webdav_server
 from webdav import FileSystem
 from webdav.exceptions import TLSConfigError
-from webdav.tls import TLSOptions
+from webdav.transport.tls import TLSOptions
 
 
 @pytest.fixture

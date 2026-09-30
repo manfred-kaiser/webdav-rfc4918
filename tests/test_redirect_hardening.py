@@ -22,8 +22,8 @@ from webdav import (
     Session,
 )
 from webdav.exceptions import ClientError
-from webdav.locks import LockRegistry
-from webdav.redirects import effective_origin, redact_url
+from webdav.dav.locks import LockRegistry
+from webdav.transport.redirects import effective_origin, redact_url
 
 # ---------------------------------------------------------------------------
 # effective_origin: the one place that decides "same server or not"

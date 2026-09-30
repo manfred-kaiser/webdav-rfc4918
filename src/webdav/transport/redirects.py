@@ -229,7 +229,7 @@ def has_replayable_body(kwargs: "dict[str, object]") -> bool:
     ``None``/``str``/``bytes`` (and a ``json=`` value) are - a lack of a
     body is trivially replayable, and a string/bytes body is read fresh
     from memory every time. Anything else (a generator, an
-    already-partially-read file object, :class:`~webdav.streaming.SizedIterator`,
+    already-partially-read file object, :class:`~webdav.transport.streaming.SizedIterator`,
     ``files=``, ...) may already have been exhausted by a first attempt -
     resending it would silently send a truncated/empty body instead of
     raising, which is worse than not following at all.

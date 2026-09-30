@@ -12,11 +12,10 @@ import re
 from typing import TYPE_CHECKING, Any
 from xml.etree.ElementTree import Element
 
-from webdav.date_utils import from_rfc1123, fromisoformat
-from webdav.exceptions import MalformedResponseError
-from webdav.locks import ActiveLock, LockEntry
-from webdav.parse_utils import parse_uint
-from webdav.xml_utils import (
+from webdav.dav.date_utils import from_rfc1123, fromisoformat
+from webdav.dav.locks import ActiveLock, LockEntry
+from webdav.dav.parse_utils import parse_uint
+from webdav.dav.xml_utils import (
     DAV_NAMESPACE,
     clark,
     dav,
@@ -24,6 +23,7 @@ from webdav.xml_utils import (
     sub_dav_element,
     to_xml_string,
 )
+from webdav.exceptions import MalformedResponseError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable

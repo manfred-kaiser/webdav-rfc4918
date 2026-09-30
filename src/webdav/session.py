@@ -20,7 +20,7 @@ rather than a part of it (``FileSystem.from_session(session)`` shares one).
 A verb takes a full URL, or a path if the session has a ``base_url``.
 
 It also brings a redirect policy that is safe for methods other than
-``GET`` (see :mod:`webdav.redirects` - ``requests`` itself re-sends a
+``GET`` (see :mod:`webdav.transport.redirects` - ``requests`` itself re-sends a
 redirected ``PROPFIND`` as a bodiless request or turns it into a ``GET``),
 automatic ``If`` headers for locks the session holds, retries of transient
 failures, and a cap on how large a response body may be declared.
@@ -56,8 +56,19 @@ from requests.hooks import dispatch_hook
 from requests.structures import CaseInsensitiveDict
 from requests.utils import default_headers, requote_uri, resolve_proxies
 
-from webdav.conditional import entity_tag
-from webdav.deadline import DeadlineAdapter, watch
+from webdav.dav.conditional import entity_tag
+from webdav.dav.locks import (
+    DEFAULT_LOCK_TIMEOUT,
+    EXCLUSIVE,
+    LockRegistry,
+    build_lock_body,
+    check_token,
+    format_timeout,
+)
+from webdav.dav.multistatus import parse_multistatus_response
+from webdav.dav.parse_utils import parse_uint
+from webdav.dav.properties import build_propfind_body, build_proppatch_body
+from webdav.dav.urls import URL, join_url, relative_url_to
 from webdav.exceptions import (
     STATUS_CODE_EXCEPTIONS,
     ClientError,
@@ -66,19 +77,10 @@ from webdav.exceptions import (
     InsecureTransportWarning,
     raise_for_status,
 )
-from webdav.locks import (
-    DEFAULT_LOCK_TIMEOUT,
-    EXCLUSIVE,
-    LockRegistry,
-    build_lock_body,
-    check_token,
-    format_timeout,
-)
 from webdav.methods import Method
-from webdav.multistatus import parse_multistatus_response
-from webdav.parse_utils import parse_uint
-from webdav.properties import build_propfind_body, build_proppatch_body
-from webdav.redirects import (
+from webdav.response import Response, adopt
+from webdav.transport.deadline import DeadlineAdapter, watch
+from webdav.transport.redirects import (
     MAX_REDIRECTS,
     RedirectPolicy,
     build_trust_check,
@@ -87,11 +89,9 @@ from webdav.redirects import (
     redact_url,
     validate_policy,
 )
-from webdav.response import Response, adopt
-from webdav.retry import retry as _retry
-from webdav.streaming import DEFAULT_CHUNK_SIZE
-from webdav.tls import mount_mtls_adapter
-from webdav.urls import URL, join_url, relative_url_to
+from webdav.transport.retry import retry as _retry
+from webdav.transport.streaming import DEFAULT_CHUNK_SIZE
+from webdav.transport.tls import mount_mtls_adapter
 
 if TYPE_CHECKING:
     import urllib.parse
@@ -100,11 +100,11 @@ if TYPE_CHECKING:
 
     from requests.auth import AuthBase
 
-    from webdav.multistatus import MultiStatusResponse
-    from webdav.properties import PropName
-    from webdav.redirects import Origin
-    from webdav.retry import RetryFunc
-    from webdav.tls import TLSOptions
+    from webdav.dav.multistatus import MultiStatusResponse
+    from webdav.dav.properties import PropName
+    from webdav.transport.redirects import Origin
+    from webdav.transport.retry import RetryFunc
+    from webdav.transport.tls import TLSOptions
 
     AuthTypes = AuthBase | tuple[str, str] | None
     CertTypes = str | tuple[str, str] | None
@@ -544,7 +544,7 @@ def _configure_tls(
 ) -> None:
     """Wire up ``cert``/``verify`` - via plain ``requests`` attrs, or a hardened adapter.
 
-    The hardened :mod:`webdav.tls` adapter is only needed for what plain
+    The hardened :mod:`webdav.transport.tls` adapter is only needed for what plain
     ``requests`` cannot express (``tls=...``); everything else uses
     ``requests``' own, well-known ``cert=``/``verify=`` attributes.
     """
@@ -634,14 +634,14 @@ class Session(requests.Session):
             tls: Advanced TLS knobs (encrypted private key, CRL checking,
                 explicit cipher restriction) that plain ``cert=``/
                 ``verify=`` cannot express - see
-                :class:`~webdav.tls.TLSOptions`. Triggers the hardened
-                :mod:`webdav.tls` adapter when given.
+                :class:`~webdav.transport.tls.TLSOptions`. Triggers the hardened
+                :mod:`webdav.transport.tls` adapter when given.
             timeout: Default ``(connect, read)`` timeout (or a single
                 value for both) applied when a request doesn't set its
                 own. ``None`` restores ``requests``' own no-timeout
                 default - not recommended, see :data:`DEFAULT_TIMEOUT`.
             redirect_policy: Which redirects to follow - see
-                :class:`~webdav.redirects.RedirectPolicy`. Overridable
+                :class:`~webdav.transport.redirects.RedirectPolicy`. Overridable
                 per call with ``redirect_policy=``; ``allow_redirects=False``
                 on a call still means "never".
             trusted_redirect_origins: Which redirect targets
@@ -656,7 +656,7 @@ class Session(requests.Session):
             retry: Retry transient failures (429, 5xx,
                 timeouts, dropped connections) of the safe and idempotent
                 methods - or pass a callable implementing
-                :class:`~webdav.retry.RetryFunc` directly.
+                :class:`~webdav.transport.retry.RetryFunc` directly.
             chunk_size: Default chunk size for streaming reads/writes.
             raise_on_error: Call :meth:`Response.raise_for_status` on every
                 response before returning it (``requests`` itself never
@@ -664,7 +664,7 @@ class Session(requests.Session):
 
         Raises:
             ValueError: ``trusted_redirect_origins`` and ``redirect_policy``
-                disagree - see :func:`~webdav.redirects.validate_policy` -
+                disagree - see :func:`~webdav.transport.redirects.validate_policy` -
                 or ``verify`` is ``False``.
 
         """
@@ -688,7 +688,7 @@ class Session(requests.Session):
             raise ValueError(msg)
         super().__init__()
         # Adapters whose connections answer to the whole-request deadline
-        # (see webdav.deadline); ``tls=`` below replaces the https one with
+        # (see webdav.transport.deadline); ``tls=`` below replaces the https one with
         # the mTLS adapter, which has the same property.
         self.mount("https://", DeadlineAdapter())
         self.mount("http://", DeadlineAdapter())
@@ -864,7 +864,7 @@ class Session(requests.Session):
         """Send a request, exactly like :meth:`requests.Session.request`.
 
         Differences: the URL may be relative to ``base_url``; redirects
-        follow this session's :class:`~webdav.redirects.RedirectPolicy`
+        follow this session's :class:`~webdav.transport.redirects.RedirectPolicy`
         (``allow_redirects=False`` still disables them, and
         ``redirect_policy=`` overrides the policy for this one call); a
         held lock's token is attached as an ``If`` header; transient
@@ -1048,7 +1048,7 @@ class Session(requests.Session):
         carried along, a redirect's whole body read into memory, an
         unparseable ``Location`` raising a bare ``ValueError``) is exactly
         what this class exists to keep out of the picture. Redirects are
-        followed - under this session's :class:`~webdav.redirects.RedirectPolicy` -
+        followed - under this session's :class:`~webdav.transport.redirects.RedirectPolicy` -
         by :meth:`request`; a 3xx that reaches the caller of ``send`` is
         returned as it is, with ``redirect_refusal`` set. The timeout,
         certificate-verification and body-size rules apply as they do to
@@ -1412,7 +1412,7 @@ class Session(requests.Session):
             data: The request body. Without one (and without ``props``),
                 the server treats it as ``allprop`` (sec. 9.1).
             props: Property names to request instead of writing the body
-                yourself - see :func:`~webdav.properties.build_propfind_body`.
+                yourself - see :func:`~webdav.dav.properties.build_propfind_body`.
             all_prop: Request ``<d:allprop/>`` explicitly.
             include: Additional named properties to request alongside
                 ``all_prop``.
@@ -1462,7 +1462,7 @@ class Session(requests.Session):
         """Send a ``PROPPATCH`` (RFC 4918 sec. 9.2).
 
         Either ``data`` (the body) or ``set_props``/``remove_props`` (which
-        build it - see :func:`~webdav.properties.build_proppatch_body`).
+        build it - see :func:`~webdav.dav.properties.build_proppatch_body`).
         """
         if set_props is not None or remove_props is not None:
             if data is not None:
@@ -1549,7 +1549,7 @@ class Session(requests.Session):
             url: The resource.
             scope: ``"exclusive"`` or ``"shared"``.
             owner: Plain text, or a pre-built element - see
-                :func:`~webdav.locks.build_lock_body`.
+                :func:`~webdav.dav.locks.build_lock_body`.
             depth: ``"0"`` or ``"infinity"`` (sec. 9.10.4).
             lock_timeout: The ``Timeout`` header - seconds, ``None`` for
                 infinite, or a preference list (the name avoids clashing

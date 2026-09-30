@@ -31,7 +31,7 @@ compression disabled) instead:
 
 ```python
 from webdav import Session
-from webdav.tls import TLSOptions
+from webdav.transport.tls import TLSOptions
 
 session = Session(
     "https://webdav.example.org",
@@ -41,8 +41,8 @@ session = Session(
 ```
 
 ```{eval-rst}
-.. autoclass:: webdav.tls.TLSOptions
+.. autoclass:: webdav.transport.tls.TLSOptions
    :members:
 
-.. autofunction:: webdav.tls.build_ssl_context
+.. autofunction:: webdav.transport.tls.build_ssl_context
 ```

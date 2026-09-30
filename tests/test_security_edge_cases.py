@@ -32,8 +32,8 @@ from webdav import (
     Session,
     WebDAVError,
 )
-from webdav.locks import build_lock_body
-from webdav.xml_utils import parse_xml
+from webdav.dav.locks import build_lock_body
+from webdav.dav.xml_utils import parse_xml
 
 # ---------------------------------------------------------------------------
 # Redirect-following on write operations

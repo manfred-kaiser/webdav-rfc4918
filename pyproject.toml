@@ -133,7 +133,7 @@ max-args = 13
 "docs/**" = [ "INP001" ]
 "tools/**" = [ "INP001", "S603" ] # standalone scripts, not a package
 "src/webdav/cli.py" = [ "T201" ] # it's a CLI, printing to stdout is the point
-"src/webdav/fs.py" = [
+"src/webdav/fs/client.py" = [
   "SLF001", # FileSystem *is* the internal API Session's file-system layer composes against
 ]
 "tests/**" = [

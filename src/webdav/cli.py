@@ -25,8 +25,8 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 import requests.exceptions
 
 from webdav.fs import FileSystem
-from webdav.redirects import RedirectPolicy
-from webdav.tls import DEFAULT_MINIMUM_TLS_VERSION, TLSOptions
+from webdav.transport.redirects import RedirectPolicy
+from webdav.transport.tls import DEFAULT_MINIMUM_TLS_VERSION, TLSOptions
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

@@ -19,8 +19,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 import requests
 
-from webdav.deadline import DeadlineAdapter
 from webdav.exceptions import TLSConfigError
+from webdav.transport.deadline import DeadlineAdapter
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -185,7 +185,7 @@ def _as_list(value: "Iterable[StrPath] | StrPath | None", name: str) -> "list[St
 
 
 class SSLContextAdapter(DeadlineAdapter):
-    """A :class:`~webdav.deadline.DeadlineAdapter` pinned to an ``SSLContext``.
+    """A :class:`~webdav.transport.deadline.DeadlineAdapter` pinned to an ``SSLContext``.
 
     Needed for mTLS with a password-protected client-certificate key, a
     custom CRL, or explicit cipher restriction - none of which

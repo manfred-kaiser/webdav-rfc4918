@@ -472,7 +472,7 @@ def test_a_response_that_drips_forever_hits_a_total_deadline() -> None:
 
 def test_a_multistatus_with_absurdly_many_responses_is_refused() -> None:
     body = _multistatus(*[f"/d/{i}" for i in range(300)])
-    from webdav import multistatus
+    from webdav.dav import multistatus
 
     old = multistatus.MAX_RESPONSES
     multistatus.MAX_RESPONSES = 100

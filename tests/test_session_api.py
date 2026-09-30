@@ -239,7 +239,7 @@ def _flaky(failures: int, status: int = 503) -> "tuple[Any, dict[str, int]]":
 def test_transient_failures_of_safe_verbs_are_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("webdav.retry.BACKOFF", 0)
+    monkeypatch.setattr("webdav.transport.retry.BACKOFF", 0)
     respond, counter = _flaky(2)
     with scripted_server(respond) as (url, _rec):
         response = Session().propfind(f"{url}/a", depth=0)
@@ -249,7 +249,7 @@ def test_transient_failures_of_safe_verbs_are_retried(
 
 
 def test_a_put_is_never_retried(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("webdav.retry.BACKOFF", 0)
+    monkeypatch.setattr("webdav.transport.retry.BACKOFF", 0)
     respond, counter = _flaky(1)
     with scripted_server(respond) as (url, _rec):
         response = Session().put(f"{url}/a", data=b"x")
@@ -260,7 +260,7 @@ def test_a_put_is_never_retried(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_lock_and_unlock_are_never_retried(monkeypatch: pytest.MonkeyPatch) -> None:
     """A lost LOCK response that is retried would leave an orphaned lock behind."""
-    monkeypatch.setattr("webdav.retry.BACKOFF", 0)
+    monkeypatch.setattr("webdav.transport.retry.BACKOFF", 0)
     respond, counter = _flaky(1)
     with scripted_server(respond) as (url, _rec):
         assert Session().lock(f"{url}/a").status_code == 503
@@ -270,7 +270,7 @@ def test_lock_and_unlock_are_never_retried(monkeypatch: pytest.MonkeyPatch) -> N
 @pytest.mark.parametrize("verb", ["delete", "mkcol", "proppatch"])
 def test_a_write_is_never_retried(monkeypatch: pytest.MonkeyPatch, verb: str) -> None:
     """If the server acted before the connection broke, the retry reports the opposite."""
-    monkeypatch.setattr("webdav.retry.BACKOFF", 0)
+    monkeypatch.setattr("webdav.transport.retry.BACKOFF", 0)
     respond, counter = _flaky(1)
     with scripted_server(respond) as (url, _rec):
         extra = {"set_props": {"displayname": "x"}} if verb == "proppatch" else {}
@@ -283,7 +283,7 @@ def test_a_write_is_never_retried(monkeypatch: pytest.MonkeyPatch, verb: str) ->
 def test_running_out_of_retries_returns_the_last_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("webdav.retry.BACKOFF", 0)
+    monkeypatch.setattr("webdav.transport.retry.BACKOFF", 0)
     respond, counter = _flaky(99)
     with scripted_server(respond) as (url, _rec):
         response = Session().get(f"{url}/a")
@@ -726,7 +726,7 @@ def test_certificate_verification_cannot_be_switched_off_by_the_constructor() ->
 
 def test_a_locked_resource_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
     """A lock does not disappear in the seconds a retry would wait."""
-    monkeypatch.setattr("webdav.retry.BACKOFF", 0)
+    monkeypatch.setattr("webdav.transport.retry.BACKOFF", 0)
     respond, counter = _flaky(99, status=423)
     with scripted_server(respond) as (url, _rec):
         assert Session().delete(f"{url}/a").status_code == 423

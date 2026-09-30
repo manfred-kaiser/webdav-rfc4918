@@ -13,7 +13,7 @@ with no error raised to the caller.
 {class}`~webdav.session.Session` never delegates redirect-following to
 `requests` itself (which re-sends a redirected `PROPFIND` without its
 body, or as a `GET`, and follows any origin); instead,
-{class}`~webdav.redirects.RedirectPolicy` decides, per session (or per
+{class}`~webdav.transport.redirects.RedirectPolicy` decides, per session (or per
 call, with `redirect_policy=`), which redirect targets to follow at all.
 The policy is the same for every call made through the session:
 
@@ -86,7 +86,7 @@ A redirect the active policy doesn't allow raises
 requested target is on `exc.response.headers["Location"]`.
 
 ```{eval-rst}
-.. autoclass:: webdav.redirects.RedirectPolicy
+.. autoclass:: webdav.transport.redirects.RedirectPolicy
    :members:
 
 .. autoclass:: webdav.exceptions.RedirectNotFollowedError

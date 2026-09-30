@@ -65,10 +65,10 @@ from webdav.fs import (
     upload_fileobj,
     walk,
 )
-from webdav.redirects import RedirectPolicy
 from webdav.resource import Resource
 from webdav.response import Response
 from webdav.session import Session
+from webdav.transport.redirects import RedirectPolicy
 
 __version__ = "0.1.0"
 

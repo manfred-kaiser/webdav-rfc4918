@@ -17,9 +17,9 @@ from typing import TYPE_CHECKING
 
 import requests.exceptions
 
+from webdav.dav.parse_utils import parse_uint
 from webdav.exceptions import ClientError, raise_for_status
 from webdav.methods import Method
-from webdav.parse_utils import parse_uint
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

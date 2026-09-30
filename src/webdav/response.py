@@ -14,13 +14,14 @@ from urllib.parse import unquote, urlsplit
 
 import requests
 
+from webdav.dav.locks import parse_lock_response
+from webdav.dav.multistatus import parse_multistatus_response
 from webdav.exceptions import raise_for_status as _raise_for_status
-from webdav.locks import parse_lock_response
-from webdav.multistatus import parse_multistatus_response
+from webdav.methods import Method
 
 if TYPE_CHECKING:
-    from webdav.locks import ActiveLock
-    from webdav.multistatus import MultiStatusResponse
+    from webdav.dav.locks import ActiveLock
+    from webdav.dav.multistatus import MultiStatusResponse
 
 
 class Response(requests.Response):
@@ -58,7 +59,7 @@ class Response(requests.Response):
             path
             and destination
             and self.request is not None
-            and self.request.method in ("COPY", "MOVE")
+            and self.request.method in (Method.COPY, Method.MOVE)
         ):
             return f"{path} -> {unquote(urlsplit(destination).path)}"
         return path
@@ -82,7 +83,10 @@ class Response(requests.Response):
         """
         _raise_for_status(self, path=self._error_path())
         method = self.request.method if self.request is not None else None
-        if self.status_code == requests.codes.multi_status and method != "PROPFIND":
+        if (
+            self.status_code == requests.codes.multi_status
+            and method != Method.PROPFIND
+        ):
             self.multistatus.raise_for_status()
 
 

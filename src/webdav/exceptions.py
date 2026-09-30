@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 import requests.exceptions
 
-from webdav.redirects import redact_url
+from webdav.transport.redirects import redact_url
 
 if TYPE_CHECKING:
     from requests import Response
@@ -149,7 +149,7 @@ class HTTPStatusError(WebDAVError, requests.exceptions.HTTPError):
     #: ``__init__`` from the real response, since a base ``HTTPStatusError``
     #: (an unregistered status code) has no fixed status of its own.
     default_status_code: ClassVar[int | None] = None
-    #: Whether :mod:`webdav.retry` should retry a request that failed with
+    #: Whether :mod:`webdav.transport.retry` should retry a request that failed with
     #: this status - i.e. the failure is plausibly transient.
     retryable: ClassVar[bool] = False
 
@@ -191,7 +191,7 @@ def _parse_error_codes(response: "Response") -> "frozenset[str]":
     if not content:
         return frozenset()
     try:
-        # See webdav.xml_utils's module docstring: stdlib expat never resolves
+        # See webdav.dav.xml_utils's module docstring: stdlib expat never resolves
         # external entities and rejects entity-amplification by default.
         tree = ET.fromstring(content)  # noqa: S314 # nosec B314
     except (ET.ParseError, LookupError, ValueError, UnicodeError):
@@ -408,7 +408,7 @@ class RedirectNotFollowedError(HTTPStatusError):
     """Raised when the server answered with a redirect this request didn't follow.
 
     A :class:`~webdav.session.Session` only follows the redirects its
-    :class:`~webdav.redirects.RedirectPolicy` allows, so a malicious or
+    :class:`~webdav.transport.redirects.RedirectPolicy` allows, so a malicious or
     compromised server can't silently redirect a write's body to an
     unintended resource or a different host - HTTP permits a 3xx response
     to any method (RFC 9110 sec. 15.4), so this can happen legitimately
@@ -452,7 +452,7 @@ def raise_for_status(response: "Response", path: str | None = None) -> None:
     """Raise the appropriate :class:`HTTPStatusError` subclass, if any.
 
     A 207 Multi-Status response is left alone - its body may contain
-    per-resource failures, which :mod:`webdav.multistatus` inspects
+    per-resource failures, which :mod:`webdav.dav.multistatus` inspects
     separately, since the overall HTTP exchange itself succeeded.
 
     Raises:

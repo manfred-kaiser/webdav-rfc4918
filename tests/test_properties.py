@@ -15,9 +15,9 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from webdav import RedirectPolicy, Session
-from webdav.locks import LockRegistry
-from webdav.redirects import effective_origin, redact_url
-from webdav.urls import join_url_path
+from webdav.dav.locks import LockRegistry
+from webdav.transport.redirects import effective_origin, redact_url
+from webdav.dav.urls import join_url_path
 
 pytestmark = pytest.mark.filterwarnings("ignore")
 

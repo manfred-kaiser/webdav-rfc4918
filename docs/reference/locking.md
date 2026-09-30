@@ -8,14 +8,14 @@ with session.locked("Documents/report.docx") as active_lock:
 # lock released on exit, even if the block raised
 ```
 
-`Session.locked()` returns an {class}`~webdav.locks.ActiveLock` describing
+`Session.locked()` returns an {class}`~webdav.dav.locks.ActiveLock` describing
 what the server actually granted (it may differ from what was requested -
 e.g. a shorter timeout).
 
 ```{eval-rst}
 .. autofunction:: webdav.session.Session.locked
 
-.. autoclass:: webdav.locks.ActiveLock
+.. autoclass:: webdav.dav.locks.ActiveLock
    :members:
 ```
 
@@ -41,10 +41,10 @@ with session.locked("Documents/report.docx", lock_timeout=60) as active_lock:
 
 Writes through a held lock automatically carry an `If` header asserting
 the lock token (RFC 4918 §10.4) - built by
-{mod}`webdav.conditional`, which is also usable directly for a custom
+{mod}`webdav.dav.conditional`, which is also usable directly for a custom
 conditional request (e.g. an `ETag`-conditional write):
 
 ```{eval-rst}
-.. automodule:: webdav.conditional
+.. automodule:: webdav.dav.conditional
    :members:
 ```

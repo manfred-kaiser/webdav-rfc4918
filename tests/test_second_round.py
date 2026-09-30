@@ -212,7 +212,7 @@ def test_copy_and_move_into_a_depth_zero_locked_collection(server_url: str) -> N
 
 
 def test_a_transfer_presents_every_lock_it_touches_as_one_tagged_list() -> None:
-    from webdav.locks import LockRegistry
+    from webdav.dav.locks import LockRegistry
 
     registry = LockRegistry()
     registry.add("https://dav.example/src", "tokI", "infinity")
@@ -228,7 +228,7 @@ def test_a_transfer_presents_every_lock_it_touches_as_one_tagged_list() -> None:
 
 
 def test_a_transfer_of_a_locked_source_alone_is_still_tagged() -> None:
-    from webdav.locks import LockRegistry
+    from webdav.dav.locks import LockRegistry
 
     registry = LockRegistry()
     registry.add("https://dav.example/a.txt", "tok", "0")
@@ -560,7 +560,7 @@ def test_a_backslash_in_a_name_is_an_ordinary_character_on_posix() -> None:
 
 
 def test_walk_counts_queued_collections(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("webdav.fs._WALK_MAX_DIRS", 50)
+    monkeypatch.setattr("webdav.fs.client._WALK_MAX_DIRS", 50)
 
     def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
         base = seen.path.rstrip("/")

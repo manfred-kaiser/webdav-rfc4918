@@ -12,17 +12,23 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from xml.etree.ElementTree import Element
 
-from webdav.conditional import (
+from webdav.dav.conditional import (
     Condition,
     build_if_header_single,
     merge_if_headers,
     token_condition,
 )
+from webdav.dav.parse_utils import parse_uint
+from webdav.dav.urls import URL, path_key
+from webdav.dav.xml_utils import (
+    dav,
+    parse_xml,
+    split_clark,
+    sub_dav_element,
+    to_xml_string,
+)
 from webdav.exceptions import ClientError, MalformedResponseError
-from webdav.parse_utils import parse_uint
-from webdav.redirects import effective_origin
-from webdav.urls import URL, path_key
-from webdav.xml_utils import dav, parse_xml, split_clark, sub_dav_element, to_xml_string
+from webdav.transport.redirects import effective_origin
 
 #: What a lock token may look like. A token is a Coded-URL (RFC 4918 sec.
 #: 10.4): an absolute URI, in ASCII, that this library puts between ``<`` and
@@ -52,7 +58,7 @@ if TYPE_CHECKING:
 
     from requests import Response as HTTPResponse
 
-    from webdav.redirects import Origin
+    from webdav.transport.redirects import Origin
 
 #: How long a lock is requested for when the caller says nothing, in seconds.
 #: Deliberately finite: a client that crashes or loses the network never

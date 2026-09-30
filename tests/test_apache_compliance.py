@@ -15,7 +15,7 @@ from collections.abc import Iterator
 import pytest
 
 from webdav import FileSystem, ResourceAlreadyExistsError, ResourceLockedError
-from webdav.locks import EXCLUSIVE
+from webdav.dav.locks import EXCLUSIVE
 
 APACHE_URL = os.environ.get("WEBDAV_TEST_APACHE_URL")
 APACHE_AUTH = (
