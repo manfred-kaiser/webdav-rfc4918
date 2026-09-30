@@ -102,10 +102,12 @@ _FS_ALL = [
 ]
 
 _SESSION_ALL = [
+    "ConnectionOptions",
     "DEFAULT_MAX_RESPONSE_SIZE",
     "DEFAULT_MAX_RESPONSE_TIME",
     "DEFAULT_TIMEOUT",
     "Session",
+    "SessionOptions",
 ]
 
 #: Attributes ``Session()`` carries on the instance.

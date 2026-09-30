@@ -48,3 +48,34 @@ def test_module_function_and_method_return_the_same_type(name: str) -> None:
 @pytest.mark.parametrize("name", _FUNCTIONS)
 def test_every_module_function_is_a_filesystem_method(name: str) -> None:
     assert hasattr(FileSystem, name)
+
+
+def test_the_options_of_every_entry_point_are_those_of_session() -> None:
+    """One list of options: ``Session(...)``, ``FileSystem(...)`` and the one-off functions."""
+    from webdav.session import (
+        ConnectionOptions,
+        Session,
+        SessionOptions,
+    )  # noqa: PLC0415
+
+    parameters = set(inspect.signature(Session.__init__).parameters)
+    keyword_only = {
+        name
+        for name, p in inspect.signature(Session.__init__).parameters.items()
+        if p.kind is p.KEYWORD_ONLY
+    }
+    assert parameters - keyword_only == {"self", "base_url"}
+    assert set(SessionOptions.__annotations__) == keyword_only
+    assert set(ConnectionOptions.__annotations__) == keyword_only - {
+        "headers",
+        "chunk_size",
+    }
+
+
+def test_a_filesystem_hands_out_its_session() -> None:
+    from webdav import FileSystem, Session  # noqa: PLC0415
+
+    own = FileSystem("http://dav.example")
+    assert isinstance(own.session, Session)
+    shared = Session("http://dav.example")
+    assert FileSystem.from_session(shared).session is shared

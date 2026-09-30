@@ -38,10 +38,10 @@ from http import HTTPStatus
 from io import TextIOWrapper
 from typing import (
     TYPE_CHECKING,
-    Any,
     BinaryIO,
     Literal,
     TextIO,
+    Unpack,
     cast,
     overload,
 )
@@ -77,9 +77,7 @@ from webdav.exceptions import (
 from webdav.fs._remote import Remote
 from webdav.methods import Method
 from webdav.resource import Resource
-from webdav.session import (
-    Session,
-)
+from webdav.session import Session, SessionOptions
 from webdav.transport.limits import check_chunk_size
 from webdav.transport.streaming import IterStream, SizedIterator
 from webdav.url_safety import display_url, redact_url
@@ -88,7 +86,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from datetime import datetime
     from os import PathLike
-    from typing import Self
+    from typing import Any, Self
     from xml.etree.ElementTree import Element
 
     from webdav.dav.multistatus import ResourceResponse
@@ -220,7 +218,9 @@ class FileSystem:
     _owns_session: bool
     _remote: Remote
 
-    def __init__(self, base_url: "str | None" = None, **kwargs: Any) -> None:
+    def __init__(
+        self, base_url: "str | None" = None, **options: Unpack[SessionOptions]
+    ) -> None:
         """Open a private :class:`~webdav.session.Session` for this ``FileSystem`` alone.
 
         Takes exactly the arguments :class:`~webdav.session.Session` does.
@@ -228,9 +228,7 @@ class FileSystem:
         its locks, cookies and connection pool) with code that also sends
         verbs directly.
         """
-        self._session = Session(base_url, **kwargs)
-        self._remote = Remote(self._session)
-        self._owns_session = True
+        self._bind(Session(base_url, **options), owns=True)
 
     @classmethod
     def from_session(cls, session: Session) -> "FileSystem":
@@ -242,10 +240,23 @@ class FileSystem:
         does *not* close ``session`` - the caller still owns it.
         """
         self = cls.__new__(cls)
+        self._bind(session, owns=False)
+        return self
+
+    def _bind(self, session: Session, *, owns: bool) -> None:
         self._session = session
         self._remote = Remote(session)
-        self._owns_session = False
-        return self
+        self._owns_session = owns
+
+    @property
+    def session(self) -> Session:
+        """The session this ``FileSystem`` sends its requests through.
+
+        Its verbs, settings and ``locks`` are the ones :meth:`locked` and every
+        other operation use; for a ``FileSystem`` built with
+        :meth:`from_session` it is the session that was given.
+        """
+        return self._session
 
     def close(self) -> None:
         """Close the underlying session - only if this ``FileSystem`` created it itself."""

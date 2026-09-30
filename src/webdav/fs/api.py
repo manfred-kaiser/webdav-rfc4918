@@ -21,7 +21,6 @@ from typing import (
     Literal,
     ParamSpec,
     TextIO,
-    TypedDict,
     TypeVar,
     Unpack,
     overload,
@@ -30,6 +29,7 @@ from typing import (
 from webdav.dav.locks import DEFAULT_LOCK_TIMEOUT, EXCLUSIVE, ActiveLock
 from webdav.fs.client import FileSystem
 from webdav.resource import Resource
+from webdav.session import ConnectionOptions, SessionOptions
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -38,43 +38,21 @@ if TYPE_CHECKING:
     from xml.etree.ElementTree import Element
 
     from webdav.dav.properties import DAVProperties, PropName
-    from webdav.transport.redirects import RedirectPolicy
-    from webdav.transport.tls import TLSOptions
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 _T = TypeVar("_T")
 
 
-class _BaseOptions(TypedDict, total=False):
-    """Connection options every function takes, as :class:`FileSystem` does."""
-
-    auth: Any
-    cert: Any
-    verify: "Literal[True] | str"
-    tls: "TLSOptions | None"
-    timeout: "float | tuple[float, float] | None"
-    redirect_policy: "RedirectPolicy"
-    trusted_redirect_origins: "Iterable[str] | Callable[[str], bool] | None"
-    max_response_size: "int | None"
-    retry: "Callable[..., Any] | bool"
-    raise_on_error: bool
-    max_response_time: "float | None"
-
-
-class _Options(_BaseOptions, total=False):
-    headers: "dict[str, str] | None"
-    chunk_size: int
-
-
-class _TransferOptions(_BaseOptions, total=False):
+class _TransferOptions(ConnectionOptions, total=False):
     """For functions with their own ``chunk_size`` parameter."""
 
     headers: "dict[str, str] | None"
 
 
-class _UploadOptions(_BaseOptions, total=False):
-    """For functions with their own ``chunk_size`` and ``headers`` parameters."""
+_Options = SessionOptions
+#: For functions with their own ``chunk_size`` and ``headers`` parameters.
+_UploadOptions = ConnectionOptions
 
 
 def _new_filesystem(session_options: "dict[str, Any]") -> FileSystem:

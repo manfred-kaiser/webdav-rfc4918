@@ -35,6 +35,7 @@ from http import HTTPStatus
 from typing import (
     TYPE_CHECKING,
     Any,
+    TypedDict,
     cast,
 )
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -227,6 +228,35 @@ def _merge_arguments(args: "tuple[Any, ...]", kwargs: "dict[str, Any]") -> None:
             raise TypeError(msg)
 
 
+class ConnectionOptions(TypedDict, total=False):
+    """The options of :class:`Session` that say how a server is reached and trusted.
+
+    What every file-system function takes beside its own arguments; the keys
+    are exactly ``Session``'s keyword-only constructor arguments (a test
+    compares them), so there is one list of options, not one per entry point.
+    """
+
+    auth: "AuthTypes"
+    cert: "CertTypes"
+    verify: "bool | str"
+    tls: "TLSOptions | None"
+    timeout: "float | tuple[float | None, float | None] | None"
+    redirect_policy: RedirectPolicy
+    trusted_redirect_origins: "Iterable[str] | Callable[[str], bool] | None"
+    max_response_size: "int | None"
+    max_response_time: "float | None"
+    max_redirects: int
+    retry: "RetryFunc | bool"
+    raise_on_error: bool
+
+
+class SessionOptions(ConnectionOptions, total=False):
+    """Every keyword-only option of :class:`Session` - what ``FileSystem(base_url, **options)`` takes."""
+
+    headers: "dict[str, str] | None"
+    chunk_size: int
+
+
 class Session:
     """A WebDAV client built on ``requests``, with the API you already know from it.
 
@@ -254,7 +284,7 @@ class Session:
         cert: "CertTypes" = None,
         verify: bool | str = True,
         tls: "TLSOptions | None" = None,
-        timeout: "float | tuple[float, float] | None" = DEFAULT_TIMEOUT,
+        timeout: "float | tuple[float | None, float | None] | None" = DEFAULT_TIMEOUT,
         redirect_policy: RedirectPolicy = RedirectPolicy.SAME_ORIGIN,
         trusted_redirect_origins: "Iterable[str] | Callable[[str], bool] | None" = None,
         max_response_size: "int | None" = DEFAULT_MAX_RESPONSE_SIZE,
@@ -1458,5 +1488,7 @@ __all__ = [
     "DEFAULT_MAX_RESPONSE_SIZE",
     "DEFAULT_MAX_RESPONSE_TIME",
     "DEFAULT_TIMEOUT",
+    "ConnectionOptions",
     "Session",
+    "SessionOptions",
 ]
