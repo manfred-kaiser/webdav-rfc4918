@@ -90,7 +90,7 @@ from webdav.transport.redirects import (
     validate_policy,
 )
 from webdav.transport.retry import retry as _retry
-from webdav.transport.streaming import DEFAULT_CHUNK_SIZE
+from webdav.transport.streaming import DEFAULT_CHUNK_SIZE, check_chunk_size
 from webdav.transport.tls import mount_mtls_adapter, warn_hardening_disabled
 from webdav.url_safety import display_url, effective_origin, is_url, redact_url
 
@@ -328,12 +328,6 @@ def _verification_on(verify: object) -> bool:
     )
 
 
-def _check_chunk_size(value: object) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        msg = f"chunk_size must be a positive integer, got {value!r}"
-        raise ValueError(msg)
-
-
 def _strong_etag(value: str) -> str:
     """``value`` as the entity-tag ``If-Match`` needs (RFC 9110 sec. 13.1.1: strong comparison only).
 
@@ -560,7 +554,6 @@ class Session:
 
         """
         validate_policy(redirect_policy, trusted_redirect_origins)
-        _check_chunk_size(chunk_size)
         self._transport = requests.Session()
         self.auth = auth
         if headers:
@@ -571,6 +564,7 @@ class Session:
         self._max_response_size: int | None = None
         self.max_response_size = max_response_size
         self.raise_on_error = raise_on_error
+        self._chunk_size = DEFAULT_CHUNK_SIZE
         self.chunk_size = chunk_size
         #: Deadline, in seconds, for the whole body of a response that is not
         #: streamed (``None``: none). ``timeout`` only limits each single read.
@@ -734,6 +728,20 @@ class Session:
     def get_redirect_target(self, response: requests.Response) -> "str | None":
         """The ``Location`` header's value, decoded - see :meth:`requests.Session.get_redirect_target`."""
         return self._transport.get_redirect_target(response)
+
+    @property
+    def chunk_size(self) -> int:
+        """Default chunk size, in bytes, for streaming reads and writes.
+
+        Raises:
+            ValueError: When set to anything but a positive integer.
+
+        """
+        return self._chunk_size
+
+    @chunk_size.setter
+    def chunk_size(self, size: int) -> None:
+        self._chunk_size = check_chunk_size(size)
 
     @property
     def max_response_size(self) -> "int | None":

@@ -156,3 +156,14 @@ def test_the_size_limit_can_be_lifted_and_set_again() -> None:
     assert session.max_response_size is None
     session.max_response_size = 10
     assert session.max_response_size == 10
+
+
+@pytest.mark.parametrize("size", [0, -1, 1.5, True, None])
+def test_a_chunk_size_that_is_no_positive_integer_is_refused_when_it_is_set(
+    size: object,
+) -> None:
+    session = Session()
+    before = session.chunk_size
+    with pytest.raises(ValueError, match="chunk_size"):
+        session.chunk_size = size  # type: ignore[assignment]
+    assert session.chunk_size == before

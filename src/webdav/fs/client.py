@@ -77,10 +77,9 @@ from webdav.session import (
     _LOGGER,
     FeatureDetection,
     Session,
-    _check_chunk_size,
     _check_depth,
 )
-from webdav.transport.streaming import IterStream, SizedIterator
+from webdav.transport.streaming import IterStream, SizedIterator, check_chunk_size
 from webdav.url_safety import display_url, redact_url
 
 if TYPE_CHECKING:
@@ -753,7 +752,7 @@ class FileSystem:
         ``fileobj`` before then is a partial file, not a download.
         """
         if chunk_size is not None:
-            _check_chunk_size(chunk_size)
+            check_chunk_size(chunk_size)
         with self.open(path, mode="rb", chunk_size=chunk_size) as remote_obj:
             size = chunk_size or self._session.chunk_size
             # (pylint takes the @contextmanager result for a generator)
@@ -787,7 +786,7 @@ class FileSystem:
         (the same class of attack OpenSSH's ``sftp`` client hardened against).
         """
         if chunk_size is not None:
-            _check_chunk_size(chunk_size)
+            check_chunk_size(chunk_size)
         target = pathlib.Path(local_path)
         directory = target.absolute().parent
         if not directory.is_dir():
@@ -880,7 +879,7 @@ class FileSystem:
 
         """
         if chunk_size is not None:
-            _check_chunk_size(chunk_size)
+            check_chunk_size(chunk_size)
         headers = dict(headers or {})
 
         # We try to avoid chunked transfer as much as possible, so we try

@@ -35,6 +35,19 @@ MAX_RESUME_ATTEMPTS = 5
 RESUME_BACKOFF_SECONDS = 1.0
 
 
+def check_chunk_size(value: int) -> int:
+    """Return ``value`` if it is a usable chunk size.
+
+    Raises:
+        ValueError: It is not a positive integer.
+
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        msg = f"chunk_size must be a positive integer, got {value!r}"
+        raise ValueError(msg)
+    return value
+
+
 class SizedIterator:
     """A byte-chunk iterator with a known total length, for a non-chunked upload.
 

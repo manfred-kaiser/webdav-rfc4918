@@ -99,7 +99,6 @@ _SESSION_ALL = ["DEFAULT_MAX_RESPONSE_SIZE", "DEFAULT_TIMEOUT", "Method", "Sessi
 #: Attributes ``Session()`` carries on the instance.
 _SESSION_INSTANCE_ATTRIBUTES = [
     "base_url",
-    "chunk_size",
     "locks",
     "raise_on_error",
     "redirect_policy",
@@ -111,6 +110,7 @@ _SESSION_INSTANCE_ATTRIBUTES = [
 _SESSION_PROPERTIES = [
     "auth",
     "cert",
+    "chunk_size",
     "cookies",
     "headers",
     "hooks",
