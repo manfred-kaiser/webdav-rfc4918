@@ -24,7 +24,15 @@ class Method(StrEnum):
 
 #: Methods that change something: only these carry the ``If`` header of a held
 #: lock. A read has no use for a lock token, and sending one anyway would
-#: only put a capability on the wire for nothing.
+#: only put a capability on the wire for nothing. LOCK is deliberately not
+#: here, despite RFC 4918 sec. 7.4 arguably calling for it ("a write lock
+#: protects any request that would create a new resource in a write locked
+#: collection", and locking an unmapped URL creates one, sec. 9.10.4):
+#: empirically, attaching an ancestor's token to a *new*, independent LOCK
+#: request does not make a real server (wsgidav) grant it anyway - it still
+#: answers 423, token or not. Sending the token would add behavior (and
+#: exposure of a capability) with no corresponding benefit. See
+#: tests/test_rfc_compliance.py for the pinned, server-confirmed behavior.
 WRITE_METHODS = frozenset(
     {
         Method.PUT,

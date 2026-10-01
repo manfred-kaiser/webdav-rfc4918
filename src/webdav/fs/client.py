@@ -62,7 +62,11 @@ from webdav.dav.locks import (
     parse_lock_response,
     validate_token,
 )
-from webdav.dav.properties import build_propfind_body, build_proppatch_body
+from webdav.dav.properties import (
+    build_mkcol_body,
+    build_propfind_body,
+    build_proppatch_body,
+)
 from webdav.dav.urls import URL, path_key
 from webdav.exceptions import (
     ClientError,
@@ -91,6 +95,7 @@ if TYPE_CHECKING:
 
     from webdav.dav.multistatus import ResourceResponse
     from webdav.dav.properties import DAVProperties, PropName
+    from webdav.response import Response
 
 _LOGGER = logging.getLogger("webdav")
 
@@ -373,7 +378,11 @@ class FileSystem:
         exit, even if the block raised.
 
         Locking a ``path`` that does not exist yet creates an empty resource
-        there (RFC 4918 sec. 9.10.4) that stays after the lock is gone. The
+        there (RFC 4918 sec. 9.10.4). The RFC only says it "SHOULD NOT
+        disappear" once the lock is gone - a SHOULD, not a MUST - and real
+        servers differ: it outlives the lock on wsgidav, but Apache's
+        mod_dav deletes it again once the lock is released (confirmed
+        against a real instance, see tests/test_apache_compliance.py). The
         lock times out (see ``lock_timeout`` and the granted
         :attr:`~webdav.dav.locks.ActiveLock.timeout`) and is not refreshed for
         you - use :meth:`refresh_lock`; writes made after it timed out fail with
@@ -504,22 +513,53 @@ class FileSystem:
 
     # -- collections/entries -----------------------------------------------
 
-    def mkdir(self, path: str, *, data: "str | None" = None) -> None:
+    def mkdir(
+        self,
+        path: str,
+        *,
+        data: "str | None" = None,
+        set_props: "dict[str | PropName, Any] | None" = None,
+    ) -> None:
         """Create a collection.
 
         Args:
             path: Collection path.
-            data: Optional Extended MKCOL request body (RFC 5689) to set
-                a non-default resourcetype and/or properties at creation
-                time. Sent with ``Content-Type: application/xml`` when given.
+            data: Optional, pre-built Extended MKCOL request body (RFC 5689)
+                to set a non-default resourcetype and/or properties at
+                creation time. Sent with ``Content-Type: application/xml``
+                when given.
+            set_props: Properties to set at creation time - builds the
+                Extended MKCOL body instead of passing one directly (see
+                :func:`~webdav.dav.properties.build_mkcol_body`). Pass
+                either this or ``data``, not both.
+
+        Raises:
+            ValueError: Both ``data`` and ``set_props`` were given.
+            ResourceAlreadyExistsError: ``path`` already exists.
+            WebDAVError: A server supporting Extended MKCOL refused one or
+                more of ``set_props`` - :func:`~webdav.dav.properties.parse_mkcol_response`
+                on ``exc.response`` names which one and why.
 
         """
+        if set_props is not None:
+            if data is not None:
+                msg = "pass either data or set_props, not both"
+                raise ValueError(msg)
+            data = build_mkcol_body(set_props)
         try:
             response = self._remote.send(
                 Method.MKCOL, path, add_trailing_slash=True, data=data
             )
         except HTTPStatusError as exc:
             if exc.status_code == HTTPStatus.METHOD_NOT_ALLOWED:
+                raise ResourceAlreadyExistsError(exc.response, path) from exc
+            # Apache's mod_dav answers 400, not 405, for this same conflict
+            # when the trailing slash this method always adds (RFC 4918 sec.
+            # 5.2) lands on an existing *plain* resource - confirmed against
+            # a real instance, see tests/test_apache_compliance.py. Only
+            # trusted bodyless (``data is None``): a 400 for a request that
+            # did carry a body is more likely a genuinely malformed one.
+            if exc.status_code == HTTPStatus.BAD_REQUEST and data is None:
                 raise ResourceAlreadyExistsError(exc.response, path) from exc
             raise
 
@@ -555,10 +595,16 @@ class FileSystem:
         See :meth:`~webdav.session.Session.copy` for the arguments; unlike
         it, this raises a :class:`~webdav.exceptions.WebDAVError` on failure
         instead of returning the raw response.
+
+        Raises:
+            ResourceAlreadyExistsError: ``overwrite`` is false and ``destination`` exists.
+
         """
-        self._session.copy(
-            path, destination, overwrite=overwrite, depth=depth
-        ).raise_for_status()
+        self._raise_for_overwrite_conflict(
+            self._session.copy(path, destination, overwrite=overwrite, depth=depth),
+            overwrite=overwrite,
+            destination=destination,
+        )
 
     def move(
         self, path: str, destination: str, *, overwrite: "bool | None" = False
@@ -568,8 +614,37 @@ class FileSystem:
         See :meth:`~webdav.session.Session.move` for the arguments; unlike
         it, this raises a :class:`~webdav.exceptions.WebDAVError` on failure
         instead of returning the raw response.
+
+        Raises:
+            ResourceAlreadyExistsError: ``overwrite`` is false and ``destination`` exists.
+
         """
-        self._session.move(path, destination, overwrite=overwrite).raise_for_status()
+        self._raise_for_overwrite_conflict(
+            self._session.move(path, destination, overwrite=overwrite),
+            overwrite=overwrite,
+            destination=destination,
+        )
+
+    @staticmethod
+    def _raise_for_overwrite_conflict(
+        response: "Response", *, overwrite: "bool | None", destination: str
+    ) -> None:
+        """``response.raise_for_status()``, translating a 412 into the more specific error.
+
+        RFC 4918 sec. 9.8.4/9.9.3: with ``Overwrite: F``, a COPY/MOVE onto an
+        existing destination fails with 412 - the same condition
+        :meth:`upload_fileobj`/:meth:`mkdir` already report as
+        :class:`~webdav.exceptions.ResourceAlreadyExistsError`, for the same
+        caller-facing reason.
+        """
+        try:
+            response.raise_for_status()
+        except PreconditionFailedError as exc:
+            if not overwrite:
+                raise ResourceAlreadyExistsError(
+                    exc.response, display_url(destination)
+                ) from exc
+            raise
 
     def ls(self, path: str) -> "list[Resource]":
         """List the members of a collection.

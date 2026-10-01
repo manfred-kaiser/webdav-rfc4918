@@ -141,6 +141,13 @@ class ResourceResponse:
             PropStat(el) for el in response_xml.findall(dav("propstat"))
         ]
         self.has_propstat = bool(self.propstats)
+        # §14.24: response = href, ((href*, status) | propstat+), ... - one of
+        # the two is required. Neither present is not a quieter way to say
+        # "nothing to report": it is information-free and must not be read as
+        # success (see raise_for_status()).
+        if self.status_code is None and not self.has_propstat:
+            msg = "<d:response> has neither a <d:status> nor a <d:propstat>"
+            raise ValueError(msg)
         self.properties = DAVProperties.from_propstats(self.propstats)
 
     def __str__(self) -> str:
@@ -305,3 +312,34 @@ def parse_multistatus_response(http_response: "HTTPResponse") -> MultiStatusResp
         msg = f"the server answered {http_response.status_code}, not a 207 Multi-Status - is this a WebDAV server?"
         raise MalformedResponseError(msg)
     return MultiStatusResponse(http_response.content)
+
+
+def multistatus_failure(http_response: "HTTPResponse") -> "MultiStatusResponse | None":
+    """``http_response``'s body, parsed as a multistatus reporting at least one failure - or ``None``.
+
+    RFC 4918 ties a collection operation's partial failure to a 207
+    response (§13), but a real server can wrap the identical multistatus
+    shape under a different top-level status instead: confirmed against a
+    real Apache + mod_dav instance, which answers 424 Failed Dependency -
+    not 207 - for a DELETE blocked by one locked member, with a full
+    multistatus body naming exactly which one. Checked narrowly (the
+    document's own root element, not just a nested ``<response>``
+    anywhere that some unrelated error body might coincidentally contain)
+    and only returned if it actually reports a failure: a misdetection
+    must never silently swallow the real error that was already on its
+    way by returning something that turns out not to raise.
+    """
+    content = http_response.content
+    if not content:
+        return None
+    try:
+        parsed = MultiStatusResponse(content)
+    except MalformedResponseError:
+        return None
+    if split_clark(parsed.tree.tag)[1] != "multistatus":
+        return None
+    try:
+        parsed.raise_for_status()
+    except MultiStatusError:
+        return parsed
+    return None

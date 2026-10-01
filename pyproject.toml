@@ -132,7 +132,7 @@ max-args = 15
 
 [tool.ruff.lint.per-file-ignores]
 "docs/**" = [ "INP001" ]
-"tools/**" = [ "INP001", "S603" ] # standalone scripts, not a package
+"tools/**" = [ "INP001", "S603", "T201" ] # standalone scripts, not a package - printing status is the point
 "src/webdav/cli.py" = [ "T201" ] # it's a CLI, printing to stdout is the point
 "tests/**" = [
   "ANN",    # return/argument types not required on test functions
@@ -143,6 +143,10 @@ max-args = 15
   "S314",
   "SLF001", # tests intentionally reach into internals to set up scenarios
 ]
+# Test infrastructure (standing a throwaway Apache instance up/down), not a
+# test itself - same reasoning as tools/** below: a fixed list of trusted,
+# hardcoded binaries (httpd, htpasswd), nothing from untrusted input.
+"tests/apache_instance.py" = [ "S603" ]
 "tests/server.py" = [ "T201" ] # interactive test-server helper, not library code
 
 [tool.ruff.lint.flake8-annotations]
@@ -187,6 +191,13 @@ max-public-methods = 44
 [tool.pylint.MASTER]
 load-plugins = "pylint.extensions.docparams"
 
+[tool.pylint.format]
+# FileSystem is the single entry point for the file-system-shaped API, like
+# Session is for the HTTP/WebDAV verbs (see max-public-methods above) -
+# splitting it purely to satisfy this metric would work against that. A
+# little headroom over its current size.
+max-module-lines = 1100
+
 [tool.bandit]
 # B101 (assert): every use in src/ is an internal type-narrowing check,
 # individually reviewed - not input validation or a security boundary.
@@ -200,7 +211,7 @@ ignore-words-list = "cachable"
 
 [tool.pytest.ini_options]
 testpaths = [ "tests" ]
-addopts = "-ra -nauto --cov=webdav --cov-report=term-missing"
+addopts = "-ra -nauto --dist=loadgroup --cov=webdav --cov-report=term-missing"
 
 [tool.coverage.run]
 branch = true

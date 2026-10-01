@@ -143,12 +143,18 @@ def isfile(path: str, **kwargs: Unpack[_Options]) -> bool:
     return _run(FileSystem.isfile, kwargs, path)
 
 
-def mkdir(path: str, *, data: str | None = None, **kwargs: Unpack[_Options]) -> None:
+def mkdir(
+    path: str,
+    *,
+    data: str | None = None,
+    set_props: "dict[str | PropName, Any] | None" = None,
+    **kwargs: Unpack[_Options],
+) -> None:
     """Create a collection.
 
     See :meth:`FileSystem.mkdir`; ``path`` is a full URL.
     """
-    _run(FileSystem.mkdir, kwargs, path, data=data)
+    _run(FileSystem.mkdir, kwargs, path, data=data, set_props=set_props)
 
 
 def remove(path: str, **kwargs: Unpack[_Options]) -> None:

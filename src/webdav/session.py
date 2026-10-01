@@ -60,7 +60,11 @@ from webdav.dav.locks import (
     format_timeout,
     validate_token,
 )
-from webdav.dav.properties import build_propfind_body, build_proppatch_body
+from webdav.dav.properties import (
+    build_mkcol_body,
+    build_propfind_body,
+    build_proppatch_body,
+)
 from webdav.dav.urls import URL, join_url
 from webdav.exceptions import (
     STATUS_CODE_EXCEPTIONS,
@@ -100,6 +104,7 @@ from webdav.transport.redirects import (
     refuse,
     validate_policy,
 )
+from webdav.transport.retry import MAX_RETRY_AFTER, retry_after
 from webdav.transport.retry import retry as _retry
 from webdav.transport.tls import (
     configure_tls,
@@ -1104,6 +1109,20 @@ class Session:
                 refuse(response, decision.reason)
                 break
             target, same_origin = decision.target, decision.same_origin
+            # RFC 9110 sec. 10.2.3: "sent with any 3xx response, Retry-After
+            # indicates the minimum time... before issuing the redirected
+            # request" - same cap as a retried failure, and refused the same
+            # way past it: a server must not be able to park a client for as
+            # long as it likes just by answering with a redirect instead.
+            asked = retry_after(response)
+            if asked is not None:
+                if asked > MAX_RETRY_AFTER:
+                    refuse(
+                        response,
+                        f"Retry-After asked for more than {MAX_RETRY_AFTER:g} seconds",
+                    )
+                    break
+                time.sleep(asked)
             previous = response
             # Keep the (small) body of a redirect for ``history``, but never
             # let it be an unbounded read.
@@ -1345,13 +1364,30 @@ class Session:
         return self.request(Method.PROPPATCH, url, data=data, **kwargs)
 
     def mkcol(
-        self, url: str, data: "str | bytes | None" = None, **kwargs: Any
+        self,
+        url: str,
+        data: "str | bytes | None" = None,
+        *,
+        set_props: "dict[str | PropName, Any] | None" = None,
+        **kwargs: Any,
     ) -> Response:
-        """Send a ``MKCOL`` (RFC 4918 sec. 9.3; RFC 5689 for a ``data`` body).
+        """Send a ``MKCOL`` (RFC 4918 sec. 9.3; RFC 5689 for a request body).
 
         A collection's URL should end in ``/`` (sec. 5.2); one is added if
         it is missing, rather than having the server redirect.
+
+        Either ``data`` (a pre-built Extended MKCOL body) or ``set_props``
+        (which builds one - see :func:`~webdav.dav.properties.build_mkcol_body`),
+        or neither for a plain (non-extended) MKCOL. On failure, a server
+        that supports Extended MKCOL answers with a ``mkcol-response`` body
+        naming which property it could not set - see
+        :func:`~webdav.dav.properties.parse_mkcol_response`.
         """
+        if set_props is not None:
+            if data is not None:
+                msg = "pass either data or set_props, not both"
+                raise ValueError(msg)
+            data = build_mkcol_body(set_props)
         full = self.resolve_url(url)
         parts = urlsplit(full)
         if parts.path and not parts.path.endswith("/"):

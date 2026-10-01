@@ -15,7 +15,7 @@ from urllib.parse import unquote, urlsplit
 import requests
 
 from webdav.dav.locks import parse_lock_response
-from webdav.dav.multistatus import parse_multistatus_response
+from webdav.dav.multistatus import multistatus_failure, parse_multistatus_response
 from webdav.exceptions import raise_for_status as _raise_for_status
 from webdav.methods import Method
 
@@ -79,10 +79,20 @@ class Response(requests.Response):
           :class:`requests.HTTPError`;
         - a ``207 Multi-Status`` that reports a failure for any individual
           resource raises too - except for ``PROPFIND``, where a per-property
-          404 inside a 207 is the normal way to say "no such property".
+          404 inside a 207 is the normal way to say "no such property";
+        - a server that wraps that same per-resource detail under a
+          different top-level error status instead of 207 (confirmed on a
+          real Apache instance: 424 Failed Dependency, for a collection
+          DELETE one locked member blocked) still raises
+          :class:`~webdav.exceptions.MultiStatusError`, not the generic
+          status-only exception - see :func:`~webdav.dav.multistatus.multistatus_failure`.
         """
-        _raise_for_status(self, path=self._error_path())
         method = self.request.method if self.request is not None else None
+        if 400 <= self.status_code < 600 and method != Method.PROPFIND:
+            failure = multistatus_failure(self)
+            if failure is not None:
+                failure.raise_for_status()
+        _raise_for_status(self, path=self._error_path())
         if (
             self.status_code == requests.codes.multi_status
             and method != Method.PROPFIND

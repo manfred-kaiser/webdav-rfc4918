@@ -18,6 +18,7 @@ from webdav.dav.xml_utils import (
     DAV_NAMESPACE,
     clark,
     dav,
+    parse_xml,
     split_clark,
     sub_dav_element,
     to_xml_string,
@@ -28,6 +29,8 @@ from webdav.transport.parse_utils import parse_uint
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from datetime import datetime
+
+    from requests import Response as HTTPResponse
 
 logger = logging.getLogger(__name__)
 
@@ -259,22 +262,7 @@ def build_proppatch_body(
     root = Element("{DAV:}propertyupdate")
 
     if set_props:
-        set_el = sub_dav_element(root, "set")
-        prop_el = sub_dav_element(set_el, "prop")
-        for name, value in set_props.items():
-            namespace, local_name = _resolve_name(name)
-            tag = clark(namespace, local_name)
-            if isinstance(value, Element):
-                wrapper = Element(tag)
-                wrapper.append(value)
-                prop_el.append(wrapper)
-            else:
-                el = Element(tag)
-                if not isinstance(value, str):
-                    msg = f"property value for {name!r} must be str or Element, got {type(value).__name__}"
-                    raise TypeError(msg)
-                el.text = value
-                prop_el.append(el)
+        root.append(_build_set_element(set_props))
 
     if remove_props:
         remove_el = sub_dav_element(root, "remove")
@@ -283,6 +271,71 @@ def build_proppatch_body(
             prop_el.append(Element(clark(namespace, local_name)))
 
     return to_xml_string(root)
+
+
+def _build_set_element(set_props: "dict[str | PropName, str | Element]") -> Element:
+    """Build a ``<d:set><d:prop>...</d:prop></d:set>`` block (shared by PROPPATCH and MKCOL)."""
+    set_el = Element("{DAV:}set")
+    prop_el = sub_dav_element(set_el, "prop")
+    for name, value in set_props.items():
+        namespace, local_name = _resolve_name(name)
+        tag = clark(namespace, local_name)
+        if isinstance(value, Element):
+            wrapper = Element(tag)
+            wrapper.append(value)
+            prop_el.append(wrapper)
+        else:
+            el = Element(tag)
+            if not isinstance(value, str):
+                msg = f"property value for {name!r} must be str or Element, got {type(value).__name__}"
+                raise TypeError(msg)
+            el.text = value
+            prop_el.append(el)
+    return set_el
+
+
+def build_mkcol_body(set_props: "dict[str | PropName, str | Element]") -> str:
+    """Build an Extended MKCOL request body (RFC 5689 sec. 3).
+
+    Args:
+        set_props: Properties to set on the collection as it is created -
+            see :func:`build_proppatch_body` for the accepted name/value
+            forms. To create a collection of a non-default type, include
+            ``"resourcetype"`` with an :class:`~xml.etree.ElementTree.Element`
+            whose children are the resource type elements - ``<d:collection/>``
+            itself MUST be among them for the result to still be a collection
+            (sec. 3).
+
+    """
+    if not set_props:
+        msg = "an Extended MKCOL needs at least one property to set (RFC 5689 sec. 3)"
+        raise ValueError(msg)
+    root = Element("{DAV:}mkcol")
+    root.append(_build_set_element(set_props))
+    return to_xml_string(root)
+
+
+def parse_mkcol_response(http_response: "HTTPResponse") -> "list[PropStat]":
+    """Parse a failed Extended MKCOL's ``<d:mkcol-response>`` body (RFC 5689 sec. 3).
+
+    One :class:`PropStat` per property the request tried to set - the
+    collection was not created at all (sec. 3: "either all succeed or all
+    fail"), so every entry here describes why, not what state the
+    collection ended up in. An empty list for a body that isn't a
+    ``mkcol-response`` (e.g. a plain-text error from a server that does not
+    support Extended MKCOL) rather than raising - the caller already has
+    the real HTTP status to act on.
+    """
+    content = http_response.content
+    if not content:
+        return []
+    try:
+        tree = parse_xml(content)
+    except MalformedResponseError:
+        return []
+    if split_clark(tree.tag)[1] != "mkcol-response":
+        return []
+    return [PropStat(el) for el in tree.findall(dav("propstat"))]
 
 
 #: The local part of an XML name (NCName): a letter or underscore, then letters,

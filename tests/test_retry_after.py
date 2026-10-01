@@ -9,6 +9,7 @@ import pytest
 
 from tests.scripted_server import Reply, Seen, scripted_server
 from webdav import Session
+from webdav import session as session_module
 from webdav.transport import retry as retry_module
 from webdav.transport.retry import MAX_RETRY_AFTER
 
@@ -22,6 +23,24 @@ def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     monkeypatch.setattr(retry_module, "BACKOFF", 0.5)
     monkeypatch.setattr(
         retry_module, "time", types.SimpleNamespace(sleep=waited.append)
+    )
+    return waited
+
+
+@pytest.fixture
+def redirect_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Like ``sleeps``, but for the ``time`` reference ``Session._follow_redirects`` waits through.
+
+    ``perf_counter`` is forwarded to the real one (not faked): session.py
+    also uses it, unconditionally, to time every response's ``.elapsed``.
+    """
+    import time as real_time  # noqa: PLC0415
+
+    waited: list[float] = []
+    monkeypatch.setattr(
+        session_module,
+        "time",
+        types.SimpleNamespace(sleep=waited.append, perf_counter=real_time.perf_counter),
     )
     return waited
 
@@ -126,3 +145,61 @@ def test_a_discarded_streamed_response_is_closed_before_the_retry(
     assert closed == [503]  # the discarded attempt - not the one handed back
     assert response.status_code == 200
     assert response.content == b""  # still readable: not closed by the fix
+
+
+# ---------------------------------------------------------------------------
+# RFC 9110 §10.2.3: "sent with any 3xx response" - redirects, not just retries
+# ---------------------------------------------------------------------------
+
+
+def test_a_retry_after_on_a_redirect_is_waited_for(redirect_sleeps: list[float]) -> None:
+
+    def respond(seen: Seen) -> "tuple[int, dict[str, str], bytes]":
+        if seen.path == "/a":
+            return 301, {"Location": "/b", "Retry-After": "2"}, b""
+        return 200, {}, b"ok"
+
+    with scripted_server(respond) as (url, rec):
+        response = Session().get(f"{url}/a")
+    assert response.status_code == 200
+    assert len(rec.requests) == 2
+    assert redirect_sleeps == [2.0]
+
+
+def test_a_redirects_retry_after_past_the_cap_refuses_the_redirect(
+    redirect_sleeps: list[float],
+) -> None:
+
+    asked = str(int(MAX_RETRY_AFTER) + 1)
+
+    def respond(seen: Seen) -> "tuple[int, dict[str, str], bytes]":
+        if seen.path == "/a":
+            return 301, {"Location": "/b", "Retry-After": asked}, b""
+        return 200, {}, b"ok"
+
+    with scripted_server(respond) as (url, rec):
+        response = Session().get(f"{url}/a")
+    assert response.status_code == 301  # handed back unfollowed
+    assert len(rec.requests) == 1
+    assert redirect_sleeps == []
+    assert response.redirect_refusal is not None
+
+
+def test_a_redirects_retry_after_as_an_http_date_past_the_cap_also_refuses(
+    redirect_sleeps: list[float],
+) -> None:
+
+    when = format_datetime(
+        datetime.now(UTC) + timedelta(seconds=MAX_RETRY_AFTER + 60), usegmt=True
+    )
+
+    def respond(seen: Seen) -> "tuple[int, dict[str, str], bytes]":
+        if seen.path == "/a":
+            return 301, {"Location": "/b", "Retry-After": when}, b""
+        return 200, {}, b"ok"
+
+    with scripted_server(respond) as (url, rec):
+        response = Session().get(f"{url}/a")
+    assert response.status_code == 301
+    assert len(rec.requests) == 1
+    assert redirect_sleeps == []
