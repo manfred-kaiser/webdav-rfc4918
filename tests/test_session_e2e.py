@@ -5,13 +5,24 @@ import io
 import pytest
 
 from tests.credentials import AUTH
+from tests.scripted_server import Reply, Seen, scripted_server
 from webdav import (
     FileSystem,
+    HTTPStatusError,
+    IsACollectionError,
     ResourceAlreadyExistsError,
     ResourceLockedError,
     ResourceNotFoundError,
 )
 from webdav.dav.locks import EXCLUSIVE
+
+#: A PROPFIND answer for ``/f``: a plain file.
+_FILE_ONLY = (
+    b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/f</d:href>'
+    b"<d:propstat><d:prop><d:resourcetype/><d:getcontentlength>1</d:getcontentlength>"
+    b"</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
+    b"</d:multistatus>"
+)
 
 
 def test_mkdir_and_ls(fs: FileSystem) -> None:
@@ -48,6 +59,31 @@ def test_upload_overwrite_protection(fs: FileSystem) -> None:
     buf = io.BytesIO()
     fs.download_fileobj("a.txt", buf)
     assert buf.getvalue() == b"v2"
+
+
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_upload_onto_a_collection_is_an_error_that_says_so(
+    fs: FileSystem, overwrite: bool
+) -> None:
+    fs.mkdir("docs")
+    with pytest.raises(IsACollectionError):
+        fs.upload_fileobj(io.BytesIO(b"x"), "docs", overwrite=overwrite)
+    assert fs.ls("docs") == []
+
+
+def test_a_405_for_an_upload_is_not_called_a_collection_if_it_is_none() -> None:
+    """A read-only resource answers a PUT with 405 too."""
+
+    def respond(seen: Seen) -> Reply:
+        if seen.method == "PROPFIND":
+            return 207, {"Content-Type": "application/xml"}, _FILE_ONLY
+        return 405, {"Content-Type": "text/plain", "Allow": "GET, PROPFIND"}, b""
+
+    with scripted_server(respond) as (url, _), FileSystem(url) as client:
+        with pytest.raises(HTTPStatusError) as caught:
+            client.upload_fileobj(io.BytesIO(b"x"), "f", overwrite=True)
+        assert not isinstance(caught.value, IsACollectionError)
+        assert caught.value.status_code == 405
 
 
 def test_open_read_text_and_binary(fs: FileSystem) -> None:
