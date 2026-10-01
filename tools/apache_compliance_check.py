@@ -67,8 +67,9 @@ def main() -> int:
             print(f"  - {item}", file=sys.stderr)
         print(
             "\nOn openSUSE: sudo zypper install apache2 apache2-utils\n"
-            "On another distro, adjust MODULE_DIR in tests/apache_instance.py - "
-            "see docs/apache-compliance-check.md.",
+            "On Debian/Ubuntu: sudo apt-get install apache2 apache2-utils\n"
+            "On another distro not in tests/apache_instance.py's _PROFILES, "
+            "add one there - see docs/apache-compliance-check.md.",
             file=sys.stderr,
         )
         return 1
@@ -102,7 +103,7 @@ def main() -> int:
             print(
                 f"\nApache left running at http://{apache_instance.HOST}:{apache_instance.PORT} "
                 f"(user {apache_instance.TEST_USER!r}, password {apache_instance.TEST_PASSWORD!r}).\n"
-                f"Stop it with: {apache_instance.HTTPD} -f {conf_file} -k stop"
+                f"Stop it with: {apache_instance.httpd_binary()} -f {conf_file} -k stop"
             )
         else:
             apache_instance.stop(conf_file)

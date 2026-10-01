@@ -90,3 +90,31 @@ jobs:
         python -m pip install hatch==1.18.0
     - name: Build docs
       run: hatch run docs:build
+
+  # Cross-check against a real, independent server implementation - this
+  # project's actual deployment target, not just wsgidav (see
+  # docs/apache-compliance-check.md). New (not yet proven stable across many
+  # runs) and only covers one distro's Apache build, so continue-on-error
+  # for now rather than blocking on day one - promote to a required check
+  # once it has been green for a while.
+  apache:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+    - name: Set up Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      with:
+        python-version: '3.13'
+        cache: 'pip'
+    - name: Install Apache + mod_dav
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y apache2 apache2-utils
+    - name: Install hatch
+      run: |
+        python -m pip install pip==26.2.1
+        python -m pip install hatch==1.18.0
+    - name: Run the Apache compliance check (starts/stops its own instance - see tests/apache_instance.py)
+      run: hatch test tests/test_apache_compliance.py -v

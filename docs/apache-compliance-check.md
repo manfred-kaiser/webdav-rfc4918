@@ -63,10 +63,14 @@ rather than failing confusingly later), writes a throwaway instance under
 `tests/test_apache_compliance.py` against it, and stops Apache again
 afterwards - even on a test failure or Ctrl-C. Exit code is pytest's.
 
-Both this script and the automatic fixture hardcode openSUSE's module path
-(`/usr/lib64/apache2-prefork/`); on another distro, edit `MODULE_DIR` near
-the top of `tools/apache_compliance_check.py` (the module filenames
-themselves - `mod_dav.so` etc. - are the same everywhere).
+Both this script and the automatic fixture know two layouts out of the box
+(`tests/apache_instance.py`'s `_PROFILES`): openSUSE/RPM
+(`/usr/sbin/httpd`, `/usr/lib64/apache2-prefork/`) and Debian/Ubuntu
+(`/usr/sbin/apache2`, `/usr/lib/apache2/modules/`) - the first one that is
+actually fully present (binary and every required module) wins. On a
+distro that is neither, add a profile there (the module filenames
+themselves - `mod_dav.so` etc. - are the same everywhere; only the binary
+name and install paths differ).
 
 ## Standing it up by hand (what `tests/apache_instance.py` automates)
 
@@ -231,12 +235,12 @@ instead (a different, separate instance) - adjust the paths below to
 whichever one applies.
 
 - **"Apache did not come up within 5s"**: check that instance's
-  `logs/error.log` - usually a module path that does not match your distro
-  (see `MODULE_DIR` in `tests/apache_instance.py`), or a stale PID file
-  from a previous instance that was not shut down cleanly
+  `logs/error.log` - usually a distro whose layout matches neither built-in
+  profile (see `_PROFILES` in `tests/apache_instance.py`), or a stale PID
+  file from a previous instance that was not shut down cleanly
   (`rm <instance-dir>/logs/httpd.pid`), or something else already listening
   on port 8765 (a manually-started instance you forgot about, most likely -
-  `pgrep -fa 'httpd.*apache-webdav-test\|httpd.*webdav-rfc4918-apache-test'`).
+  `pgrep -fa 'httpd.*apache-webdav-test\|apache2.*apache-webdav-test\|httpd.*webdav-rfc4918-apache-test\|apache2.*webdav-rfc4918-apache-test'`).
 - **A test fails with "already exists" / 409 on the very first test in a
   run**: `dav-root` has state left over from a previous, uncleaned run -
   `rm -rf <instance-dir>/dav-root/*` (the automatic fixture and the

@@ -12,12 +12,9 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
-HTTPD = "/usr/sbin/httpd"
-#: openSUSE's module directory - see docs/apache-compliance-check.md if
-#: this does not match your distro.
-MODULE_DIR = Path("/usr/lib64/apache2-prefork")
 REQUIRED_MODULES = (
     "mod_authn_core.so",
     "mod_authz_core.so",
@@ -34,6 +31,45 @@ TEST_USER = "testuser"
 TEST_PASSWORD = "testpass123"  # noqa: S105
 HOST = "127.0.0.1"
 PORT = 8765
+
+
+@dataclass(frozen=True)
+class _Profile:
+    """Where one distro's ``apache2``/``httpd`` package puts its binary and modules."""
+
+    name: str
+    httpd: str
+    module_dir: Path
+
+    def missing(self) -> list[str]:
+        """What is missing for this specific profile - empty if it is fully usable."""
+        missing = []
+        if not Path(self.httpd).exists():
+            missing.append(self.httpd)
+        missing += [
+            str(self.module_dir / name)
+            for name in REQUIRED_MODULES
+            if not (self.module_dir / name).exists()
+        ]
+        return missing
+
+
+#: Tried in order; the first fully present one wins. Same ``httpd`` binary
+#: underneath everywhere (both accept the same ``-f``/``-k`` flags) - only
+#: the install paths differ per packaging.
+_PROFILES = (
+    _Profile("openSUSE/RPM", "/usr/sbin/httpd", Path("/usr/lib64/apache2-prefork")),
+    _Profile("Debian/Ubuntu", "/usr/sbin/apache2", Path("/usr/lib/apache2/modules")),
+)
+
+
+def _resolve_profile() -> "_Profile | None":
+    """The first fully-usable profile, or ``None`` if every one is missing something."""
+    for profile in _PROFILES:
+        if not profile.missing():
+            return profile
+    return None
+
 
 HTTPD_CONF_TEMPLATE = """\
 ServerRoot "{instance_dir}"
@@ -76,30 +112,33 @@ DocumentRoot "{instance_dir}/dav-root"
 
 
 def missing_prerequisites() -> list[str]:
-    """What is missing to stand up a local instance - empty if nothing is."""
-    missing = []
-    if not Path(HTTPD).exists():
-        missing.append(f"{HTTPD} (package: apache2)")
+    """What is missing to stand up a local instance - empty if any one known profile is fully usable.
+
+    Each item is prefixed with which profile it belongs to, since more than
+    one may be partially present (e.g. a stray ``httpd`` binary with no
+    matching modules) without either being usable on its own.
+    """
+    if _resolve_profile() is not None:
+        return []
     if shutil.which("htpasswd") is None:
-        missing.append("htpasswd (package: apache2-utils)")
-    missing += [
-        f"{MODULE_DIR / name}"
-        for name in REQUIRED_MODULES
-        if not (MODULE_DIR / name).exists()
+        return ["htpasswd (package: apache2-utils, or your distro's equivalent)"]
+    return [
+        f"[{profile.name}] {item}"
+        for profile in _PROFILES
+        for item in profile.missing()
     ]
-    return missing
 
 
 def write_instance(instance_dir: Path, *, clean: bool = True) -> Path:
     """Create/refresh the instance's config, auth file and directories; return the config path.
 
     Raises:
-        RuntimeError: a prerequisite (see :func:`missing_prerequisites`) is missing.
+        RuntimeError: no known profile (see :func:`missing_prerequisites`) is fully usable.
 
     """
-    missing = missing_prerequisites()
-    if missing:
-        msg = "missing: " + ", ".join(missing)
+    profile = _resolve_profile()
+    if profile is None or shutil.which("htpasswd") is None:
+        msg = "missing: " + ", ".join(missing_prerequisites())
         raise RuntimeError(msg)
     dav_root = instance_dir / "dav-root"
     if clean:
@@ -109,9 +148,7 @@ def write_instance(instance_dir: Path, *, clean: bool = True) -> Path:
     htpasswd_file = instance_dir / "htpasswd"
     if not htpasswd_file.exists():
         htpasswd_bin = shutil.which("htpasswd")
-        assert (
-            htpasswd_bin is not None
-        )  # missing_prerequisites() would have raised above
+        assert htpasswd_bin is not None  # checked above
         subprocess.run(
             [htpasswd_bin, "-bc", str(htpasswd_file), TEST_USER, TEST_PASSWORD],
             check=True,
@@ -119,7 +156,10 @@ def write_instance(instance_dir: Path, *, clean: bool = True) -> Path:
     conf_file = instance_dir / "httpd.conf"
     conf_file.write_text(
         HTTPD_CONF_TEMPLATE.format(
-            instance_dir=instance_dir, modules=MODULE_DIR, host=HOST, port=PORT
+            instance_dir=instance_dir,
+            modules=profile.module_dir,
+            host=HOST,
+            port=PORT,
         )
     )
     return conf_file
@@ -148,11 +188,32 @@ def wait_until_up(url: str, timeout: float = 5.0) -> None:
 
 
 def start(conf_file: Path) -> None:
-    """Start Apache with ``conf_file``, and wait until it answers requests."""
-    subprocess.run([HTTPD, "-f", str(conf_file), "-k", "start"], check=True)
+    """Start Apache with ``conf_file``, and wait until it answers requests.
+
+    Raises:
+        RuntimeError: No known profile is usable (see :func:`missing_prerequisites`) -
+            checked again here since a caller may hold a stale ``conf_file``
+            from a profile that stopped being usable since it was written.
+
+    """
+    profile = _resolve_profile()
+    if profile is None:
+        msg = "missing: " + ", ".join(missing_prerequisites())
+        raise RuntimeError(msg)
+    subprocess.run([profile.httpd, "-f", str(conf_file), "-k", "start"], check=True)
     wait_until_up(f"http://{HOST}:{PORT}/")
 
 
 def stop(conf_file: Path) -> None:
     """Stop the Apache instance ``conf_file`` describes."""
-    subprocess.run([HTTPD, "-f", str(conf_file), "-k", "stop"], check=False)
+    subprocess.run([httpd_binary(), "-f", str(conf_file), "-k", "stop"], check=False)
+
+
+def httpd_binary() -> str:
+    """The resolved profile's ``httpd``/``apache2`` binary - falls back to the first profile's.
+
+    For display purposes (e.g. "stop it with: ...") after :func:`start` has
+    already confirmed a profile is usable; not itself a usability check.
+    """
+    profile = _resolve_profile()
+    return profile.httpd if profile is not None else _PROFILES[0].httpd
