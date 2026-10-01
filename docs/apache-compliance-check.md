@@ -15,9 +15,14 @@ ordinary `pytest` suite (41 tests, reproducible like any other) - not
   throwaway instance, runs these 41 tests against it, and stops it again
   afterwards. No flags, no environment variables, nothing to remember.
 - **If it is not installed**, the same `pytest` run skips this file with a
-  clear reason (visible in the `-ra` summary) instead of failing - this is
-  why it is not part of CI (GitHub's runners do not have Apache, and the
-  module paths this project checks are openSUSE's anyway - see below).
+  clear reason (visible in the `-ra` summary) instead of failing.
+- **On GitHub**, this runs as its own workflow
+  (`.github/workflows/apache-compliance.yml`, a separate status/badge from
+  the main `ci.yml`), which installs Apache first - `ci.yml`'s own jobs
+  still skip this file, same as any environment without Apache installed.
+  New and `continue-on-error: true` for now (only proven stable against
+  openSUSE's Apache build so far, not yet Ubuntu's - see below); it does
+  not block a merge yet.
 - **To point at a specific instance instead** (a remote one, or one with
   non-default configuration you want to test against), set
   `WEBDAV_TEST_APACHE_URL` (`WEBDAV_TEST_APACHE_USER`/`_PASSWORD` default to

@@ -1,10 +1,11 @@
 """Compliance check against a real Apache + mod_dav server - an ordinary, reproducible pytest suite.
 
-Not part of the automated CI suite (wsgidav already covers that broad
-ground, see ``tests/test_session_e2e.py``) - this is an independent-
-implementation cross-check, since server implementations are known to
-disagree on locking/property edge cases in particular, and this project's
-primary deployment target is Apache specifically. Skipped only when no
+Runs as its own GitHub Actions workflow (.github/workflows/apache-compliance.yml,
+separate from ci.yml - see that file and docs/apache-compliance-check.md)
+- an independent-implementation cross-check, since server implementations
+are known to disagree on locking/property edge cases in particular, and
+this project's primary deployment target is Apache specifically. Skipped
+only when no
 Apache is reachable at all: with ``WEBDAV_TEST_APACHE_URL`` set, these
 tests run against that (possibly remote, possibly specially-configured)
 instance; otherwise, if a local Apache + ``mod_dav`` install is found

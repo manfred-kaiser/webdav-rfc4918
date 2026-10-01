@@ -9,6 +9,7 @@
   <a href="https://pypi.org/project/webdav-rfc4918"><img src="https://img.shields.io/pypi/v/webdav-rfc4918" alt="PyPI"></a>
   <a href="https://pypi.org/project/webdav-rfc4918"><img src="https://img.shields.io/pypi/pyversions/webdav-rfc4918" alt="Python versions"></a>
   <a href="https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/ci.yml"><img src="https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/apache-compliance.yml"><img src="https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/apache-compliance.yml/badge.svg" alt="Apache compliance"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/manfred-kaiser/webdav-rfc4918" alt="License"></a>
   <a href="https://github.com/psf/black"><img src="https://img.shields.io/badge/code%20style-black-000000.svg" alt="Code style: black"></a>
   <a href="https://github.com/manfred-kaiser/webdav-rfc4918/issues"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome"></a>
