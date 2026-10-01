@@ -24,6 +24,12 @@ from webdav.fsspec import WebdavFileSystem
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
+# fsspec 2024.12 and 2025.x define the class-scoped fixtures of their own suite as instance
+# methods, which pytest 9 warns about; fsspec has fixed that since. Not ours to change.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:Class-scoped fixture defined as instance method"
+)
+
 
 class WebdavAbstractFixtures(AbstractFixtures):
     """Supplies the ``fs``/``fs_join``/``fs_path`` fixtures the abstract suite needs.

@@ -50,7 +50,8 @@ jobs:
     - name: Run tests (against a real wsgidav server, see tests/server.py)
       run: hatch test -i py=${{ matrix.python-version }}
 
-  # The declared lower bounds (pyproject.toml) actually work - and are ones without a
+  # The declared lower bounds (pyproject.toml) actually work (fsspec too: 2024.12.0 is the
+  # oldest release the whole suite, conformance tests included, passes with) - and are ones without a
   # known vulnerability (they were raised past requests CVE-2024-35195/-47081 and
   # urllib3 CVE-2026-44431/-44432): the session leans
   # on a few requests internals (get_redirect_target, merge_environment_settings,
@@ -69,8 +70,8 @@ jobs:
     - name: Install the oldest supported requests/urllib3
       run: |
         python -m pip install pip==26.2.1
-        python -m pip install "requests==2.32.4" "urllib3==2.7.0" -e "." \
-          pytest pytest-cov pytest-xdist cheroot fsspec wsgidav typing-extensions hypothesis
+        python -m pip install "requests==2.32.4" "urllib3==2.7.0" "fsspec==2024.12.0" -e "." \
+          pytest pytest-cov pytest-xdist cheroot wsgidav typing-extensions hypothesis
     - name: Run tests
       run: python -m pytest tests/
 

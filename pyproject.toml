@@ -27,7 +27,7 @@ dav = "webdav.cli:main"
 
 [project.optional-dependencies]
 docs = [ "myst-parser", "sphinx", "sphinx-copybutton", "sphinx-rtd-theme" ]
-fsspec = [ "fsspec>=2022.11.0" ]
+fsspec = [ "fsspec>=2024.12.0" ]
 
 [project.urls]
 Homepage = "https://github.com/manfred-kaiser/webdav-rfc4918"
