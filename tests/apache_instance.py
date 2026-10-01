@@ -214,16 +214,31 @@ def start(conf_file: Path) -> None:
     """Start Apache with ``conf_file``, and wait until it answers requests.
 
     Raises:
-        RuntimeError: No known profile is usable (see :func:`missing_prerequisites`) -
-            checked again here since a caller may hold a stale ``conf_file``
-            from a profile that stopped being usable since it was written.
+        RuntimeError: No known profile is usable (see :func:`missing_prerequisites`),
+            or ``apache2``/``httpd -k start`` itself failed - the message
+            includes its stdout/stderr (e.g. the ``AH0....`` diagnostic),
+            since that output is otherwise easy to lose: inherited stdio from
+            a plain, uncaptured ``subprocess.run`` doesn't reliably reach the
+            pytest-xdist worker's own captured output or the CI log.
 
     """
     profile = _resolve_profile()
     if profile is None:
         msg = "missing: " + ", ".join(missing_prerequisites())
         raise RuntimeError(msg)
-    subprocess.run([profile.httpd, "-f", str(conf_file), "-k", "start"], check=True)
+    result = subprocess.run(
+        [profile.httpd, "-f", str(conf_file), "-k", "start"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        msg = (
+            f"{profile.httpd} -f {conf_file} -k start "
+            f"failed (exit {result.returncode}):\n"
+            f"{result.stdout}{result.stderr}"
+        )
+        raise RuntimeError(msg)
     wait_until_up(f"http://{HOST}:{PORT}/")
 
 
