@@ -593,6 +593,64 @@ def test_moving_a_file_onto_itself_keeps_the_file(fs: WebdavFileSystem) -> None:
     assert fs.cat_file("/a") == b"1"
 
 
+@pytest.mark.parametrize("destination", ["/d", "d", "d/", "./d", "/x/../d"])
+def test_moving_a_path_onto_itself_is_a_no_op_whatever_its_spelling(
+    fs: WebdavFileSystem, destination: str
+) -> None:
+    """fsspec compares the strings; ``mv("/d", "d")`` would copy ``d`` into itself, then delete it."""
+    fs.pipe_file("/d/f", b"1")
+    fs.pipe_file("/d/sub/g", b"2")
+    fs.mv("/d", destination, recursive=True)
+    assert sorted(fs.find("/")) == ["/d/f", "/d/sub/g"]
+
+
+@pytest.mark.parametrize("destination", ["/d/sub", "/d/sub/", "d/sub", "/d/new"])
+@pytest.mark.parametrize("operation", ["cp", "mv"])
+def test_a_directory_is_never_copied_or_moved_into_itself(
+    fs: WebdavFileSystem, operation: str, destination: str
+) -> None:
+    """Into an *existing* directory below it the work is done entry by entry, and
+    ``mv`` ends by deleting the source - the whole tree, with the copy in it."""
+    fs.pipe_file("/d/f", b"1")
+    fs.pipe_file("/d/sub/g", b"2")
+    with pytest.raises(PermissionError):
+        getattr(fs, operation)("/d", destination, recursive=True)
+    assert sorted(fs.find("/")) == ["/d/f", "/d/sub/g"]
+
+
+def test_a_directory_is_never_copied_onto_itself(fs: WebdavFileSystem) -> None:
+    """fsspec would nest it: ``cp("/d", "/d")`` is a copy into the existing directory ``/d``."""
+    fs.pipe_file("/d/f", b"1")
+    for destination in ("/d", "d/", "./d"):
+        with pytest.raises(PermissionError):
+            fs.cp("/d", destination, recursive=True)
+    assert sorted(fs.find("/")) == ["/d/f"]
+
+
+@pytest.mark.parametrize("destination", ["/x", "x", "/e/", "/e"])
+@pytest.mark.parametrize("operation", ["cp", "mv"])
+def test_the_root_is_never_copied_or_moved(
+    fs: WebdavFileSystem, operation: str, destination: str
+) -> None:
+    """Every destination is below the root; the server answers a root COPY/MOVE with a 500."""
+    fs.pipe_file("/d/f", b"1")
+    fs.mkdir("/e")
+    for root in ("/", "", "/d/..", "."):
+        with pytest.raises(PermissionError):
+            getattr(fs, operation)(root, destination, recursive=True)
+    assert sorted(fs.find("/", withdirs=True)) == ["/", "/d", "/d/f", "/e"]
+
+
+def test_a_non_recursive_copy_into_a_directory_below_it_is_not_refused(
+    fs: WebdavFileSystem,
+) -> None:
+    """Without ``recursive`` a directory is not taken along at all: nothing to refuse, nothing copied."""
+    fs.pipe_file("/d/f", b"1")
+    fs.mkdir("/d/sub")
+    fs.cp("/d", "/d/sub")
+    assert sorted(fs.find("/")) == ["/d/f"]
+
+
 def test_copy_creates_the_missing_parents_of_the_destination(
     fs: WebdavFileSystem,
 ) -> None:

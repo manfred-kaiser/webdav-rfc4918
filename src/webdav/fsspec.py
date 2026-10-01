@@ -72,8 +72,21 @@ if TYPE_CHECKING:
 
 
 def _absolute(name: str) -> str:
-    """``name`` (relative to the base URL, as :class:`~webdav.resource.Resource` names are) as an fsspec path: with its leading ``/``."""
-    return "/" + name.lstrip("/")
+    """``name`` (relative to the base URL, as :class:`~webdav.resource.Resource` names are) as an fsspec path.
+
+    With its leading ``/``, and ``.``, ``..`` and ``//`` resolved, so that two spellings of
+    one path are one string - what ``find``/``walk``/``glob`` build their names from. A ``..``
+    that would leave the root stays in the path: the session refuses it, as it always did.
+    """
+    parts: list[str] = []
+    for part in name.split("/"):
+        if part in ("", "."):
+            continue
+        if part == ".." and parts and parts[-1] != "..":
+            parts.pop()
+        else:
+            parts.append(part)
+    return "/" + "/".join(parts)
 
 
 def _tuple_from_json(value: Any) -> Any:
@@ -366,6 +379,28 @@ class WebdavFileSystem(AbstractFileSystem):
             return None
         return stripped1, stripped2
 
+    def _refuse_into_itself(
+        self, path1: "str | list[str]", path2: "str | list[str]"
+    ) -> None:
+        """Refuse to copy or move a directory into itself, or anything below it.
+
+        The server refuses the single COPY/MOVE of a tree into itself (RFC 4918: 403), but
+        not the per-entry way ``super().copy()``/``mv()`` take when the destination
+        exists: ``mv("d", "d/sub")`` copies ``d`` to ``d/sub/d``, then deletes ``d`` - and
+        with it the copy. The root is the same case: every destination is below it.
+        """
+        if not isinstance(path2, str):
+            return
+        destination = self._strip(path2)
+        for source in [path1] if isinstance(path1, str) else path1:
+            stripped = self._strip(source)
+            reaches = stripped in (self.root_marker, destination)
+            reaches = reaches or destination.startswith(f"{stripped}/")
+            if reaches and self.isdir(stripped):
+                raise PermissionError(
+                    errno.EACCES, "Permission denied", f"{stripped} -> {destination}"
+                )
+
     def copy(
         self,
         path1: "str | list[str]",
@@ -389,6 +424,8 @@ class WebdavFileSystem(AbstractFileSystem):
         also what fsspec's own test suite expects - not an empty directory
         created at the destination.
         """
+        if recursive:  # a non-recursive copy never takes a directory along
+            self._refuse_into_itself(path1, path2)
         shortcut = self._whole_tree_shortcut(
             path1, path2, recursive=recursive, maxdepth=maxdepth
         )
@@ -429,7 +466,19 @@ class WebdavFileSystem(AbstractFileSystem):
         before it reaches ``filesystem.move``/``super().mv()``, why there is
         no "not recursive, path1 is a directory" special case, and why a
         list ``path1``/``path2`` never takes the single-native-MOVE shortcut.
+
+        A path onto itself is a no-op, as in fsspec - whatever its spelling: the base
+        implementation compares the strings as given, so ``mv("d", "/d")`` would copy
+        ``d`` into itself and then delete it.
         """
+        if (
+            isinstance(path1, str)
+            and isinstance(path2, str)
+            and self._strip(path1) == self._strip(path2)
+        ):
+            return
+        if recursive:
+            self._refuse_into_itself(path1, path2)
         shortcut = self._whole_tree_shortcut(
             path1, path2, recursive=recursive, maxdepth=maxdepth
         )

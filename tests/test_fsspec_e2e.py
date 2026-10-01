@@ -206,6 +206,30 @@ def test_dots_and_double_slashes_are_resolved_inside_the_root(server_url: str) -
         assert filesystem.cat_file(path) == b"A"
 
 
+@pytest.mark.parametrize(
+    "spelling",
+    ["./d", "d/.", "x/../d", "d/sub/..", "a/b/../../d", "/d//", "d/sub/../../d/./"],
+)
+def test_one_directory_has_one_name_whatever_its_spelling(
+    fs: WebdavFileSystem, spelling: str
+) -> None:
+    """``find``/``walk`` build their names from the path they are given."""
+    fs.pipe_file("d/sub/x.txt", b"1")
+    assert WebdavFileSystem._strip_protocol(spelling) == "/d"
+    assert sorted(fs.find(spelling, withdirs=True)) == ["/d", "/d/sub", "/d/sub/x.txt"]
+    assert [root for root, _dirs, _files in fs.walk(spelling)] == ["/d", "/d/sub"]
+    assert sorted(fs.expand_path(spelling, recursive=True)) == [
+        "/d",
+        "/d/sub",
+        "/d/sub/x.txt",
+    ]
+
+
+def test_a_path_that_climbs_out_of_the_root_is_left_for_the_session_to_refuse() -> None:
+    for path in ("..", "/../a", "a/../..", "a/../../b"):
+        assert ".." in WebdavFileSystem._strip_protocol(path)
+
+
 def test_every_name_a_listing_returns_is_a_fixed_point_of_strip_protocol(
     fs: WebdavFileSystem,
 ) -> None:
