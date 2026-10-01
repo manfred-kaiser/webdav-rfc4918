@@ -19,6 +19,7 @@ from webdav.exceptions import (
     ResourceNotFoundError,
     TLSHardeningDisabledWarning,
 )
+from webdav.url_safety import effective_origin
 
 # ---------------------------------------------------------------------------
 # Only full http(s) URLs are ever requested
@@ -160,6 +161,33 @@ def test_an_unparseable_destination_is_our_own_error() -> None:
 def test_a_relative_destination_needs_a_base_url() -> None:
     with pytest.raises(ClientError, match="full URL"):
         Session(retry=False).move("http://dav.example/a", "b")
+
+
+def test_a_cross_origin_destination_is_refused() -> None:
+    """RFC 6454: two origins are the same iff scheme, host and port all match - a COPY/MOVE across them is refused."""
+    with pytest.raises(ClientError, match="not on this session's base_url"):
+        Session("http://dav.example", retry=False).move(
+            "/a", "http://evil.example/b"
+        )
+
+
+def test_an_explicit_default_http_port_is_the_same_origin_as_none() -> None:
+    """RFC 6454 §4 step 6: fill in the scheme's default port before comparing - http's is 80, not just https' 443."""
+    assert effective_origin("http://dav.example:80/x") == effective_origin(
+        "http://dav.example/x"
+    )
+
+
+def test_a_scheme_relative_destination_is_refused() -> None:
+    """A "//host/path" Destination resolves relative to the request's own scheme - the same confusion RFC 6454 origin comparison exists to close."""
+    with pytest.raises(ClientError, match="scheme-relative"):
+        Session("http://dav.example", retry=False).move("/a", "//dav.example/b")
+
+
+def test_a_relative_destination_resolves_to_the_expected_absolute_url() -> None:
+    with scripted_server(always((201, {}, b""))) as (url, rec):
+        Session(url, retry=False).move("/a", "b")
+    assert rec.requests[0].headers["destination"] == f"{url}/b"
 
 
 # ---------------------------------------------------------------------------

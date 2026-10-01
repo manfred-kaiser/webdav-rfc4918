@@ -25,6 +25,11 @@ _MONTH = re.compile(
 )
 _TIME = re.compile(r"\b\d{1,2}:\d{2}:\d{2}\b", re.ASCII)
 
+#: The obsolete rfc850-date's own two-digit year (``DD-Mon-YY``, dashes - unlike
+#: IMF-fixdate/asctime, which both always carry a four-digit year and so never
+#: match this).
+_RFC850_TWO_DIGIT_YEAR = re.compile(r"\b\d{2}-[A-Za-z]{3}-(\d{2})\b")
+
 
 def _usable(value: datetime) -> "datetime | None":
     """``value`` if it can be converted and printed, else ``None`` (a bad offset, an overflow)."""
@@ -48,6 +53,30 @@ def fromisoformat(datetime_string: str) -> "datetime | None":
         return None
 
 
+def _rfc850_corrected_year(text: str, value: datetime) -> "datetime | None":
+    """Reinterpret ``value``'s year per RFC 9110 sec. 5.6.7, if ``text`` is an rfc850-date.
+
+    stdlib's own two-digit-year handling uses a fixed pivot (``<70`` -> 2000s,
+    else 1900s), not the RFC's "no more than 50 years in the future, relative
+    to now" rule - the two agree only by coincidence, and drift further apart
+    as "now" advances. IMF-fixdate and asctime both always carry a four-digit
+    year, so this never touches them.
+    """
+    match = _RFC850_TWO_DIGIT_YEAR.search(text)
+    if match is None:
+        return value
+    now = datetime.now(UTC)
+    corrected = (now.year // 100) * 100 + int(match.group(1))
+    if corrected > now.year + 50:
+        corrected -= 100
+    if corrected == value.year:
+        return value
+    try:
+        return value.replace(year=corrected)
+    except ValueError:
+        return None
+
+
 def from_rfc1123(datetime_string: str) -> "datetime | None":
     """Convert an HTTP-date (RFC 1123, and the obsolete RFC 850/asctime forms) to a datetime.
 
@@ -61,6 +90,10 @@ def from_rfc1123(datetime_string: str) -> "datetime | None":
             value = _usable(parsedate_to_datetime(text))
         except (TypeError, ValueError, IndexError, OverflowError):
             value = None
+        if value is not None:
+            value = _rfc850_corrected_year(text, value)
+        if value is not None:
+            value = _usable(value)
         if value is not None:
             return value
     return fromisoformat(text)

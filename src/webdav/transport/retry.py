@@ -10,13 +10,16 @@ sitting below ``requests`` never sees.
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Protocol, TypeVar
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 import requests.exceptions
 
 from webdav.dav.date_utils import from_rfc1123
 from webdav.exceptions import HTTPStatusError
 from webdav.transport.parse_utils import parse_uint
+
+if TYPE_CHECKING:
+    from requests import Response as HTTPResponse
 
 _T = TypeVar("_T")
 
@@ -40,11 +43,15 @@ class RetryFunc(Protocol):
         """Call ``f``, retrying it per the wrapper's policy."""
 
 
-def _retry_after(exc: HTTPStatusError) -> "float | None":
-    """How many seconds the server asked to wait (``Retry-After``: seconds or an HTTP-date), or ``None``."""
-    value = (
-        exc.response.headers.get("Retry-After", "") if exc.response is not None else ""
-    )
+def retry_after(response: "HTTPResponse | None") -> "float | None":
+    """How many seconds ``Retry-After`` (RFC 9110 sec. 10.2.3) asks to wait, or ``None``.
+
+    Accepts both wire forms: delta-seconds, and an HTTP-date (converted to a
+    delta against now, clamped to never go negative for a date already past).
+    Shared by the retry wrapper below and by redirect-following (sec. 10.2.3
+    applies the same header to "a 3xx response", not just a failure).
+    """
+    value = response.headers.get("Retry-After", "") if response is not None else ""
     seconds = parse_uint(value)
     if seconds is not None:
         return float(seconds)
@@ -81,7 +88,7 @@ def retry(enabled: bool = False, tries: int = 3) -> RetryFunc:
             except HTTPStatusError as exc:
                 if not exc.retryable or attempt + 1 == retries:
                     raise
-                asked = _retry_after(exc)
+                asked = retry_after(exc.response)
                 if asked is not None:
                     if asked > MAX_RETRY_AFTER:
                         raise

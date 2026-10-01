@@ -10,6 +10,7 @@ session's public API, so the file-system layer has no private door into it.
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from webdav.dav.multistatus import multistatus_failure
 from webdav.dav.urls import URL, relative_url_to
 from webdav.exceptions import ClientError, raise_for_status
 from webdav.methods import Method
@@ -86,13 +87,22 @@ class Remote:
 
         With ``multistatus`` (the default) a ``207`` reporting a failure
         for any individual resource raises too; a ``PROPFIND`` turns
-        that off, since a per-property 404 there is just data.
+        that off, since a per-property 404 there is just data. The same
+        flag also covers a server that wraps that per-resource detail
+        under a different top-level error status instead of 207 (confirmed
+        on a real Apache instance: 424 Failed Dependency, for a collection
+        DELETE one locked member blocked) - see
+        :func:`~webdav.dav.multistatus.multistatus_failure`.
 
         Whatever ``raise_on_error`` the session has is overridden: the error
         raised here is the one that names ``path`` (or ``error_path``).
         """
         url = self.locate(path, add_trailing_slash=add_trailing_slash).url
         response = self._session.request(method, url, raise_on_error=False, **kwargs)
+        if multistatus and 400 <= response.status_code < 600:
+            failure = multistatus_failure(response)
+            if failure is not None:
+                failure.raise_for_status()
         raise_for_status(response, path=display_url(error_path or path))
         if multistatus and response.status_code == HTTPStatus.MULTI_STATUS:
             # Via .multistatus, not parse_multistatus_response() directly,

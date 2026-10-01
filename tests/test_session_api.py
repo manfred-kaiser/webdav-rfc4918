@@ -168,6 +168,8 @@ def test_verb_headers_on_the_wire() -> None:
     assert refresh.headers["if"] == "(<opaquelocktoken:t>)"
     assert refresh.headers["timeout"] == "Second-30"
     assert refresh.body == b""
+    # RFC 4918 §9.10.2: "a server MUST ignore the Depth header on a LOCK refresh."
+    assert "depth" not in refresh.headers
 
 
 def test_a_callers_headers_take_precedence_over_the_convenience_kwargs() -> None:
@@ -199,6 +201,26 @@ def test_multistatus_failure_raises_for_writes_but_not_for_propfind() -> None:
         propfind = session.propfind(f"{url}/dir/", depth=1)
         propfind.raise_for_status()  # a per-resource status in a PROPFIND is data
         assert propfind.multistatus.responses
+
+
+def test_a_mixed_207_names_only_the_member_that_actually_failed() -> None:
+    """Appendix B's trap, the other way round: a succeeding sibling must not be blamed too."""
+    body = (
+        b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">'
+        b"<d:response><d:href>/dir/ok.txt</d:href>"
+        b"<d:status>HTTP/1.1 204 No Content</d:status></d:response>"
+        b"<d:response><d:href>/dir/locked.txt</d:href>"
+        b"<d:status>HTTP/1.1 423 Locked</d:status></d:response>"
+        b"</d:multistatus>"
+    )
+
+    def respond(_r: Seen) -> tuple[int, dict[str, str], bytes]:
+        return 207, {"Content-Type": "application/xml"}, body
+
+    with scripted_server(respond) as (url, _rec):
+        with pytest.raises(MultiStatusError) as exc_info:
+            Session().delete(f"{url}/dir/").raise_for_status()
+    assert list(exc_info.value.statuses) == ["/dir/locked.txt"]
 
 
 def test_history_of_a_followed_redirect_is_kept() -> None:
@@ -443,6 +465,11 @@ def test_weak_etags_and_contradictory_conditions_are_refused() -> None:
         session.delete("http://unused.invalid/a", if_match='W/"abc"')
     with pytest.raises(ValueError, match="forbids"):
         session.put("http://unused.invalid/a", b"x", if_match='"a"', overwrite=False)
+    # strong_etag()'s validation reached directly through if_match=, not just
+    # through dav.conditional.Condition - a regression in that wiring would
+    # not be caught by testing Condition alone.
+    with pytest.raises(ValueError, match="entity-tag"):
+        session.put("http://unused.invalid/a", b"x", if_match='"a"b"')
 
 
 def test_put_overwrite_false_is_atomic_on_a_real_server(server_url: str) -> None:

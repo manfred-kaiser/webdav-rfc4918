@@ -116,6 +116,17 @@ def test_a_weak_etag_is_refused() -> None:
         strong_etag('W/"abc"')
 
 
+def test_an_obs_text_byte_in_an_etag_is_refused() -> None:
+    """RFC 9110 §8.8.3's etagc grammar permits obs-text (%x80-FF) - this is a deliberately stricter choice.
+
+    (entity_tag's own ``_ETAGC`` excludes it alongside ``]``, for the
+    If-header-bracket-safety reason in conditional.py's module docstring.)
+    Pinned here so a future change to that choice is a conscious one.
+    """
+    with pytest.raises(ValueError):
+        strong_etag('"a\x80b"')
+
+
 # ---------------------------------------------------------------------------
 # FeatureDetection
 # ---------------------------------------------------------------------------

@@ -196,17 +196,27 @@ def _parse_error_codes(response: "Response") -> "frozenset[str]":
         return frozenset()
     tag = tree.tag
     local_name = tag.rpartition("}")[2] if tag.startswith("{") else tag
-    error_el = (
-        tree if local_name == "error" else tree.find(f"{{{_DAV_NAMESPACE}}}error")
-    )
-    if error_el is None:
-        return frozenset()
-    codes = set()
-    for child in error_el:
-        child_tag = child.tag
-        codes.add(
-            child_tag.rpartition("}")[2] if child_tag.startswith("{") else child_tag
+    if local_name == "mkcol-response":
+        # RFC 5689 sec. 3: an Extended MKCOL failure's <error> sits inside
+        # the <propstat> of the property that could not be set, not at the
+        # document root or directly under it like every other method's.
+        error_els = [
+            el
+            for propstat in tree.findall(f"{{{_DAV_NAMESPACE}}}propstat")
+            if (el := propstat.find(f"{{{_DAV_NAMESPACE}}}error")) is not None
+        ]
+    else:
+        single = (
+            tree if local_name == "error" else tree.find(f"{{{_DAV_NAMESPACE}}}error")
         )
+        error_els = [single] if single is not None else []
+    codes = set()
+    for error_el in error_els:
+        for child in error_el:
+            child_tag = child.tag
+            codes.add(
+                child_tag.rpartition("}")[2] if child_tag.startswith("{") else child_tag
+            )
     return frozenset(codes)
 
 

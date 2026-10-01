@@ -127,6 +127,45 @@ def test_same_origin_redirect_keeps_method_and_body() -> None:
     assert response.history[0].status_code == 301
 
 
+def test_a_300_or_a_304_is_never_treated_as_a_redirect_to_follow_or_refuse() -> None:
+    """RFC 9110 §15.4.1/§15.4.5: 300 and 304 are 3xx, but outside the followable-redirect set."""
+    with scripted_server(always((300, {"Location": "/elsewhere"}, b""))) as (url, rec):
+        response = Session(redirect_policy=RedirectPolicy.NEVER).get(f"{url}/f")
+    assert response.status_code == 300
+    assert len(rec.requests) == 1
+    assert response.redirect_refusal is None  # not "refused" either - never redirect-handled at all
+    response.raise_for_status()  # must not raise RedirectNotFollowedError
+
+    with scripted_server(always((304, {}, b""))) as (url, rec):
+        response = Session(redirect_policy=RedirectPolicy.NEVER).get(f"{url}/f")
+    assert response.status_code == 304
+    assert len(rec.requests) == 1
+    assert response.redirect_refusal is None
+
+
+def test_a_308_preserves_method_and_body_same_as_307() -> None:
+    """RFC 9110 §15.4.9: 308, like 307, MUST NOT change the request method."""
+    with scripted_server(
+        lambda r: redirect(308, "/dir/") if r.path == "/dir" else (207, {}, MULTISTATUS_EMPTY)
+    ) as (url, rec):
+        response = Session().propfind(f"{url}/dir", data=b"<propfind/>", depth=0)
+    assert response.status_code == 207
+    (second,) = rec.to("/dir/")
+    assert second.method == "PROPFIND"
+    assert second.body == b"<propfind/>"
+    assert response.history[0].status_code == 308
+
+
+def test_a_redirect_with_no_location_header_at_all_is_returned_as_is() -> None:
+    """Not a ``requests``-classified redirect at all (is_redirect needs a Location) - reaches the caller untouched."""
+    with scripted_server(always((301, {}, b""))) as (url, rec):
+        response = Session().get(f"{url}/f")
+    assert response.status_code == 301
+    assert len(rec.requests) == 1
+    assert response.redirect_refusal is None
+    response.raise_for_status()  # must not raise
+
+
 def test_redirect_loop_is_not_followed() -> None:
     with scripted_server(lambda r: redirect(302, r.path)) as (url, rec):
         response = Session().get(f"{url}/loop")
@@ -450,7 +489,7 @@ def test_an_extra_allowed_header_goes_along_in_any_case() -> None:
 
 
 def test_what_is_never_forwarded_stays_home_even_when_named_as_allowed() -> None:
-    headers = {name: "v" for name in NEVER_FORWARD}
+    headers = dict.fromkeys(NEVER_FORWARD, "v")
     assert cross_origin_headers(headers, NEVER_FORWARD) == {}
     assert cross_origin_headers(None) == {}
 
