@@ -15,17 +15,18 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+#: (.so filename, Apache's own LoadModule directive name for it).
 REQUIRED_MODULES = (
-    "mod_authn_core.so",
-    "mod_authz_core.so",
-    "mod_authn_file.so",
-    "mod_authz_user.so",
-    "mod_auth_basic.so",
-    "mod_mime.so",
-    "mod_log_config.so",
-    "mod_dav.so",
-    "mod_dav_fs.so",
-    "mod_dav_lock.so",
+    ("mod_authn_core.so", "authn_core_module"),
+    ("mod_authz_core.so", "authz_core_module"),
+    ("mod_authn_file.so", "authn_file_module"),
+    ("mod_authz_user.so", "authz_user_module"),
+    ("mod_auth_basic.so", "auth_basic_module"),
+    ("mod_mime.so", "mime_module"),
+    ("mod_log_config.so", "log_config_module"),
+    ("mod_dav.so", "dav_module"),
+    ("mod_dav_fs.so", "dav_fs_module"),
+    ("mod_dav_lock.so", "dav_lock_module"),
 )
 TEST_USER = "testuser"
 TEST_PASSWORD = "testpass123"  # noqa: S105
@@ -40,6 +41,14 @@ class _Profile:
     name: str
     httpd: str
     module_dir: Path
+    #: Modules (by .so filename, from REQUIRED_MODULES) this distro's httpd
+    #: already has compiled statically into the core binary - confirmed for
+    #: Debian/Ubuntu's mod_log_config, live on GitHub Actions' ubuntu-latest
+    #: (every other required module there is a normal loadable .so; this
+    #: one alone was missing from the modules directory). A built-in module
+    #: is not expected to exist as a .so, and must not get a LoadModule
+    #: directive either - Apache refuses to load one already built in.
+    built_in: "frozenset[str]" = frozenset()
 
     def missing(self) -> list[str]:
         """What is missing for this specific profile - empty if it is fully usable."""
@@ -47,19 +56,26 @@ class _Profile:
         if not Path(self.httpd).exists():
             missing.append(self.httpd)
         missing += [
-            str(self.module_dir / name)
-            for name in REQUIRED_MODULES
-            if not (self.module_dir / name).exists()
+            str(self.module_dir / filename)
+            for filename, _directive in REQUIRED_MODULES
+            if filename not in self.built_in
+            and not (self.module_dir / filename).exists()
         ]
         return missing
 
 
 #: Tried in order; the first fully present one wins. Same ``httpd`` binary
 #: underneath everywhere (both accept the same ``-f``/``-k`` flags) - only
-#: the install paths differ per packaging.
+#: the install paths (and which modules are built in vs. loadable) differ
+#: per packaging.
 _PROFILES = (
     _Profile("openSUSE/RPM", "/usr/sbin/httpd", Path("/usr/lib64/apache2-prefork")),
-    _Profile("Debian/Ubuntu", "/usr/sbin/apache2", Path("/usr/lib/apache2/modules")),
+    _Profile(
+        "Debian/Ubuntu",
+        "/usr/sbin/apache2",
+        Path("/usr/lib/apache2/modules"),
+        built_in=frozenset({"mod_log_config.so"}),
+    ),
 )
 
 
@@ -80,16 +96,7 @@ PidFile "logs/httpd.pid"
 ErrorLog "logs/error.log"
 LogLevel warn
 
-LoadModule authn_core_module   {modules}/mod_authn_core.so
-LoadModule authz_core_module   {modules}/mod_authz_core.so
-LoadModule authn_file_module   {modules}/mod_authn_file.so
-LoadModule authz_user_module   {modules}/mod_authz_user.so
-LoadModule auth_basic_module   {modules}/mod_auth_basic.so
-LoadModule mime_module         {modules}/mod_mime.so
-LoadModule log_config_module   {modules}/mod_log_config.so
-LoadModule dav_module          {modules}/mod_dav.so
-LoadModule dav_fs_module       {modules}/mod_dav_fs.so
-LoadModule dav_lock_module     {modules}/mod_dav_lock.so
+{load_modules}
 
 DavLockDB "locks/davlock"
 
@@ -153,11 +160,16 @@ def write_instance(instance_dir: Path, *, clean: bool = True) -> Path:
             [htpasswd_bin, "-bc", str(htpasswd_file), TEST_USER, TEST_PASSWORD],
             check=True,
         )
+    load_modules = "\n".join(
+        f"LoadModule {directive:<22} {profile.module_dir / filename}"
+        for filename, directive in REQUIRED_MODULES
+        if filename not in profile.built_in
+    )
     conf_file = instance_dir / "httpd.conf"
     conf_file.write_text(
         HTTPD_CONF_TEMPLATE.format(
             instance_dir=instance_dir,
-            modules=profile.module_dir,
+            load_modules=load_modules,
             host=HOST,
             port=PORT,
         )
