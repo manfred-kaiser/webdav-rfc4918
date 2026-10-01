@@ -30,6 +30,7 @@ with one, the URL has to name the same server. Credentials in a URL are refused.
 import errno
 import io
 import tempfile
+from http import HTTPStatus
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -53,6 +54,7 @@ from webdav._fsspec_support import absolute, info_of, is_root, translate_excepti
 from webdav._webdavs_url import SCHEME, authority_of, host_and_port, server_url
 from webdav.dav.fs_utils import peek_filelike_length
 from webdav.exceptions import (
+    HTTPStatusError,
     InternalServerError,
     IsAResourceError,
     ResourceAlreadyExistsError,
@@ -684,14 +686,25 @@ class WebdavFileSystem(AbstractFileSystem):
             cb.set_size(size)
 
         with translate_exceptions():
-            self.filesystem.upload_fileobj(
-                fobj,
-                rpath,
-                overwrite=overwrite,
-                callback=cb.relative_update,
-                size=size,
-                **kwargs,
-            )
+            try:
+                self.filesystem.upload_fileobj(
+                    fobj,
+                    rpath,
+                    overwrite=overwrite,
+                    callback=cb.relative_update,
+                    size=size,
+                    **kwargs,
+                )
+            except HTTPStatusError as exc:
+                # A collection answers a PUT with 405 - so does a resource that takes none at
+                # all (a read-only one): only where there is a collection is it a directory.
+                if exc.status_code == HTTPStatus.METHOD_NOT_ALLOWED and self.isdir(
+                    rpath
+                ):
+                    raise IsADirectoryError(
+                        errno.EISDIR, "Is a directory", rpath
+                    ) from exc
+                raise
 
     put_fileobj = upload_fileobj
 

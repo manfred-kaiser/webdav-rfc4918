@@ -1019,7 +1019,6 @@ class FileSystem:
 
         Raises:
             ClientError: The file object did not hold as many bytes as ``size``.
-            IsACollectionError: ``path`` is a collection, which takes no PUT (405).
             ResourceAlreadyExistsError: ``overwrite`` is false and ``path`` exists.
             PreconditionFailedError: A precondition of the upload failed.
             requests.RequestException: The transport failed.
@@ -1062,12 +1061,6 @@ class FileSystem:
                 raise ResourceAlreadyExistsError(
                     exc.response, display_url(path)
                 ) from exc
-            raise
-        except HTTPStatusError as exc:
-            # A 405 is also what a resource answers that takes no PUT at all (a read-only
-            # one): it only says "is a collection" if there is one.
-            if exc.status_code == HTTPStatus.METHOD_NOT_ALLOWED and self.isdir(path):
-                raise IsACollectionError(display_url(path)) from exc
             raise
         except requests.RequestException as exc:
             if problem:  # the request broke because the body could not be completed

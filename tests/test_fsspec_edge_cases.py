@@ -23,7 +23,12 @@ import pytest
 
 from tests.credentials import AUTH
 from tests.scripted_server import Reply, Seen, scripted_server
-from webdav.exceptions import ClientError, InternalServerError, ResourceLockedError
+from webdav.exceptions import (
+    ClientError,
+    HTTPStatusError,
+    InternalServerError,
+    ResourceLockedError,
+)
 from webdav.fsspec import WebdavFileSystem
 
 if TYPE_CHECKING:
@@ -1181,6 +1186,22 @@ def test_a_server_that_forbids_everything_is_a_permission_error(
         fs = WebdavFileSystem(url)
         with pytest.raises(PermissionError):
             call(fs)
+        fs.filesystem.close()
+
+
+def test_a_405_for_a_write_is_a_directory_only_if_there_is_one() -> None:
+    """A read-only resource answers a PUT with 405 as well."""
+
+    def respond(seen: Seen) -> Reply:
+        if seen.method == "PROPFIND":
+            return 207, {"Content-Type": "application/xml"}, _FILE_PROPERTIES
+        return 405, {"Allow": "GET, PROPFIND"}, b""
+
+    with scripted_server(respond) as (url, _recorder):
+        fs = WebdavFileSystem(url)
+        with pytest.raises(HTTPStatusError) as caught:
+            fs.pipe_file("/f", b"x")
+        assert caught.value.status_code == 405
         fs.filesystem.close()
 
 

@@ -9,21 +9,11 @@ from tests.scripted_server import Reply, Seen, scripted_server
 from webdav import (
     ClientError,
     FileSystem,
-    HTTPStatusError,
-    IsACollectionError,
     ResourceAlreadyExistsError,
     ResourceLockedError,
     ResourceNotFoundError,
 )
 from webdav.dav.locks import EXCLUSIVE
-
-#: A PROPFIND answer for ``/f``: a plain file.
-_FILE_ONLY = (
-    b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/f</d:href>'
-    b"<d:propstat><d:prop><d:resourcetype/><d:getcontentlength>1</d:getcontentlength>"
-    b"</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
-    b"</d:multistatus>"
-)
 
 
 def test_mkdir_and_ls(fs: FileSystem) -> None:
@@ -62,16 +52,6 @@ def test_upload_overwrite_protection(fs: FileSystem) -> None:
     assert buf.getvalue() == b"v2"
 
 
-@pytest.mark.parametrize("overwrite", [False, True])
-def test_upload_onto_a_collection_is_an_error_that_says_so(
-    fs: FileSystem, overwrite: bool
-) -> None:
-    fs.mkdir("docs")
-    with pytest.raises(IsACollectionError):
-        fs.upload_fileobj(io.BytesIO(b"x"), "docs", overwrite=overwrite)
-    assert fs.ls("docs") == []
-
-
 def _created(_seen: Seen) -> Reply:
     return 201, {"Content-Length": "0"}, b""
 
@@ -94,21 +74,6 @@ def test_a_file_that_has_data_against_a_declared_size_of_zero_is_an_error() -> N
         pytest.raises(ClientError, match="longer"),
     ):
         client.upload_fileobj(io.BytesIO(b"x"), "f", size=0, overwrite=True)
-
-
-def test_a_405_for_an_upload_is_not_called_a_collection_if_it_is_none() -> None:
-    """A read-only resource answers a PUT with 405 too."""
-
-    def respond(seen: Seen) -> Reply:
-        if seen.method == "PROPFIND":
-            return 207, {"Content-Type": "application/xml"}, _FILE_ONLY
-        return 405, {"Content-Type": "text/plain", "Allow": "GET, PROPFIND"}, b""
-
-    with scripted_server(respond) as (url, _), FileSystem(url) as client:
-        with pytest.raises(HTTPStatusError) as caught:
-            client.upload_fileobj(io.BytesIO(b"x"), "f", overwrite=True)
-        assert not isinstance(caught.value, IsACollectionError)
-        assert caught.value.status_code == 405
 
 
 def test_open_read_text_and_binary(fs: FileSystem) -> None:
