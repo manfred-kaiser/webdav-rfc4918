@@ -86,9 +86,10 @@ returns {class}`~webdav.resource.Resource` objects.
   into itself, nor the root anywhere; `mv` of a path onto itself - however it is spelled - does
   nothing.
 - **Parallel writers** may create the same parent directory at once (dask, zarr). RFC 4918 (sec.
-  9.3.1) answers the MKCOL that loses the race with 405, "exists"; WsgiDAV answers 500. That 500
-  is not an error for `makedirs(exist_ok=True)` if the directory is there afterwards - a
-  tolerance of this filesystem, not something the client does (`FileSystem.mkdir` is strict).
+  9.3.1) answers the MKCOL that loses the race with 405, "exists"; Apache answers some of them
+  403 and WsgiDAV 500. Such an answer is not an error for `makedirs(exist_ok=True)` if the
+  directory is there afterwards - a tolerance of this filesystem, not something the client does
+  (`FileSystem.mkdir` is strict).
 - **Reading** (`open(path, "rb")`, `cat_file(path, start, end)`) asks the server for blocks of
   the file - `Range: bytes=a-b`, through fsspec's block cache - and reads every answer to its
   end, so a reader that seeks (Parquet) does not cut off a stream with each seek and the

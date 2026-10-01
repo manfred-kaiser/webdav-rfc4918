@@ -1121,10 +1121,10 @@ _COLLECTION_PROPERTIES = (
 )
 
 
-def _mkcol_fails_with_500(collection_exists: bool) -> "Callable[[Seen], Reply]":
+def _mkcol_fails(status: int, *, collection_exists: bool) -> "Callable[[Seen], Reply]":
     def respond(seen: Seen) -> Reply:
         if seen.method == "MKCOL":
-            return 500, {"Content-Type": "text/plain"}, b"mkdir failed"
+            return status, {"Content-Type": "text/plain"}, b"mkdir failed"
         if (
             seen.method == "PROPFIND"
             and collection_exists
@@ -1136,21 +1136,33 @@ def _mkcol_fails_with_500(collection_exists: bool) -> "Callable[[Seen], Reply]":
     return respond
 
 
-def test_a_500_for_mkcol_is_fine_if_the_collection_is_there_afterwards() -> None:
+#: How the loser of a race to create a collection is answered: WsgiDAV 500, Apache 403 (some of them).
+_LOST_RACE = [(500, InternalServerError), (403, PermissionError)]
+
+
+@pytest.mark.parametrize(("status", "error"), _LOST_RACE)
+def test_a_failed_mkcol_is_fine_if_the_collection_is_there_afterwards(
+    status: int, error: type[Exception]
+) -> None:
     """The loser of a race to create ``/d`` - and only for ``exist_ok``."""
-    with scripted_server(_mkcol_fails_with_500(collection_exists=True)) as (url, _):
+    respond = _mkcol_fails(status, collection_exists=True)
+    with scripted_server(respond) as (url, _):
         fs = WebdavFileSystem(url)
         fs.makedirs("/d", exist_ok=True)
         fs.mkdir("/d")  # create_parents=True is makedirs(exist_ok=True)
-        with pytest.raises(InternalServerError):
+        with pytest.raises(error):
             fs.makedirs("/d", exist_ok=False)
         fs.filesystem.close()
 
 
-def test_a_500_for_mkcol_is_an_error_if_there_is_no_collection() -> None:
-    with scripted_server(_mkcol_fails_with_500(collection_exists=False)) as (url, _):
+@pytest.mark.parametrize(("status", "error"), _LOST_RACE)
+def test_a_failed_mkcol_is_an_error_if_there_is_no_collection(
+    status: int, error: type[Exception]
+) -> None:
+    respond = _mkcol_fails(status, collection_exists=False)
+    with scripted_server(respond) as (url, _):
         fs = WebdavFileSystem(url)
-        with pytest.raises(InternalServerError):
+        with pytest.raises(error):
             fs.makedirs("/d", exist_ok=True)
         fs.filesystem.close()
 

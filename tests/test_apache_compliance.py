@@ -462,13 +462,14 @@ def test_apache_if_none_match_star_atomic_create_is_really_atomic(
     assert buf.getvalue() == b"first"
 
 
-def test_apache_a_lost_race_to_create_a_collection_is_a_405_not_a_500(
+def test_apache_a_race_to_create_a_collection_has_one_winner(
     apache_client: FileSystem,
 ) -> None:
-    """RFC 4918 sec. 9.3.1: MKCOL on what exists is a 405 - also for the loser of a race.
+    """RFC 4918 sec. 9.3.1 gives the losers a 405; Apache answers some of them 403 (seen in CI).
 
-    WsgiDAV answers it with a 500 (so the fsspec filesystem takes a 500 for "exists" when the
-    collection is there afterwards, see ``WebdavFileSystem._mkdir``); this pins what Apache does.
+    So the fsspec filesystem takes a 403 or a 500 (WsgiDAV) for "exists" when the collection is
+    there afterwards, see ``WebdavFileSystem._mkdir``. What is pinned here is what has to hold
+    whatever the losers get: exactly one 201, and no other success.
     """
     statuses: list[int] = []
     barrier = threading.Barrier(12)
@@ -484,7 +485,9 @@ def test_apache_a_lost_race_to_create_a_collection_is_a_405_not_a_500(
         thread.start()
     for thread in threads:
         thread.join()
-    assert sorted(statuses) == [201] + [405] * 11
+    assert statuses.count(201) == 1
+    assert not [status for status in statuses if status < 400 and status != 201]
+    assert apache_client.isdir(path)
 
 
 # ---------------------------------------------------------------------------

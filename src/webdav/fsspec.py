@@ -54,6 +54,7 @@ from webdav._fsspec_support import absolute, info_of, is_root, translate_excepti
 from webdav._webdavs_url import SCHEME, authority_of, host_and_port, server_url
 from webdav.dav.fs_utils import peek_filelike_length
 from webdav.exceptions import (
+    ForbiddenError,
     HTTPStatusError,
     InternalServerError,
     IsAResourceError,
@@ -542,10 +543,11 @@ class WebdavFileSystem(AbstractFileSystem):
                         errno.ENOTDIR, "Not a directory", parent
                     ) from exc
                 raise
-            except InternalServerError:
-                # Writers that create the same parent at once (dask, zarr): the one that loses
-                # the race is answered 405 by most servers, but WsgiDAV answers 500. Only for
-                # ``makedirs(exist_ok=True)``, and only if the collection is there now.
+            except (InternalServerError, ForbiddenError):
+                # Writers that create the same parent at once (dask, zarr): RFC 4918 gives the
+                # one that loses the race a 405, "exists" - Apache answers some of them 403,
+                # WsgiDAV 500. Only for ``makedirs(exist_ok=True)``, and only if the collection
+                # is there now: otherwise it is the error it says it is.
                 if exist_ok and self.isdir(path):
                     return
                 raise
