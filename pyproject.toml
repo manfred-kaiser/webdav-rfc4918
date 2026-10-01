@@ -40,7 +40,7 @@ packages = [ "src/webdav" ]
 
 [tool.hatch.envs.hatch-test]
 dependencies = [ "hypothesis", "pytest", "pytest-cov", "pytest-xdist", "typing-extensions" ]
-extra-dependencies = [ "cheroot", "wsgidav" ]
+extra-dependencies = [ "cheroot", "fsspec", "wsgidav" ]
 
 [tool.hatch.envs.hatch-test.scripts]
 run = "pytest{env:HATCH_TEST_ARGS:} {args:tests/}"
@@ -70,6 +70,7 @@ dependencies = [
   "ruff",
   "types-requests",
   "cheroot",
+  "fsspec",
   "wsgidav",
   "hypothesis",
 ]
