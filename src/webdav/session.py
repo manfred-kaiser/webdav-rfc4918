@@ -182,6 +182,7 @@ _PICKLED = (
     "_cert_arg",
     "_verify_arg",
     "_tls_arg",
+    "_response_class_arg",
 )
 
 #: The plain ``requests.Session`` attributes this class forwards to
@@ -255,6 +256,7 @@ class ConnectionOptions(TypedDict, total=False):
     max_redirects: int
     retry: "RetryFunc | bool"
     raise_on_error: bool
+    response_class: "type[Response]"
 
 
 class SessionOptions(ConnectionOptions, total=False):
@@ -300,6 +302,7 @@ class Session:
         retry: "RetryFunc | bool" = True,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         raise_on_error: bool = False,
+        response_class: "type[Response]" = Response,
     ) -> None:
         """Instantiate a session.
 
@@ -369,10 +372,22 @@ class Session:
             raise_on_error: Call :meth:`Response.raise_for_status` on every
                 response before returning it (``requests`` itself never
                 raises for a status code unless asked to).
+            response_class: Which :class:`~webdav.response.Response`
+                (sub)class every response this session returns is built as.
+                A developer who wants to interpret something this library
+                deliberately leaves to the caller - e.g. RFC 4316
+                ``xsi:type`` hints on a PROPFIND property value - subclasses
+                :class:`~webdav.response.Response` (pointing its
+                ``multistatus_class`` at a matching
+                :class:`~webdav.dav.multistatus.MultiStatusResponse`
+                subclass) and passes it here, rather than this library
+                implementing that extension itself.
 
         Raises:
             TypeError: ``redirect_policy`` is not a
-                :class:`~webdav.transport.redirects.RedirectPolicy`.
+                :class:`~webdav.transport.redirects.RedirectPolicy`, or
+                ``response_class`` is not a subclass of
+                :class:`~webdav.response.Response`.
             ValueError: ``trusted_redirect_origins`` and ``redirect_policy``
                 disagree - see :func:`~webdav.transport.redirects.validate_policy` -
                 or ``base_url``, ``timeout``, ``max_response_size``,
@@ -381,6 +396,11 @@ class Session:
 
         """
         validate_policy(redirect_policy, trusted_redirect_origins)
+        if not (
+            isinstance(response_class, type) and issubclass(response_class, Response)
+        ):
+            msg = f"response_class must be a subclass of webdav.Response, got {response_class!r}"
+            raise TypeError(msg)
         self._transport = requests.Session()
         self.auth = auth
         if headers:
@@ -410,6 +430,7 @@ class Session:
         self._cert_arg = cert
         self._verify_arg = verify
         self._tls_arg = tls
+        self._response_class_arg = response_class
         self._init_derived()
 
     def _init_derived(self) -> None:
@@ -427,13 +448,14 @@ class Session:
         # configure_tls() below replaces the https one with the mTLS
         # adapter (also DeadlineAdapter-derived) - a deliberately cheap
         # throwaway mount in that case, not an oversight.
-        self.mount("https://", DeadlineAdapter())
-        self.mount("http://", DeadlineAdapter())
+        self.mount("https://", DeadlineAdapter(response_class=self._response_class_arg))
+        self.mount("http://", DeadlineAdapter(response_class=self._response_class_arg))
         configure_tls(
             self._transport,
             cert=self._cert_arg,
             verify=self._verify_arg,
             tls=self._tls_arg,
+            response_class=self._response_class_arg,
         )
         self.retry = self._retry_arg
         self.locks = LockRegistry()
@@ -444,7 +466,7 @@ class Session:
         # What a redirect to another origin is sent through: a plain adapter,
         # so that neither a client certificate (mTLS) nor any transport
         # setting meant for *this* server goes with it.
-        self._foreign_adapter = DeadlineAdapter()
+        self._foreign_adapter = DeadlineAdapter(response_class=self._response_class_arg)
 
     # -- forwarded to self._transport, exactly like plain requests.Session --
 
@@ -1033,9 +1055,9 @@ class Session:
                 )
             response = dispatch_hook("response", request.hooks, response, **kwargs)  # type: ignore[no-untyped-call]
             extract_cookies_to_jar(self.cookies, request, response.raw)  # type: ignore[no-untyped-call]
-        # Nearly always a webdav.Response already (the adapters this library
-        # mounts build one); an adapter a caller mounted may not have.
-        result = Response.adopt(response)
+        # Nearly always this session's response_class already (the adapters
+        # this library mounts build one); an adapter a caller mounted may not.
+        result = self._response_class_arg.adopt(response)
         if allow_redirects and (result.is_redirect or result.is_permanent_redirect):
             refuse(
                 result,

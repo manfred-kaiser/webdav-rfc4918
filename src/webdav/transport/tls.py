@@ -35,6 +35,7 @@ from webdav.exceptions import (
     TLSHardeningDisabledWarning,
     warn_at_caller,
 )
+from webdav.response import Response
 from webdav.transport.deadline import DeadlineAdapter
 
 if TYPE_CHECKING:
@@ -302,6 +303,7 @@ def mount_mtls_adapter(
     keyfile: "StrPath | None" = None,
     options: TLSOptions | None = None,
     verify: bool = True,
+    response_class: type[Response] = Response,
 ) -> None:
     """Build an mTLS :class:`SSLContextAdapter` and mount it for ``https://``.
 
@@ -313,6 +315,7 @@ def mount_mtls_adapter(
             certfile=certfile, keyfile=keyfile, options=options, verify=verify
         ),
         verify=verify,
+        response_class=response_class,
     )
     session.mount("https://", adapter)
 
@@ -330,6 +333,7 @@ def configure_tls(
     cert: "CertTypes",
     verify: "bool | str",
     tls: "TLSOptions | None",
+    response_class: type[Response] = Response,
 ) -> None:
     """Wire up ``cert``/``verify`` on ``transport`` - plain ``requests`` attrs, or a hardened adapter.
 
@@ -365,4 +369,5 @@ def configure_tls(
         keyfile=keyfile,
         options=tls,
         verify=verify_certificates,
+        response_class=response_class,
     )

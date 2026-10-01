@@ -10,7 +10,6 @@ session's public API, so the file-system layer has no private door into it.
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from webdav.dav.multistatus import parse_multistatus_response
 from webdav.dav.urls import URL, relative_url_to
 from webdav.exceptions import ClientError, raise_for_status
 from webdav.methods import Method
@@ -96,7 +95,10 @@ class Remote:
         response = self._session.request(method, url, raise_on_error=False, **kwargs)
         raise_for_status(response, path=display_url(error_path or path))
         if multistatus and response.status_code == HTTPStatus.MULTI_STATUS:
-            parse_multistatus_response(response).raise_for_status()
+            # Via .multistatus, not parse_multistatus_response() directly,
+            # so a custom Response.multistatus_class (see Session's
+            # response_class) is honoured here too.
+            response.multistatus.raise_for_status()
         return response
 
     def propfind(
@@ -119,4 +121,7 @@ class Remote:
             headers=headers,
             **extra,
         )
-        return parse_multistatus_response(response)
+        # Via .multistatus, not parse_multistatus_response() directly, so a
+        # custom Response.multistatus_class (see Session's response_class)
+        # is honoured here too.
+        return response.multistatus

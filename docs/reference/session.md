@@ -65,9 +65,16 @@ The `Session` verbs take the same keyword arguments as `requests.Session.request
 you pass yourself always win over these conveniences. The session-level
 options - `redirect_policy`, `trusted_redirect_origins`,
 `max_response_size`, `max_response_time`, `max_redirects`, `retry`, `chunk_size`,
-`raise_on_error` - are
+`raise_on_error`, `response_class` - are
 arguments of `Session(...)` and `FileSystem(...)` alike, and of the
-module-level file-system functions.
+module-level file-system functions. `response_class` is how a developer plugs
+in parsing this library deliberately leaves alone (e.g. RFC 4316 `xsi:type`
+hints on a property value): subclass {class}`~webdav.response.Response`,
+{class}`~webdav.dav.multistatus.MultiStatusResponse`,
+{class}`~webdav.dav.multistatus.ResourceResponse` and
+{class}`~webdav.dav.properties.DAVProperties`, wiring each to the next via
+its matching class attribute, and pass the `Response` subclass here - see
+{class}`~webdav.session.Session`'s own docstring below for the full chain.
 
 ## Limits on what a server can make the client do
 

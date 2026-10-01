@@ -9,7 +9,7 @@ collection. Both shapes are parsed here.
 import logging
 import re
 from http.client import responses as _reason_phrases
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 from xml.etree.ElementTree import Element
 
 import requests
@@ -85,6 +85,14 @@ def _check_href(href: str) -> None:
 class ResourceResponse:
     """One ``<d:response>`` element: the result for a single resource."""
 
+    #: Which :class:`~webdav.dav.properties.DAVProperties` (sub)class
+    #: ``self.properties`` is built as. Override in a subclass - e.g. to
+    #: interpret RFC 4316 ``xsi:type`` hints on a property's value, which
+    #: this library deliberately leaves to the caller (see RFC_COMPLIANCE.md)
+    #: - and set :attr:`MultiStatusResponse.response_class` to that subclass
+    #: so it is actually used.
+    properties_class: ClassVar[type[DAVProperties]] = DAVProperties
+
     def __init__(self, response_xml: Element) -> None:
         """Parse a ``<d:response>`` element.
 
@@ -141,7 +149,7 @@ class ResourceResponse:
             PropStat(el) for el in response_xml.findall(dav("propstat"))
         ]
         self.has_propstat = bool(self.propstats)
-        self.properties = DAVProperties.from_propstats(self.propstats)
+        self.properties = self.properties_class.from_propstats(self.propstats)
 
     def __str__(self) -> str:
         """User-facing representation."""
@@ -176,6 +184,11 @@ class MultiStatusResponse:
     server explicitly rejected.
     """
 
+    #: Which :class:`ResourceResponse` (sub)class each ``<d:response>`` is
+    #: built as. Override alongside :attr:`ResourceResponse.properties_class`
+    #: to plug in custom property parsing; see that attribute's docstring.
+    response_class: ClassVar[type[ResourceResponse]] = ResourceResponse
+
     def __init__(self, content: str | bytes) -> None:
         """Parse ``content``, the body of a 207 response."""
         self.content = content
@@ -196,7 +209,7 @@ class MultiStatusResponse:
                 msg = f"multistatus has too many <d:response> elements (over {MAX_RESPONSES})"
                 raise MalformedResponseError(msg)
             try:
-                response = ResourceResponse(resp_el)
+                response = self.response_class(resp_el)
             except ValueError as exc:
                 # Never skipped quietly: in a DELETE/COPY/MOVE reply the entry
                 # that does not parse may be the one reporting the failure, and
@@ -292,8 +305,18 @@ def _error_codes(error_el: Element | None) -> frozenset[str]:
     return frozenset(split_clark(child.tag)[1] for child in error_el)
 
 
-def parse_multistatus_response(http_response: "HTTPResponse") -> MultiStatusResponse:
+def parse_multistatus_response(
+    http_response: "HTTPResponse",
+    *,
+    multistatus_class: type[MultiStatusResponse] = MultiStatusResponse,
+) -> MultiStatusResponse:
     """Parse a 207 Multi-Status response.
+
+    Args:
+        http_response: The HTTP response to parse.
+        multistatus_class: Which :class:`MultiStatusResponse` (sub)class to
+            build - see :class:`~webdav.response.Response.multistatus_class`
+            for how a :class:`~webdav.session.Session` plugs one in end to end.
 
     Raises:
         MalformedResponseError: ``http_response`` isn't a 207 response (a
@@ -304,4 +327,4 @@ def parse_multistatus_response(http_response: "HTTPResponse") -> MultiStatusResp
     if http_response.status_code != requests.codes.multi_status:
         msg = f"the server answered {http_response.status_code}, not a 207 Multi-Status - is this a WebDAV server?"
         raise MalformedResponseError(msg)
-    return MultiStatusResponse(http_response.content)
+    return multistatus_class(http_response.content)

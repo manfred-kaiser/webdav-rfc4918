@@ -9,19 +9,18 @@ response - its multistatus body, its lock - plus a
 """
 
 from functools import cached_property
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 from urllib.parse import unquote, urlsplit
 
 import requests
 
 from webdav.dav.locks import parse_lock_response
-from webdav.dav.multistatus import parse_multistatus_response
+from webdav.dav.multistatus import MultiStatusResponse, parse_multistatus_response
 from webdav.exceptions import raise_for_status as _raise_for_status
 from webdav.methods import Method
 
 if TYPE_CHECKING:
     from webdav.dav.locks import ActiveLock
-    from webdav.dav.multistatus import MultiStatusResponse
 
 
 class Response(requests.Response):
@@ -30,6 +29,19 @@ class Response(requests.Response):
     #: Why a redirect this response answered with was *not* followed, or
     #: ``None``. Set by :class:`~webdav.session.Session`.
     redirect_refusal: "str | None" = None
+
+    #: Which :class:`~webdav.dav.multistatus.MultiStatusResponse` (sub)class
+    #: :attr:`multistatus` builds. A developer who wants to interpret
+    #: something this library deliberately leaves alone - e.g. RFC 4316
+    #: ``xsi:type`` hints on a property's value - subclasses
+    #: :class:`~webdav.dav.properties.DAVProperties`,
+    #: :class:`~webdav.dav.multistatus.ResourceResponse` and
+    #: :class:`~webdav.dav.multistatus.MultiStatusResponse` (wiring each via
+    #: the matching class attribute), then subclasses this class to point
+    #: ``multistatus_class`` at their ``MultiStatusResponse`` subclass, and
+    #: passes it as ``Session(..., response_class=MySubclass)`` - see
+    #: :class:`~webdav.session.Session`.
+    multistatus_class: ClassVar[type[MultiStatusResponse]] = MultiStatusResponse
 
     @cached_property
     def multistatus(self) -> "MultiStatusResponse":
@@ -40,7 +52,9 @@ class Response(requests.Response):
                 well-formed multistatus document.
 
         """
-        return parse_multistatus_response(self)
+        return parse_multistatus_response(
+            self, multistatus_class=self.multistatus_class
+        )
 
     @cached_property
     def active_lock(self) -> "ActiveLock":

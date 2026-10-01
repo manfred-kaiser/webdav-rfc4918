@@ -184,6 +184,13 @@ class DeadlineAdapter(HTTPAdapter):
     - comes from, for every request this library ever sends.
     """
 
+    def __init__(
+        self, *args: Any, response_class: type[Response] = Response, **kwargs: Any
+    ) -> None:
+        """Store which :class:`~webdav.response.Response` (sub)class to build - see :meth:`build_response`."""
+        self._response_class = response_class
+        super().__init__(*args, **kwargs)
+
     def build_response(self, req: "PreparedRequest", resp: Any) -> Response:
         """Build a :class:`~webdav.response.Response`, not a plain :class:`requests.Response`.
 
@@ -197,7 +204,7 @@ class DeadlineAdapter(HTTPAdapter):
         so the connection/stream it holds is unaffected.
         """
         response = super().build_response(req, resp)
-        response.__class__ = Response
+        response.__class__ = self._response_class
         return cast("Response", response)
 
     def init_poolmanager(self, *args: Any, **kwargs: Any) -> None:
