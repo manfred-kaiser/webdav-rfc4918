@@ -5,7 +5,9 @@ from collections.abc import Iterator
 import pytest
 
 from tests.credentials import AUTH
+from webdav.exceptions import ClientError
 from webdav.fsspec import WebdavFileSystem
+from webdav.session import Session
 
 
 @pytest.fixture
@@ -138,3 +140,78 @@ def test_a_directory_at_the_top_level_nests_into_an_existing_destination(
         "src/a.txt",
         "src/sub/b.txt",
     ]
+
+
+# ---------------------------------------------------------------------------
+# A filesystem is bound to one server
+# ---------------------------------------------------------------------------
+
+
+def test_a_filesystem_without_a_base_url_is_refused_with_a_clear_error() -> None:
+    with pytest.raises(ValueError, match="bound to one server"):
+        WebdavFileSystem()
+    with pytest.raises(ValueError, match="bound to one server"):
+        WebdavFileSystem(auth=AUTH)
+    with pytest.raises(ValueError, match="bound to one server"):
+        WebdavFileSystem(session=Session())
+
+
+def test_a_session_that_has_a_base_url_is_enough() -> None:
+    with Session("http://dav.example") as session:
+        filesystem = WebdavFileSystem(session=session)
+        assert filesystem.filesystem.session is session
+
+
+def test_fsspec_opens_a_url_without_a_host_against_the_given_base_url(
+    server_url: str,
+) -> None:
+    import fsspec  # noqa: PLC0415
+
+    fsspec.filesystem("webdavs", base_url=server_url, auth=AUTH).pipe_file(
+        "/top.txt", b"T"
+    )
+    with fsspec.open("webdavs:///top.txt", "rb", base_url=server_url, auth=AUTH) as f:
+        assert f.read() == b"T"
+    _fs, path = fsspec.core.url_to_fs(
+        "webdavs:///top.txt", base_url=server_url, auth=AUTH
+    )
+    assert path == "/top.txt"
+
+
+def test_the_web_root_is_the_path_of_the_base_url(server_url: str) -> None:
+    root = WebdavFileSystem(server_url, auth=AUTH)
+    root.pipe_file("sub/a.txt", b"A")
+    root.pipe_file("top.txt", b"T")
+    sub = WebdavFileSystem(f"{server_url}/sub", auth=AUTH)
+    assert sub.ls("/", detail=False) == ["/a.txt"]
+    assert sub.cat_file("/a.txt") == b"A"
+    assert sub.info("/")["name"] == "/"
+    assert sorted(root.ls("/", detail=False)) == ["/sub", "/top.txt"]
+
+
+@pytest.mark.parametrize("path", ["/../top.txt", "../top.txt", "a/../../top.txt"])
+def test_a_path_cannot_leave_the_base_url(server_url: str, path: str) -> None:
+    root = WebdavFileSystem(server_url, auth=AUTH)
+    root.pipe_file("top.txt", b"T")
+    sub = WebdavFileSystem(f"{server_url}/sub", auth=AUTH)
+    sub.mkdir("/")
+    with pytest.raises(ClientError, match="climbs out"):
+        sub.cat_file(path)
+
+
+def test_dots_and_double_slashes_are_resolved_inside_the_root(server_url: str) -> None:
+    filesystem = WebdavFileSystem(server_url, auth=AUTH)
+    filesystem.pipe_file("sub/a.txt", b"A")
+    for path in ("./sub/a.txt", "sub//a.txt", "sub/../sub/a.txt", "/sub/./a.txt"):
+        assert filesystem.cat_file(path) == b"A"
+
+
+def test_every_name_a_listing_returns_is_a_fixed_point_of_strip_protocol(
+    fs: WebdavFileSystem,
+) -> None:
+    fs.pipe_file("d/deep/x.txt", b"1")
+    fs.pipe_file("top.txt", b"2")
+    names = sorted(fs.find("/", withdirs=True))
+    assert names == ["/", "/d", "/d/deep", "/d/deep/x.txt", "/top.txt"]
+    assert all(WebdavFileSystem._strip_protocol(n) == n for n in names)
+    assert next(root for root, _dirs, _files in fs.walk("/")) == "/"

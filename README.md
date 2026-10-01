@@ -209,10 +209,10 @@ pip install webdav-rfc4918[fsspec]
 from webdav.fsspec import WebdavFileSystem
 
 fs = WebdavFileSystem("https://webdav.example.org", auth=auth)
-fs.ls("Photos", detail=False)
+fs.ls("Photos", detail=False)        # ['/Photos/Gorilla.jpg', ...]
 ```
 
-Importing it registers `"webdavs"` with fsspec (not `"webdav"` - already mapped by fsspec to [`webdav4`](https://pypi.org/project/webdav4/) by default; see [fsspec](docs/reference/fsspec.md) for why). Checked against fsspec's own conformance test suite, which also surfaced a [known upstream fsspec bug](https://github.com/manfred-kaiser/webdav-rfc4918/issues/3) this library inherits, not specific to it - confirmed structurally true of `s3fs` too.
+Importing it registers `"webdavs"` with fsspec (not `"webdav"` - already mapped by fsspec to [`webdav4`](https://pypi.org/project/webdav4/) by default; see [fsspec](docs/reference/fsspec.md) for why). Paths start at the root of the `base_url` (`/Photos/Gorilla.jpg`), as fsspec expects of a filesystem with a root. Checked against fsspec's own conformance test suite.
 
 
 ## Documentation

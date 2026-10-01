@@ -15,14 +15,34 @@ from webdav.fsspec import WebdavFileSystem
 
 fs = WebdavFileSystem("https://webdav.example.org", auth=("username", "password"))
 fs.exists("Documents/Readme.md")
-fs.ls("Photos", detail=False)
+fs.ls("Photos", detail=False)         # ['/Photos/Gorilla.jpg', ...]
 ```
 
 Importing `webdav.fsspec` registers `"webdavs"` with fsspec
 ([`fsspec.register_implementation`](https://filesystem-spec.readthedocs.io)),
-so `fsspec.open("webdavs://host/path", ...)` and
-`fsspec.filesystem("webdavs", ...)` work right away, same as the explicit
-import above - no separate setup step.
+so `fsspec.filesystem("webdavs", base_url=..., auth=...)` and
+`fsspec.open("webdavs:///Documents/Readme.md", base_url=..., auth=...)` work right away, same
+as the explicit import above - no separate setup step. The server is given by `base_url`; the
+URL carries only the path, and a host in it is not interpreted.
+
+## Paths
+
+A filesystem is bound to one server, through its `base_url`, and its paths are those of the
+server: they start at `/`, the root of the `base_url` (fsspec's `root_marker`, as for
+`LocalFileSystem` or `MemoryFileSystem`). A `base_url` with a path - `https://host/dav/` - makes
+`/dav/` the root; nothing above it can be reached.
+
+- `a/b`, `/a/b` and `webdavs:///a/b` are one path (fsspec's `_strip_protocol` makes it absolute
+  and drops a trailing `/`); there is no working directory.
+- `.`, `..` and `//` inside a path are resolved; a path that would leave the `base_url` is
+  refused with a `ClientError`.
+- The names `ls`, `info`, `find`, `glob` and `walk` return are exactly what `_strip_protocol`
+  returns for them, so every name can be handed back to any method.
+- Without a `base_url` (or a `session` that has one) the constructor raises `ValueError`.
+
+This differs from {class}`~webdav.fs.client.FileSystem`, whose names are relative to the
+`base_url` without the leading `/` (`Photos/Gorilla.jpg`) and which also takes `/Photos`: the
+fsspec name is always `"/" + name`.
 
 **Why `"webdavs"` and not `"webdav"`:** fsspec's own registry already maps
 `"webdav"` to [`webdav4`](https://pypi.org/project/webdav4/) by default -
@@ -46,12 +66,6 @@ returns {class}`~webdav.resource.Resource` objects.
   collection removes everything below it.
 - **Credentials**: `to_json()` and pickling contain the password in clear text. Do not store or
   send them anywhere untrusted.
-- **Known limitation**: a recursive `get`/`cp`/`put` of a directory that sits at the root of the
-  WebDAV namespace (no `/` in its path), run a second time onto a destination that already
-  exists, does not nest it the way fsspec documents - this is an
-  [upstream fsspec bug](https://github.com/manfred-kaiser/webdav-rfc4918/issues/3), not specific
-  to this library (confirmed structurally true of `s3fs` too); tracked as an `xfail` in
-  `tests/test_fsspec_abstract.py`.
 
 Checked against fsspec's own conformance test suite
 (`fsspec.tests.abstract` - the same one real backends like `s3fs`/`gcsfs`

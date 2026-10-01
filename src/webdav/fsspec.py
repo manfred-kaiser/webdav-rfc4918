@@ -9,6 +9,17 @@ Importing this module registers ``"webdavs"`` with fsspec
 (:func:`fsspec.register_implementation`) - deliberately not ``"webdav"``,
 which fsspec's own registry already maps to ``webdav4`` by default; see the
 module's own docstring note below for why that one is left alone.
+
+Paths. A filesystem is bound to one server, through its ``base_url``, and its
+paths are those of the server: they start at ``/``, the root of the ``base_url``
+(``root_marker``), as they do for ``LocalFileSystem`` or ``MemoryFileSystem``.
+fsspec leaves the normalising of a path to ``_strip_protocol``: here it removes
+the ``webdavs://`` prefix and a trailing ``/`` and makes the path absolute, so
+``a/b``, ``/a/b`` and ``webdavs:///a/b`` are one path and the root is ``/``. There
+is no working directory. ``.``, ``..`` and ``//`` inside a path are resolved
+by the session, which refuses to leave the ``base_url``. The names ``ls`` and
+``info`` return are exactly what ``_strip_protocol`` returns for them, so
+every name can be handed back to any method.
 """
 
 import errno
@@ -132,15 +143,28 @@ class WebdavFileSystem(AbstractFileSystem):
     ) -> None:
         """Instantiate with ``base_url``/``auth``, or an existing ``session``.
 
+        A filesystem is bound to one server: every path is relative to the
+        ``base_url`` (``/`` is its root).
+
         Args:
             base_url: Base URL of the WebDAV server.
             auth: Passed straight through to :class:`~webdav.session.Session`.
             session: A pre-built session to use instead (e.g. for mocking,
-                or to reuse a session's connection pool across filesystems).
+                or to reuse a session's connection pool across filesystems);
+                it needs a ``base_url``.
             session_opts: Extra keyword arguments forwarded to
                 :class:`~webdav.session.Session`.
 
+        Raises:
+            ValueError: There is no ``base_url``, neither given nor on the ``session``.
+
         """
+        if (session.base_url if session is not None else base_url) is None:
+            msg = (
+                "a WebdavFileSystem is bound to one server: pass base_url "
+                "(or a session that has one) - its paths are relative to it"
+            )
+            raise ValueError(msg)
         super().__init__()
         session_opts.setdefault("chunk_size", self.blocksize)
         self.filesystem = (
