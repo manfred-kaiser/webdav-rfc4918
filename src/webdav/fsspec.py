@@ -726,10 +726,18 @@ class WebdavFile(AbstractBufferedFile):
 
     def __reduce_ex__(
         self, protocol: SupportsIndex
-    ) -> "tuple[Callable[[ReopenArgs], WebdavFile], ReopenArgs]":
-        """Support (re)pickling by reopening the file on restore."""
-        return _reopen, ReopenArgs(
-            WebdavFile, self.fs, self.path, self.blocksize, self.mode, self.size
+    ) -> "tuple[Callable[[ReopenArgs], WebdavFile], tuple[ReopenArgs]]":
+        """Support (re)pickling: the file is opened again, at the same position, on restore."""
+        return _reopen, (
+            ReopenArgs(
+                WebdavFile,
+                self.fs,
+                self.path,
+                self.blocksize,
+                self.mode,
+                self.size,
+                self.loc,
+            ),
         )
 
 
@@ -742,13 +750,21 @@ class ReopenArgs(NamedTuple):
     blocksize: int | None
     mode: str
     size: int | None
+    loc: int
 
 
 def _reopen(args: ReopenArgs) -> WebdavFile:
-    """Reopen a file when unpickled."""
-    return args.file(
-        args.fs, args.path, blocksize=args.blocksize, mode=args.mode, size=args.size
+    """Reopen a file when unpickled, where it was left."""
+    file = args.file(
+        args.fs,
+        args.path,
+        block_size=args.blocksize,
+        mode=args.mode,
+        size=args.size,
     )
+    if args.loc:
+        file.seek(args.loc)
+    return file
 
 
 class UploadFile(tempfile.SpooledTemporaryFile):

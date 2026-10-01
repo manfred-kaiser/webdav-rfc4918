@@ -15,6 +15,7 @@ import errno
 import pickle
 import threading
 from collections.abc import Iterator
+from typing import TypeVar, cast
 
 import fsspec
 import pytest
@@ -23,6 +24,8 @@ from tests.credentials import AUTH
 from tests.scripted_server import Reply, Seen, scripted_server
 from webdav.exceptions import ClientError, ResourceLockedError
 from webdav.fsspec import WebdavFileSystem
+
+_T = TypeVar("_T")
 
 
 @pytest.fixture
@@ -641,13 +644,36 @@ def test_put_file_replaces_what_is_there(
 # ---------------------------------------------------------------------------
 
 
+def _through_pickle(value: _T) -> _T:
+    """What a process boundary does to ``value``: serialise, then restore."""
+    return cast("_T", pickle.loads(pickle.dumps(value)))  # noqa: S301 - our own bytes
+
+
 def test_a_pickled_filesystem_keeps_its_credentials(
     fs: WebdavFileSystem,
 ) -> None:
     fs.pipe_file("/a", b"1")
-    for clone in (pickle.loads(pickle.dumps(fs)), copy.deepcopy(fs)):  # noqa: S301
+    for clone in (_through_pickle(fs), copy.deepcopy(fs)):
         assert clone.cat_file("/a") == b"1"
         clone.filesystem.close()
+
+
+def test_an_open_file_survives_pickling_and_continues_where_it_was(
+    fs: WebdavFileSystem,
+) -> None:
+    """What dask or multiprocessing do with a file they hand to a worker."""
+    fs.pipe_file("/f", b"0123456789")
+    with fs.open("/f", "rb") as original:
+        assert original.read(2) == b"01"
+        original.seek(4)
+        with _through_pickle(original) as clone:
+            assert clone.tell() == 4
+            assert clone.read() == b"456789"
+            assert clone.size == 10
+        assert original.read(2) == b"45"  # the original does not notice
+    with fs.open("/f", "rb") as fresh, _through_pickle(fresh) as clone:
+        assert clone.tell() == 0
+        assert clone.read() == b"0123456789"
 
 
 def test_the_password_is_not_in_the_repr(fs: WebdavFileSystem) -> None:
