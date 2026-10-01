@@ -59,9 +59,20 @@ if TYPE_CHECKING:
     from webdav.session import AuthTypes
 
 
+def _absolute(name: str) -> str:
+    """``name`` (relative to the base URL, as :class:`~webdav.resource.Resource` names are) as an fsspec path: with its leading ``/``."""
+    return "/" + name.lstrip("/")
+
+
+def _is_root(path: str) -> bool:
+    """Whether ``path`` names the root of the file system (``/``, ``//``, ``/a/..``, ...)."""
+    return posixpath.normpath("/" + path.lstrip("/")) == "/"
+
+
 def _info(resource: Resource) -> "dict[str, Any]":
     """A :class:`~webdav.resource.Resource` as fsspec's ``info`` dict (``name``, ``size``, ``type``, ...)."""
     fields = resource.as_dict()
+    fields["name"] = _absolute(resource.name)
     fields["size"] = fields.pop("size")
     fields["type"] = "directory" if fields.pop("is_dir") else "file"
     return fields
@@ -98,6 +109,14 @@ class WebdavFileSystem(AbstractFileSystem):
     # itself can be added later without touching anything else here.
     protocol = ("webdavs",)
 
+    # Paths are WebDAV paths: they start at the root of the server (or of its
+    # ``base_url``), ``/``. That is what fsspec's ``root_marker`` is for, and
+    # it is not cosmetic: fsspec's bulk operations (``get``/``put``/``cp`` of a
+    # directory into one that exists) work out where a source nests from the
+    # ``/`` in the paths - which a filesystem with ``root_marker == ""`` leaves out
+    # for a directory at its top level (fsspec/filesystem_spec#2215).
+    root_marker = "/"
+
     # fsspec keeps one instance per set of constructor arguments, keyed on their
     # ``str`` - two credentials whose ``repr`` omits the secret (any careful auth
     # object) would be handed the same instance, and so the same session: user B
@@ -132,17 +151,17 @@ class WebdavFileSystem(AbstractFileSystem):
 
     @classmethod
     def _strip_protocol(cls, path: "str | list[str]") -> "str | list[str]":
-        """Strip the ``webdavs://`` protocol prefix - and a leading ``/``.
+        """Strip the ``webdavs://`` protocol prefix, and make the path absolute.
 
-        Names ``ls`` returns have no leading slash; ``/d`` and ``d`` are one
-        path. ``path`` is a list for some callers (``rm([...])``, ``cp``
-        with several sources) - the base implementation already recurses
-        for that case, so the result is the same shape as the input.
+        Every path has its leading ``/`` (``root_marker``): ``/d`` and ``d`` are
+        one path, and the root is ``/``. ``path`` is a list for some callers
+        (``rm([...])``, ``cp`` with several sources) - the base implementation
+        already recurses for that case, so the result is the same shape as the input.
         """
         stripped = super()._strip_protocol(path)
         if isinstance(stripped, list):
-            return [cast("str", p).lstrip("/") for p in stripped]
-        return cast("str", stripped).lstrip("/")
+            return [_absolute(cast("str", p)) for p in stripped]
+        return _absolute(cast("str", stripped))
 
     def _strip(self, path: str) -> str:
         """``_strip_protocol`` for the common single-path case - everywhere but ``rm``."""
@@ -174,7 +193,7 @@ class WebdavFileSystem(AbstractFileSystem):
         with _translate_exceptions():
             resources = self.filesystem.ls(path)
         if not detail:
-            return [str(r) for r in resources]
+            return [_absolute(r.name) for r in resources]
         return [_info(r) for r in resources]
 
     # pylint: enable=signature-differs
@@ -205,7 +224,7 @@ class WebdavFileSystem(AbstractFileSystem):
 
     def _delete(self, path: str) -> None:
         path = self._strip(path)
-        if posixpath.normpath("/" + path) == "/":
+        if _is_root(path):
             msg = "refusing to remove the root of the file system"
             raise ValueError(msg)
         with _translate_exceptions():
@@ -237,7 +256,7 @@ class WebdavFileSystem(AbstractFileSystem):
     def rmdir(self, path: str) -> None:
         """Remove a directory, if empty."""
         path = self._strip(path)
-        if posixpath.normpath("/" + path) == "/":
+        if _is_root(path):
             msg = "refusing to remove the root of the file system"
             raise ValueError(msg)
         if self.ls(path):
@@ -741,7 +760,12 @@ class UploadFile(tempfile.SpooledTemporaryFile):
         # commit() needs to read it back to upload it.
         super().__init__(max_size=self.blocksize, mode="wb+")
 
-    def __exit__(self, exc_type: object, *_exc: object) -> None:
+    def __exit__(
+        self,
+        exc_type: object,
+        exc_value: object,
+        traceback: object,
+    ) -> None:
         """Commit (upload) the buffered content - unless the block raised: then nothing is sent.
 
         A write that failed half way must not replace what is on the server with

@@ -23,10 +23,10 @@ def test_pipe_and_cat_roundtrip(fs: WebdavFileSystem) -> None:
 def test_ls_and_info(fs: WebdavFileSystem) -> None:
     fs.pipe_file("dir/one.txt", b"1")
     names = sorted(fs.ls("dir", detail=False))
-    assert names == ["dir/one.txt"]
+    assert names == ["/dir/one.txt"]
 
     info = fs.info("dir/one.txt")
-    assert info["name"] == "dir/one.txt"
+    assert info["name"] == "/dir/one.txt"
     assert info["size"] == 1
     assert info["type"] == "file"
 
@@ -76,3 +76,65 @@ def test_self_registers_webdavs_scheme() -> None:
     import fsspec  # noqa: PLC0415
 
     assert fsspec.get_filesystem_class("webdavs") is WebdavFileSystem
+
+
+# ---------------------------------------------------------------------------
+# Paths start at the root: root_marker == "/" (fsspec/filesystem_spec#2215)
+# ---------------------------------------------------------------------------
+
+
+def test_every_path_is_absolute() -> None:
+    assert WebdavFileSystem.root_marker == "/"
+    strip = WebdavFileSystem._strip_protocol
+    assert strip("a/b") == "/a/b"
+    assert strip("/a/b") == "/a/b"
+    assert strip("//a/b/") == "/a/b"
+    assert strip("webdavs://a/b") == "/a/b"
+    assert strip("") == "/"
+    assert strip("/") == "/"
+    assert strip(["a", "/b"]) == ["/a", "/b"]
+
+
+def test_a_name_that_ls_returns_goes_back_into_every_other_call(
+    fs: WebdavFileSystem,
+) -> None:
+    fs.pipe_file("d/x.txt", b"1")
+    (top,) = fs.ls("/", detail=False)
+    assert top == "/d"
+    (member,) = fs.ls(top, detail=False)
+    assert member == "/d/x.txt"
+    assert fs.cat_file(member) == b"1"
+    assert [i["name"] for i in fs.ls("/", detail=True)] == ["/d"]
+    assert fs.info("/")["type"] == "directory"
+    assert sorted(fs.find("/")) == ["/d/x.txt"]
+
+
+def test_the_root_cannot_be_removed(fs: WebdavFileSystem) -> None:
+    fs.pipe_file("keep.txt", b"1")
+    for root in ("/", "", "//", "/a/..", "a/.."):
+        with pytest.raises((ValueError, OSError)):
+            fs.rm(root, recursive=True)
+        with pytest.raises((ValueError, OSError)):
+            fs.rmdir(root)
+    assert fs.exists("/keep.txt")
+
+
+def test_a_directory_at_the_top_level_nests_into_an_existing_destination(
+    fs: WebdavFileSystem, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """The case fsspec.utils.other_paths() gets wrong for a path without any "/" in it.
+
+    ``src`` sits at the top level of the server, and a second ``get`` into the
+    (now existing) target has to put it *inside*, as ``cp -r`` does.
+    """
+    fs.pipe_file("src/a.txt", b"a")
+    fs.pipe_file("src/sub/b.txt", b"b")
+    target = tmp_path_factory.mktemp("target")
+    fs.get("/src", str(target) + "/", recursive=True)
+    fs.get("/src", str(target) + "/", recursive=True)
+    assert sorted(
+        p.relative_to(target).as_posix() for p in target.rglob("*") if p.is_file()
+    ) == [
+        "src/a.txt",
+        "src/sub/b.txt",
+    ]
