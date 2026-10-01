@@ -215,7 +215,12 @@ class WebdavFileSystem(AbstractFileSystem):
         """List members of a collection. See ``fsspec.AbstractFileSystem.ls``."""
         path = self._strip(path).strip()
         with _translate_exceptions():
-            resources = self.filesystem.ls(path)
+            try:
+                resources = self.filesystem.ls(path)
+            except IsAResourceError:
+                # The listing of a file is that file, as for local files and S3 keys:
+                # fsspec's walk() and find() depend on it.
+                resources = [self.filesystem.info(path)]
         if not detail:
             return [_absolute(r.name) for r in resources]
         return [_info(r) for r in resources]
@@ -283,7 +288,11 @@ class WebdavFileSystem(AbstractFileSystem):
         if _is_root(path):
             msg = "refusing to remove the root of the file system"
             raise ValueError(msg)
-        if self.ls(path):
+        with _translate_exceptions():
+            members = self.filesystem.ls(
+                path
+            )  # a file is not a directory: NotADirectoryError
+        if members:
             raise OSError(errno.ENOTEMPTY, "Directory not empty", path)
         self._delete(path)
 

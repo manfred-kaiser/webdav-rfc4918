@@ -490,6 +490,24 @@ def test_listing_an_empty_directory(fs: WebdavFileSystem) -> None:
     assert fs.find("/d") == []
 
 
+def test_listing_a_file_lists_that_file(fs: WebdavFileSystem) -> None:
+    """As for a local file or an S3 key - fsspec's ``walk`` and ``find`` rely on it."""
+    fs.pipe_file("/d/f.txt", b"abc")
+    assert fs.ls("/d/f.txt", detail=False) == ["/d/f.txt"]
+    (entry,) = fs.ls("/d/f.txt")
+    assert (entry["name"], entry["type"], entry["size"]) == ("/d/f.txt", "file", 3)
+    with pytest.raises(FileNotFoundError):
+        fs.ls("/d/nope.txt")
+
+
+def test_a_file_is_what_find_walk_glob_and_du_make_of_it(fs: WebdavFileSystem) -> None:
+    fs.pipe_file("/f", b"abc")
+    assert fs.find("/f") == ["/f"]
+    assert fs.glob("/f") == ["/f"]
+    assert fs.du("/f") == 3
+    assert list(fs.walk("/f")) == [("/f", [], [""])]  # the same as LocalFileSystem
+
+
 def test_info_of_the_root(fs: WebdavFileSystem) -> None:
     info = fs.info("/")
     assert (info["name"], info["type"]) == ("/", "directory")
