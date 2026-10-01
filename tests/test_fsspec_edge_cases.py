@@ -321,6 +321,47 @@ def test_an_empty_file(fs: WebdavFileSystem) -> None:
         assert f.read(10) == b""
 
 
+@pytest.mark.parametrize(("start", "end"), [(20, None), (20, 30), (10, 20), (11, 12)])
+def test_reading_from_beyond_the_end_gives_nothing(
+    fs: WebdavFileSystem, start: int, end: "int | None"
+) -> None:
+    """Like a local file; a range request for it would be refused with 416."""
+    fs.pipe_file("/f", b"0123456789")
+    assert fs.cat_file("/f", start, end) == b""
+
+
+def test_seeking_beyond_the_end_reads_nothing_and_can_come_back(
+    fs: WebdavFileSystem,
+) -> None:
+    fs.pipe_file("/f", b"0123456789")
+    with fs.open("/f", "rb") as f:
+        f.seek(20)
+        assert f.tell() == 20
+        assert f.read(5) == b""
+        assert f.read() == b""
+        f.seek(2)
+        assert f.read(2) == b"23"
+
+
+def test_nothing_can_be_read_beyond_an_empty_file(fs: WebdavFileSystem) -> None:
+    fs.pipe_file("/e", b"")
+    assert fs.cat_file("/e", 1) == b""
+    with fs.open("/e", "rb") as f:
+        f.seek(5)
+        assert f.read() == b""
+
+
+def test_a_closed_file_cannot_be_read(fs: WebdavFileSystem) -> None:
+    fs.pipe_file("/f", b"x")
+    f = fs.open("/f", "rb")
+    f.close()
+    assert f.closed
+    with pytest.raises(ValueError, match="closed file"):
+        f.read()
+    with pytest.raises(ValueError, match="closed file"):
+        f.read(1)
+
+
 def test_a_directory_has_no_size_and_no_checksum(fs: WebdavFileSystem) -> None:
     fs.mkdir("/d")
     assert fs.size("/d") is None

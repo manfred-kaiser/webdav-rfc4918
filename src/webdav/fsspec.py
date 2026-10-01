@@ -696,7 +696,16 @@ class WebdavFile(AbstractBufferedFile):
         self.closed: bool = False
 
     def read(self, length: int = -1) -> "str | bytes | None":
-        """Read up to ``length`` bytes/characters."""
+        """Read up to ``length`` bytes/characters.
+
+        Nothing is left at or beyond the end: that reads as empty, as for any file, and
+        costs no request - a range that starts there is one the server has to refuse (416).
+        """
+        if self.closed:
+            msg = "I/O operation on closed file."
+            raise ValueError(msg)
+        if self.size is not None and self.loc >= self.size:
+            return b""
         chunk = self.reader.read(length)
         if chunk:
             self.loc += len(chunk)
