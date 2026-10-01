@@ -13,6 +13,7 @@ answer something specific use ``scripted_server``.
 import copy
 import errno
 import pickle
+import re
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -1237,7 +1238,7 @@ def test_a_server_without_ranges_cannot_be_seeked() -> None:
 
 
 def test_a_server_that_ignores_range_never_yields_the_wrong_bytes() -> None:
-    """Seeking needs a 206; a server that answers 200 with the whole body is refused, not believed."""
+    """A partial range needs a 206; a server that answers 200 with the whole body is refused."""
     body = b"0123456789"
 
     def respond(seen: Seen) -> Reply:
@@ -1249,10 +1250,122 @@ def test_a_server_that_ignores_range_never_yields_the_wrong_bytes() -> None:
 
     with scripted_server(respond) as (url, recorder):
         fs = WebdavFileSystem(url)
-        with fs.open("/f", "rb") as f:
-            assert f.read(2) == b"01"
+        with fs.open("/f", "rb", cache_type="none") as f:
             f.seek(5)
             with pytest.raises(ClientError, match="206"):
                 f.read(2)
         fs.filesystem.close()
-    assert any(r.headers.get("range") == "bytes=5-" for r in recorder.requests)
+    assert any(r.headers.get("range") == "bytes=5-6" for r in recorder.requests)
+
+
+_BIG = 1_000_000
+
+
+def _big_file(on_get: "Callable[[Seen], Reply]") -> "Callable[[Seen], Reply]":
+    properties = _FILE_PROPERTIES.replace(
+        b"<d:getcontentlength>10<", b"<d:getcontentlength>%d<" % _BIG
+    )
+
+    def respond(seen: Seen) -> Reply:
+        if seen.method == "PROPFIND":
+            return 207, {"Content-Type": "application/xml"}, properties
+        return on_get(seen)
+
+    return respond
+
+
+def _serves_ranges(seen: Seen, *, etag: str = '"v1"') -> Reply:
+    """A GET answered the way a server that knows ranges answers it."""
+    data = bytes(range(256)) * (_BIG // 256 + 1)
+    requested = seen.headers.get("range")
+    headers = {"Content-Type": "application/octet-stream", "ETag": etag}
+    if requested is None:
+        return 200, headers, data[:_BIG]
+    first, _, last = requested.removeprefix("bytes=").partition("-")
+    start, stop = int(first), min(int(last) if last else _BIG - 1, _BIG - 1)
+    headers["Content-Range"] = f"bytes {start}-{stop}/{_BIG}"
+    return 206, headers, data[start : stop + 1]
+
+
+def test_every_read_is_a_bounded_range_and_no_response_is_cut_off() -> None:
+    """A Parquet reader seeks all the time: each block is one request that is read to its end."""
+    with scripted_server(_big_file(_serves_ranges)) as (url, recorder):
+        fs = WebdavFileSystem(url)
+        with fs.open("/f", "rb", block_size=1000) as f:
+            for position in (900_000, 5, 500_000, 123_456, 0):
+                f.seek(position)
+                assert f.read(10) == bytes((position + i) % 256 for i in range(10))
+        assert fs.cat_file("/f", 1000, 1010) == bytes(
+            (1000 + i) % 256 for i in range(10)
+        )
+        fs.filesystem.close()
+    gets = [r for r in recorder.requests if r.method == "GET"]
+    assert len(gets) == 6
+    assert all(re.fullmatch(r"bytes=\d+-\d+", r.headers.get("range", "")) for r in gets)
+    assert gets[-1].headers["range"] == "bytes=1000-1009"  # exactly what was asked for
+
+
+def test_reading_a_whole_file_sends_no_range_at_all() -> None:
+    """The one request a server that does not know ranges can answer too."""
+    body = bytes(range(100)) * 10
+
+    def respond(seen: Seen) -> Reply:
+        if seen.method == "PROPFIND":
+            properties = _FILE_PROPERTIES.replace(
+                b"<d:getcontentlength>10<", b"<d:getcontentlength>1000<"
+            )
+            return 207, {"Content-Type": "application/xml"}, properties
+        return 200, {"Content-Type": "application/octet-stream"}, body
+
+    with scripted_server(respond) as (url, recorder):
+        fs = WebdavFileSystem(url)
+        assert fs.cat_file("/f") == body
+        with fs.open("/f", "rb") as f:
+            assert f.read() == body
+        fs.filesystem.close()
+    assert not any("range" in r.headers for r in recorder.requests if r.method == "GET")
+
+
+def test_a_file_that_changes_between_two_blocks_is_an_error() -> None:
+    versions = iter(['"v1"', '"v2"'])
+
+    def respond(seen: Seen) -> Reply:
+        return _serves_ranges(seen, etag=next(versions))
+
+    with scripted_server(_big_file(respond)) as (url, _recorder):
+        fs = WebdavFileSystem(url)
+        with fs.open("/f", "rb", cache_type="none") as f:
+            assert len(f.read(10)) == 10
+            with pytest.raises(ClientError, match="changed"):
+                f.read(10)
+        fs.filesystem.close()
+
+
+@pytest.mark.parametrize("extra", [b"more", b""])
+def test_a_response_that_is_not_the_size_asked_for_is_an_error(extra: bytes) -> None:
+    def respond(seen: Seen) -> Reply:
+        status, headers, data = _serves_ranges(seen)
+        return status, headers, data + extra if extra else data[:-1]
+
+    with scripted_server(_big_file(respond)) as (url, _recorder):
+        fs = WebdavFileSystem(url)
+        with (
+            fs.open("/f", "rb", cache_type="none") as f,
+            pytest.raises(ClientError, match="10 bytes"),
+        ):
+            f.read(10)
+        fs.filesystem.close()
+
+
+def test_a_resource_without_a_size_cannot_be_opened_for_reading() -> None:
+    def respond(_seen: Seen) -> Reply:
+        no_length = _FILE_PROPERTIES.replace(
+            b"<d:getcontentlength>10</d:getcontentlength>", b""
+        )
+        return 207, {"Content-Type": "application/xml"}, no_length
+
+    with scripted_server(respond) as (url, _recorder):
+        fs = WebdavFileSystem(url)
+        with pytest.raises(OSError, match="how big"):
+            fs.open("/f", "rb")
+        fs.filesystem.close()

@@ -88,6 +88,14 @@ returns {class}`~webdav.resource.Resource` objects.
 - **Parallel writers** may create the same parent directory at once (dask, zarr): a server that
   loses that race and answers 500 instead of "exists" is not an error for `makedirs(exist_ok=True)`
   if the directory is there afterwards.
+- **Reading** (`open(path, "rb")`, `cat_file(path, start, end)`) asks the server for blocks of
+  the file - `Range: bytes=a-b`, through fsspec's block cache - and reads every answer to its
+  end, so a reader that seeks (Parquet) does not cut off a stream with each seek and the
+  connection is reused. `cat_file` with a range asks for exactly those bytes; a whole file is
+  one request without a `Range`. The size comes from one `PROPFIND` when the file is opened, so a
+  resource that has none cannot be read this way. A server that answers a part with the whole
+  file (`200`) is refused rather than believed, and a file that changes between two blocks (its
+  `ETag`) is an error.
 - **Writing** (`open(path, "wb")`, `"xb"`) uploads when the file is closed cleanly; a block that
   raises leaves the resource untouched. `"xb"` creates only if nothing is there (atomic on the
   server). Append mode is not supported.

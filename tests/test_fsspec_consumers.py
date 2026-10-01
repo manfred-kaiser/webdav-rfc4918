@@ -13,8 +13,6 @@ installed, so the usual run stays small. Install them to run these, e.g.::
     pip install pandas pyarrow "dask[dataframe]" zarr xarray
 """
 
-import gc
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -24,20 +22,6 @@ import pytest
 
 from tests.credentials import AUTH
 from webdav.fsspec import WebdavFileSystem
-
-# A reader of a Parquet file asks for a part, and closes the response without reading to its end.
-# The helper *server* (cheroot) is left with a buffered file on a socket that is gone, and
-# complains - from its ``__del__``, whenever the garbage is collected: here, or in the next test.
-pytestmark = pytest.mark.filterwarnings(
-    "ignore:Exception ignored in. <function IOBase.__del__:"
-    "pytest.PytestUnraisableExceptionWarning"
-)
-
-
-@pytest.fixture(autouse=True)
-def _collect_garbage_here() -> Iterator[None]:
-    yield
-    gc.collect()
 
 
 @pytest.fixture

@@ -40,7 +40,6 @@ from typing import (
     NamedTuple,
     NoReturn,
     SupportsIndex,
-    TextIO,
     cast,
     overload,
 )
@@ -50,6 +49,7 @@ from fsspec import Callback
 from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 from fsspec.utils import stringify_path
 
+from webdav._fsspec_ranges import UNKNOWN, fetch_range
 from webdav._fsspec_support import absolute, info_of, is_root, translate_exceptions
 from webdav._webdavs_url import SCHEME, authority_of, host_and_port, server_url
 from webdav.dav.fs_utils import peek_filelike_length
@@ -67,7 +67,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from datetime import datetime
     from os import PathLike
-    from typing import Self
 
     from typing_extensions import Buffer
 
@@ -621,6 +620,20 @@ class WebdavFileSystem(AbstractFileSystem):
                 **kwargs,
             )
 
+    def cat_file(
+        self,
+        path: str,
+        start: "int | None" = None,
+        end: "int | None" = None,
+        **kwargs: Any,
+    ) -> bytes:
+        """The bytes ``start`` to ``end`` of a file: exactly those, in one request.
+
+        fsspec's read-ahead cache would fetch a whole block for the few bytes asked for.
+        """
+        kwargs.setdefault("cache_type", "none")
+        return cast("bytes", super().cat_file(path, start, end, **kwargs))
+
     def checksum(self, path: str) -> "str | None":
         """Return the ``getetag`` property."""
         path = self._strip(path)
@@ -778,7 +791,13 @@ class WebdavFileSystem(AbstractFileSystem):
 
 
 class WebdavFile(AbstractBufferedFile):
-    """Read-only, file-like access to a remote resource."""
+    """Read-only, file-like access to a remote resource.
+
+    Bytes come in bounded ranged requests (``Range: bytes=a-b``) through fsspec's block
+    cache - the way fsspec's files read - and every response is read to its end, so the
+    connection goes back to the pool. Nothing is a stream that is cut off: not on a seek (a
+    Parquet reader seeks all the time), and not for the few bytes of ``cat_file(path, a, b)``.
+    """
 
     size: int
 
@@ -793,9 +812,25 @@ class WebdavFile(AbstractBufferedFile):
         cache_options: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
-        """Open ``path`` on ``fs`` for streaming reads. See ``fsspec`` for the rest."""
+        """Open ``path`` on ``fs`` for reading. See ``fsspec`` for the rest.
+
+        The size is asked for (one PROPFIND) unless it is given: a ranged read needs to
+        know it, and it is where a missing resource and a directory are noticed.
+        """
         size = kwargs.get("size")
-        self.details = {"name": path, "size": size, "type": "file"}
+        if size is None:
+            details = fs.info(path)
+            if details["type"] == "directory":
+                raise IsADirectoryError(errno.EISDIR, "Is a directory", path)
+            if details.get("size") is None:
+                msg = "the server does not say how big the resource is"
+                raise OSError(errno.EIO, msg, path)
+            kwargs["size"] = details["size"]
+            self.details = details
+        else:
+            self.details = {"name": path, "size": size, "type": "file"}
+        self._validators = UNKNOWN
+        self._accepts_ranges: bool | None = None
         super().__init__(
             fs,
             path,
@@ -806,57 +841,44 @@ class WebdavFile(AbstractBufferedFile):
             cache_options=cache_options,
             **kwargs,
         )
-        encoding = kwargs.get("encoding")
-        self.fobj = fs.filesystem.open(
-            self.path, mode=self.mode, encoding=encoding, chunk_size=self.blocksize
-        )
-        self.reader: TextIO | BinaryIO = self.fobj.__enter__()
 
-        # Only ask for the size separately if the GET response didn't carry
-        # a Content-Length (or the caller didn't already provide one).
-        if not self.size:
-            reader_size = getattr(self.reader, "size", None)
-            self.size = reader_size or self.fs.size(self.path)
-
-        self.closed: bool = False
-
-    def read(self, length: int = -1) -> "str | bytes | None":
-        """Read up to ``length`` bytes/characters.
-
-        Nothing is left at or beyond the end: that reads as empty, as for any file, and
-        costs no request - a range that starts there is one the server has to refuse (416).
-        """
-        if self.closed:
-            msg = "I/O operation on closed file."
-            raise ValueError(msg)
-        if self.size is not None and self.loc >= self.size:
-            return b""
-        chunk = self.reader.read(length)
-        if chunk:
-            self.loc += len(chunk)
-        return chunk
-
-    def __enter__(self) -> "Self":
-        """Return self; the stream is already open by ``__init__``."""
-        return self
+    def _fetch_range(self, start: int, end: int) -> bytes:
+        """Bytes ``start`` to ``end`` (exclusive): one bounded request."""
+        with translate_exceptions():
+            result = fetch_range(
+                self.fs.filesystem.session,
+                self.path,
+                start,
+                end,
+                total=self.size,
+                known=self._validators,
+            )
+        self._validators = result.validators
+        self._accepts_ranges = result.accepts_ranges
+        return result.data
 
     def seek(self, loc: int, whence: int = 0) -> int:
-        """Seek within the stream."""
-        super().seek(loc, whence=whence)
-        return self.reader.seek(loc, whence)
+        """Seek; to anywhere but the start only on a server that is not known to refuse ranges.
+
+        Whether it serves them is what its answers said: until there is one, the first ranged
+        read decides (a ``200`` for a part is refused as such).
+
+        Raises:
+            ValueError: An answer of the server said it does not serve ranges - nothing is
+                requested to find out that it cannot be read from the middle.
+
+        """
+        before = int(self.tell())
+        position = int(super().seek(loc, whence))
+        if position and self._accepts_ranges is False:
+            super().seek(before)
+            msg = "server does not support ranges"
+            raise ValueError(msg)
+        return position
 
     def isatty(self) -> bool:
         """Never a TTY."""
         return False
-
-    def close(self) -> None:
-        """Close the underlying stream."""
-        if self.closed:
-            return
-        if hasattr(self, "reader"):
-            # fs.filesystem.open() may have raised before self.reader was set.
-            self.reader.close()
-        self.closed = True
 
     def __reduce_ex__(
         self, protocol: SupportsIndex
