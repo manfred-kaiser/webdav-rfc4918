@@ -37,6 +37,16 @@ def test_mv_cross_server_is_rejected(
     assert "same server" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("command", ["mv", "cp"])
+def test_the_root_is_neither_moved_nor_copied(
+    server_url: str, capsys: pytest.CaptureFixture[str], command: str
+) -> None:
+    assert cli.main([command, _url(server_url, ""), _url(server_url, "x")]) == 1
+    assert "root of the session" in capsys.readouterr().err
+    assert cli.main(["info", _url(server_url, "x")]) == 1
+    capsys.readouterr()
+
+
 def test_redirect_policy_flag_is_honored(
     server_url: str, capsys: pytest.CaptureFixture[str]
 ) -> None:

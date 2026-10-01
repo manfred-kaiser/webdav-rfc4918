@@ -593,11 +593,17 @@ class FileSystem:
                 empty string should be able to do.
 
         """
+        self._refuse_root(
+            path,
+            "refusing to remove the root of the session (its base_url): name what to remove",
+        )
+        self._remote.send(Method.DELETE, path)
+
+    def _refuse_root(self, path: str, message: str) -> None:
+        """Raise :class:`ClientError` with ``message`` if ``path`` is the root of the session."""
         url, base, _rel = self._remote.locate(path)
         if path_key(URL(url).path) == path_key(base.path):
-            msg = "refusing to remove the root of the session (its base_url): name what to remove"
-            raise ClientError(msg)
-        self._remote.send(Method.DELETE, path)
+            raise ClientError(message)
 
     def copy(
         self,
@@ -614,9 +620,18 @@ class FileSystem:
         instead of returning the raw response.
 
         Raises:
+            ClientError: ``path`` or ``destination`` is the root of the session - nothing is sent.
             ResourceAlreadyExistsError: ``overwrite`` is false and ``destination`` exists.
 
         """
+        self._refuse_root(
+            path,
+            "refusing to copy the root of the session (its base_url): every destination is inside it",
+        )
+        self._refuse_root(
+            destination,
+            "refusing to copy onto the root of the session (its base_url)",
+        )
         self._raise_for_overwrite_conflict(
             self._session.copy(path, destination, overwrite=overwrite, depth=depth),
             overwrite=overwrite,
@@ -633,9 +648,17 @@ class FileSystem:
         instead of returning the raw response.
 
         Raises:
+            ClientError: ``path`` or ``destination`` is the root of the session - nothing is sent.
             ResourceAlreadyExistsError: ``overwrite`` is false and ``destination`` exists.
 
         """
+        self._refuse_root(
+            path, "refusing to move the root of the session (its base_url)"
+        )
+        self._refuse_root(
+            destination,
+            "refusing to move onto the root of the session (its base_url)",
+        )
         self._raise_for_overwrite_conflict(
             self._session.move(path, destination, overwrite=overwrite),
             overwrite=overwrite,

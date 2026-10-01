@@ -76,6 +76,47 @@ def test_a_file_that_has_data_against_a_declared_size_of_zero_is_an_error() -> N
         client.upload_fileobj(io.BytesIO(b"x"), "f", size=0, overwrite=True)
 
 
+@pytest.mark.parametrize("operation", ["copy", "move"])
+@pytest.mark.parametrize("path", ["", "/", "docs/..", "."])
+def test_the_root_is_never_copied_or_moved(
+    fs: FileSystem, operation: str, path: str
+) -> None:
+    """A server answers it with a 500 (WsgiDAV) or a 403; nothing should be sent at all."""
+    fs.mkdir("docs")
+    with pytest.raises(ClientError, match="root of the session"):
+        getattr(fs, operation)(path, "elsewhere")
+    assert not fs.exists("elsewhere")
+    assert fs.isdir("docs")
+
+
+@pytest.mark.parametrize("operation", ["copy", "move"])
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_nothing_is_copied_or_moved_onto_the_root(
+    fs: FileSystem, operation: str, overwrite: bool
+) -> None:
+    fs.mkdir("docs")
+    with pytest.raises(ClientError, match="root of the session"):
+        getattr(fs, operation)("docs", "", overwrite=overwrite)
+    assert fs.isdir("docs")
+
+
+def test_a_refused_copy_or_move_of_the_root_sends_no_request() -> None:
+    def respond(_seen: Seen) -> Reply:
+        return 500, {"Content-Length": "0"}, b""
+
+    calls: list[tuple[str, tuple[str, str], dict[str, bool]]] = [
+        ("copy", ("/", "x"), {}),
+        ("move", ("/", "x"), {}),
+        ("copy", ("x", "/"), {"overwrite": True}),
+        ("move", ("x", "/"), {"overwrite": True}),
+    ]
+    with scripted_server(respond) as (url, recorder), FileSystem(url) as client:
+        for operation, arguments, options in calls:
+            with pytest.raises(ClientError, match="root of the session"):
+                getattr(client, operation)(*arguments, **options)
+    assert recorder.requests == []
+
+
 def test_open_read_text_and_binary(fs: FileSystem) -> None:
     fs.upload_fileobj(io.BytesIO("héllo".encode()), "t.txt")
 
