@@ -195,23 +195,29 @@ def test_a_lock_the_client_cannot_use_is_released_anyway() -> None:
     assert rec.requests[1].headers["lock-token"] == "<opaquelocktoken:abc>"
 
 
-def test_a_lock_is_not_released_elsewhere_when_the_base_url_changed_meanwhile(
+def test_a_lock_already_gone_on_release_is_logged_without_the_token(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # The UNLOCK would carry the session's *current* credentials to a server the
-    # session was not pointed at any more: it is refused (and said so), not sent -
-    # neither to the server that was locked nor to the one the session points at now.
-    with scripted_server(_lock_server("opaquelocktoken:abc")) as (url_a, rec_a):
-        with scripted_server(always(OK)) as (url_b, rec_b):
-            session = Session(url_a, retry=False)
-            fs = FileSystem.from_session(session)
-            with caplog.at_level("WARNING", logger="webdav"):
-                with fs.locked("f"):
-                    session.base_url = url_b
-    assert [r.method for r in rec_a.requests] == ["LOCK"]
-    assert rec_b.requests == []
-    assert "could not release the lock" in caplog.text
-    assert "until it times out" in caplog.text
+    """``base_url`` is immutable (see test_session_settings.py), so a held lock's
+    UNLOCK on cleanup always goes to the resource it was acquired on - the server
+    answering that it is already gone (timed out, or removed) is the one other
+    way ``_unlock_quietly`` warns instead of silently succeeding."""
+
+    def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
+        if seen.method == "UNLOCK":
+            return 404, {}, b""
+        result: tuple[int, dict[str, str], bytes] = _lock_server("opaquelocktoken:abc")(
+            seen
+        )
+        return result
+
+    with scripted_server(respond) as (url, rec):
+        with caplog.at_level("WARNING", logger="webdav"):
+            with FileSystem(retry=False).locked(f"{url}/f"):
+                pass
+    assert [r.method for r in rec.requests] == ["LOCK", "UNLOCK"]
+    assert "was already gone" in caplog.text
+    assert "may have timed out" in caplog.text
     assert (
         "opaquelocktoken:abc" not in caplog.text
     )  # the token is a capability: never logged

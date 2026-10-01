@@ -45,6 +45,14 @@ MAX_HREF_LENGTH = 8192
 #: separates paths, ``relative_url_to`` refuses it.)
 _ENCODED_SEPARATOR = re.compile(r"%2f", re.IGNORECASE)
 
+#: Control characters a well-formed XML document can still carry (``\x7f``,
+#: and - unlike most of ``\x00``-``\x1f`` - a literal tab/LF/CR): header or
+#: log-line injection if this ever ends up interpolated somewhere raw.
+#: Deliberately *not* the backslash ``url_safety`` also forbids in a URL -
+#: here it is an ordinary POSIX file-name character (see above), not part
+#: of an authority a parser could misread.
+_FORBIDDEN_HREF_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
 
 def _parse_status_code(status_line: str | None) -> int | None:
     if not status_line:
@@ -59,8 +67,8 @@ def _check_href(href: str) -> None:
     """Refuse an href that cannot be trusted to name one resource.
 
     Raises:
-        ValueError: The href is too long, or hides a path separator in
-            percent-encoding.
+        ValueError: The href is too long, hides a path separator in
+            percent-encoding, or contains a control character.
 
     """
     if len(href) > MAX_HREF_LENGTH:
@@ -68,6 +76,9 @@ def _check_href(href: str) -> None:
         raise ValueError(msg)
     if _ENCODED_SEPARATOR.search(href):
         msg = f"<d:href> {href[:80]!r} contains an encoded path separator"
+        raise ValueError(msg)
+    if _FORBIDDEN_HREF_CHARS.search(href):
+        msg = f"<d:href> {href[:80]!r} contains a control character"
         raise ValueError(msg)
 
 

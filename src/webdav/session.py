@@ -1,14 +1,15 @@
 # pylint: disable=too-many-lines  # one documented entry point: about a quarter of this file is docstrings
-"""A :class:`requests.Session` that speaks WebDAV verbs directly.
+"""A WebDAV client built on ``requests``, with the API you already know from it.
 
 Everything ``requests.Session`` does keeps working exactly as documented
 in ``requests`` itself (auth, adapters, hooks, cookies, connection pooling,
-``timeout=``, ``verify=``, ``cert=``, ``stream=``, ...); this subclass adds
-the WebDAV verbs on top - ``get``, ``put``, ``delete``, ``head``, ``options``,
-``propfind``, ``proppatch``, ``mkcol``, ``copy``, ``move``, ``lock``,
-``unlock`` - shaped like ``Session.get``/``.put``: they return a
-:class:`webdav.response.Response` and, like ``requests``, do not raise for an
-error status unless asked to (``raise_for_status()``, or
+``timeout=``, ``verify=``, ``cert=``, ``stream=``, ...) - forwarded to one
+``Session`` holds internally, rather than inherited (see the class
+docstring for why) - plus the WebDAV verbs on top - ``get``, ``put``,
+``delete``, ``head``, ``options``, ``propfind``, ``proppatch``, ``mkcol``,
+``copy``, ``move``, ``lock``, ``unlock`` - shaped like ``Session.get``/``.put``:
+they return a :class:`webdav.response.Response` and, like ``requests``, do
+not raise for an error status unless asked to (``raise_for_status()``, or
 ``raise_on_error=True``).
 
 For filesystem-shaped access to a server (``ls``, ``open``, ``upload_file``,
@@ -31,6 +32,7 @@ import threading
 import time
 from contextlib import suppress
 from datetime import timedelta
+from functools import cached_property
 from http import HTTPStatus
 from typing import (
     TYPE_CHECKING,
@@ -384,22 +386,20 @@ class Session:
         if headers:
             self.headers.update(headers)
         self._trusted_arg = trusted_redirect_origins
-        self._base_url: str | None = None
-        self.base_url = base_url
-        self._timeout: float | tuple[float | None, float | None] | None = None
+        # Immutable once set: internal code paths (releasing a lock on
+        # cleanup, Session._record_granted, ...) replay an absolute URL they
+        # captured earlier and trust it was already validated against this
+        # session's origin - a base_url that could later point elsewhere
+        # would silently invalidate that trust. See resolve_url().
+        self._base_url = check_base_url(base_url)
         self.timeout = timeout
         self._redirect_policy = redirect_policy
-        self._max_redirects = MAX_REDIRECTS
         self.max_redirects = max_redirects
-        self._max_response_size: int | None = None
         self.max_response_size = max_response_size
-        self._raise_on_error = False
         self.raise_on_error = raise_on_error
-        self._chunk_size = DEFAULT_CHUNK_SIZE
         self.chunk_size = chunk_size
         #: Deadline, in seconds, for the whole body of a response that is not
         #: streamed (``None``: none). ``timeout`` only limits each single read.
-        self._max_response_time: float | None = None
         self.max_response_time = max_response_time
         #: Names (lower case) of extra per-call headers a redirect to a
         #: trusted *other* origin may carry, beyond the representation and
@@ -407,8 +407,6 @@ class Session:
         #: for a signed upload that has to repeat them.
         self._redirect_forward_headers: frozenset[str] = frozenset()
         self._retry_arg = retry
-        self._with_retry: RetryFunc
-        self.retry = retry
         self._cert_arg = cert
         self._verify_arg = verify
         self._tls_arg = tls
@@ -425,8 +423,10 @@ class Session:
         object holding it.
         """
         # Adapters whose connections answer to the whole-request deadline
-        # (see webdav.transport.deadline); ``_tls_arg`` below replaces the
-        # https one with the mTLS adapter, which has the same property.
+        # (see webdav.transport.deadline). When ``_tls_arg`` is given,
+        # configure_tls() below replaces the https one with the mTLS
+        # adapter (also DeadlineAdapter-derived) - a deliberately cheap
+        # throwaway mount in that case, not an oversight.
         self.mount("https://", DeadlineAdapter())
         self.mount("http://", DeadlineAdapter())
         configure_tls(
@@ -435,9 +435,7 @@ class Session:
             verify=self._verify_arg,
             tls=self._tls_arg,
         )
-        self._with_retry = (
-            self._retry_arg if callable(self._retry_arg) else _retry(self._retry_arg)
-        )
+        self.retry = self._retry_arg
         self.locks = LockRegistry()
         self._is_trusted_redirect_target = build_trust_check(self._trusted_arg)
         self._features: dict[Origin | str, FeatureDetection] = {}
@@ -591,16 +589,27 @@ class Session:
     def base_url(self) -> "str | None":
         """The URL that request paths are relative to (``None``: every URL is a full one).
 
-        Raises:
-            ValueError: When set to anything but ``None`` or one full
-                ``http(s)`` URL without credentials, a query or a fragment.
-
+        Set once, in the constructor, and read-only from then on - unlike
+        every other connection option here. Internal code (releasing a lock
+        on cleanup, ...) stores an absolute URL once, already checked
+        against this session's origin, and replays it later; letting
+        ``base_url`` change afterwards would silently invalidate that
+        check. Point a different server with a fresh ``Session`` instead -
+        cheap, and it can share an existing one's connection pool and
+        credentials deliberately, via the same arguments, rather than by
+        mutating a session something else may still be holding open state
+        against.
         """
         return self._base_url
 
-    @base_url.setter
-    def base_url(self, url: "str | None") -> None:
-        self._base_url = check_base_url(url)
+    @cached_property
+    def _base_origin(self) -> "Origin | None":
+        """``effective_origin(base_url)``, computed once - ``base_url`` cannot change.
+
+        ``resolve_url()`` and ``destination_header()`` would otherwise
+        re-derive this exact value from scratch on every single call.
+        """
+        return None if self._base_url is None else effective_origin(self._base_url)
 
     @property
     def timeout(self) -> "float | tuple[float | None, float | None] | None":
@@ -766,6 +775,8 @@ class Session:
         (locks, caches, adapters) are rebuilt fresh - see :meth:`_init_derived`.
         """
         self._transport = requests.Session()
+        # base_url has no setter (see its property) - restored directly.
+        self._base_url = state.pop("base_url", None)
         # The private arguments first: a setter (``redirect_policy``) may need one.
         for name in sorted(state, key=lambda n: not n.startswith("_")):
             setattr(self, name, state[name])
@@ -793,9 +804,7 @@ class Session:
         if self.base_url is None:
             return url
         if is_url(url):
-            if effective_origin(url) is None or effective_origin(
-                url
-            ) != effective_origin(self.base_url):
+            if effective_origin(url) != self._base_origin:
                 msg = f"{redact_url(url)!r} is not on this session's base_url {redact_url(self.base_url)!r}"
                 raise ClientError(msg)
             return url
@@ -1443,7 +1452,8 @@ class Session:
             headers["If"] = f"(<{validate_token(refresh)}>)"
             return self._with_headers(Method.LOCK, url, kwargs, headers)
         headers["Depth"] = depth_header(depth, Method.LOCK)
-        headers["Content-Type"] = "application/xml; charset=utf-8"
+        # No explicit Content-Type: prepare_body() sets it for any
+        # XML_BODY_METHODS call with a body - LOCK is one.
         response = self._with_headers(
             Method.LOCK, url, kwargs, headers, data=build_lock_body(scope, owner)
         )
@@ -1551,7 +1561,7 @@ class Session:
     ) -> Response:
         source_url = self.resolve_url(url)
         destination_value = destination_header(
-            destination, base_url=self.base_url, resolve=self.resolve_url
+            destination, base_origin=self._base_origin, resolve=self.resolve_url
         )
         extra: dict[str, str | None] = {"Destination": destination_value}
         if overwrite is not None:

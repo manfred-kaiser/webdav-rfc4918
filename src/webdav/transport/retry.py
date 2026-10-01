@@ -10,11 +10,11 @@ sitting below ``requests`` never sees.
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from typing import Protocol, TypeVar
 
 import requests.exceptions
 
+from webdav.dav.date_utils import from_rfc1123
 from webdav.exceptions import HTTPStatusError
 from webdav.transport.parse_utils import parse_uint
 
@@ -48,9 +48,8 @@ def _retry_after(exc: HTTPStatusError) -> "float | None":
     seconds = parse_uint(value)
     if seconds is not None:
         return float(seconds)
-    try:
-        when = parsedate_to_datetime(value.strip())
-    except (TypeError, ValueError, IndexError, OverflowError):
+    when = from_rfc1123(value)
+    if when is None:
         return None
     if when.tzinfo is None:
         when = when.replace(tzinfo=UTC)
@@ -87,6 +86,12 @@ def retry(enabled: bool = False, tries: int = 3) -> RetryFunc:
                     if asked > MAX_RETRY_AFTER:
                         raise
                     delay = max(delay, asked)
+                # About to retry: this response is discarded, not returned to
+                # the caller (unlike the one on the attempt that gives up -
+                # see the two ``raise`` above) - close it now, or a streamed
+                # response's connection is never returned to the pool.
+                if exc.response is not None:
+                    exc.response.close()
             except _TRANSIENT_TRANSPORT_ERRORS:
                 if attempt + 1 == retries:
                     raise

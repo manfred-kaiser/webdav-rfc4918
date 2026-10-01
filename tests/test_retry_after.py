@@ -101,3 +101,28 @@ def test_a_write_is_not_retried_whatever_the_server_asks(sleeps: list[float]) ->
         assert Session().delete(f"{url}/x").status_code == 503
     assert len(rec.requests) == 1
     assert sleeps == []
+
+
+def test_a_discarded_streamed_response_is_closed_before_the_retry(
+    sleeps: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 503 from the first attempt is never read or returned - only its
+    connection matters, and it must go back to the pool before the next
+    attempt, or a server that keeps failing leaks one connection per try."""
+    from webdav.response import Response  # noqa: PLC0415
+
+    closed: list[int] = []
+    original_close = Response.close
+
+    def tracking_close(self: Response) -> None:
+        closed.append(self.status_code)
+        original_close(self)
+
+    monkeypatch.setattr(Response, "close", tracking_close)
+    with scripted_server(_answers((503, {}), (200, {}))) as (url, rec):
+        response = Session().get(f"{url}/x", stream=True)
+    assert len(rec.requests) == 2
+    assert sleeps == [0.5]
+    assert closed == [503]  # the discarded attempt - not the one handed back
+    assert response.status_code == 200
+    assert response.content == b""  # still readable: not closed by the fix
