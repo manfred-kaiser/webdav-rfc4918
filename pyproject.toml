@@ -5,9 +5,9 @@ requires = [ "hatchling==1.31.0" ]
 [project]
 name = "webdav-rfc4918"
 version = "0.1.0"
-description = "RFC 4918 compliant WebDAV client, built on requests, with a CLI"
+description = "RFC 4918 compliant WebDAV client, built on requests, with an optional fsspec filesystem and a CLI"
 readme = "README.md"
-keywords = [ "mtls", "rfc4918", "webdav", "webdav-cli", "webdav-client" ]
+keywords = [ "fsspec", "mtls", "rfc4918", "webdav", "webdav-cli", "webdav-client" ]
 license = { text = "MIT" }
 authors = [ { name = "Manfred Kaiser", email = "manfred.kaiser@ssh-mitm.at" } ]
 maintainers = [ { name = "Manfred Kaiser", email = "manfred.kaiser@ssh-mitm.at" } ]
@@ -27,6 +27,7 @@ dav = "webdav.cli:main"
 
 [project.optional-dependencies]
 docs = [ "myst-parser", "sphinx", "sphinx-copybutton", "sphinx-rtd-theme" ]
+fsspec = [ "fsspec>=2022.11.0" ]
 
 [project.urls]
 Homepage = "https://github.com/manfred-kaiser/webdav-rfc4918"
@@ -247,7 +248,7 @@ disallow_incomplete_defs = true
 files = [ "src/webdav", "tests", "docs" ]
 
 [[tool.mypy.overrides]]
-module = [ "wsgidav.*" ]
+module = [ "fsspec", "fsspec.*", "wsgidav.*" ]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

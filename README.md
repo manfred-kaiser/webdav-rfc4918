@@ -197,9 +197,27 @@ dav put ./report.pdf webdav://webdav.example.org/report.pdf
 Also `info`, `cat`, `mkdir`, `rm`, `mv` and `cp`. Authentication is `--user` and `--password` (or `$WEBDAV_USER` / `$WEBDAV_PASSWORD`), and the connection options - mTLS, redirect policy, limits - have flags too. See the [CLI reference](docs/reference/cli.md), or `dav <command> --help`.
 
 
+## fsspec
+
+An optional [`fsspec`](https://filesystem-spec.readthedocs.io) filesystem, for projects (pandas, dask, ...) that want a WebDAV server behind the standard storage-backend interface instead of this library's own API:
+
+```sh
+pip install webdav-rfc4918[fsspec]
+```
+
+```python
+from webdav.fsspec import WebdavFileSystem
+
+fs = WebdavFileSystem("https://webdav.example.org", auth=auth)
+fs.ls("Photos", detail=False)
+```
+
+Importing it registers `"webdavs"` with fsspec (not `"webdav"` - already mapped by fsspec to [`webdav4`](https://pypi.org/project/webdav4/) by default; see [fsspec](docs/reference/fsspec.md) for why). Checked against fsspec's own conformance test suite, which also surfaced a [known upstream fsspec bug](https://github.com/manfred-kaiser/webdav-rfc4918/issues/3) this library inherits, not specific to it - confirmed structurally true of `s3fs` too.
+
+
 ## Documentation
 
-[Session and FileSystem](docs/reference/session.md) · [Locking](docs/reference/locking.md) · [Redirects](docs/reference/redirects.md) · [TLS](docs/reference/tls.md) · [CLI](docs/reference/cli.md)
+[Session and FileSystem](docs/reference/session.md) · [Locking](docs/reference/locking.md) · [Redirects](docs/reference/redirects.md) · [TLS](docs/reference/tls.md) · [CLI](docs/reference/cli.md) · [fsspec](docs/reference/fsspec.md)
 
 Build the docs yourself with `hatch run docs:build`.
 

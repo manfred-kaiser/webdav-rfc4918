@@ -2,7 +2,8 @@
 
 An [RFC 4918](https://www.rfc-editor.org/rfc/rfc4918) compliant WebDAV
 client for Python, built on [`requests`](https://requests.readthedocs.io/),
-with a `dav` CLI. TLS verification is on by default and disabling it is
+with an optional [`fsspec`](https://filesystem-spec.readthedocs.io)
+filesystem and a `dav` CLI. TLS verification is on by default and disabling it is
 never quiet, redirects never carry your credentials to another origin, and
 responses are bounded in size and time.
 
@@ -36,5 +37,6 @@ reference/locking
 reference/redirects
 reference/tls
 reference/cli
+reference/fsspec
 apache-compliance-check
 ```

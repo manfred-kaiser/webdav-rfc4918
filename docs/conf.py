@@ -47,6 +47,7 @@ templates_path = ["_templates"]
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
     "requests": ("https://requests.readthedocs.io/en/latest", None),
+    "fsspec": ("https://filesystem-spec.readthedocs.io/en/stable", None),
 }
 
 master_doc = "index"
