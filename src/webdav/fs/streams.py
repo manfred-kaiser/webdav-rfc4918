@@ -127,7 +127,14 @@ def _get(session: "Session", url: str, pos: int = 0) -> "HTTPResponse":
     # A 416 is only meaningful when resuming ("nothing left after pos"); on
     # the first request it is an error like any other, not an empty file.
     if not (pos and response.status_code == HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE):
-        raise_for_status(response)
+        try:
+            raise_for_status(response)
+        except BaseException:
+            # The body of an error response is neither wanted nor bounded (this is a
+            # stream): give the connection back instead of leaving it checked out until
+            # the exception, which holds the response, is garbage collected.
+            response.close()
+            raise
     return response
 
 

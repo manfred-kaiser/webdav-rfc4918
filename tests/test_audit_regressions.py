@@ -354,6 +354,19 @@ def test_a_416_on_the_first_get_is_an_error_not_an_empty_download() -> None:
             FileSystem(retry=False).download_fileobj(f"{url}/f", io.BytesIO())
 
 
+@pytest.mark.parametrize("status", [403, 404])
+def test_a_failed_download_gives_its_connection_back(status: int) -> None:
+    """The error response of a streamed GET is not read; nothing may keep its connection checked out."""
+    import io
+
+    with scripted_server(_file_server((status, {}, b"not for you"))) as (url, _rec):
+        with pytest.raises(HTTPStatusError) as caught:
+            FileSystem(retry=False).download_fileobj(f"{url}/f", io.BytesIO())
+    assert caught.value.status_code == status
+    assert caught.value.response.raw.closed
+    assert caught.value.error_codes == frozenset()  # still usable: no error body, no codes
+
+
 def test_a_truncated_download_is_never_reported_as_complete() -> None:
     """Server promises 1000 bytes, sends 100, then answers the resume with 416."""
     import io
