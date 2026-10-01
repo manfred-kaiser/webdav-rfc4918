@@ -216,9 +216,12 @@ def start(conf_file: Path) -> None:
     Raises:
         RuntimeError: No known profile is usable (see :func:`missing_prerequisites`),
             or ``apache2``/``httpd -k start`` itself failed - the message
-            includes its stdout/stderr (e.g. the ``AH0....`` diagnostic),
-            since that output is otherwise easy to lose: inherited stdio from
-            a plain, uncaptured ``subprocess.run`` doesn't reliably reach the
+            includes its stdout/stderr (e.g. the ``AH0....`` diagnostic) plus
+            the tail of its own ErrorLog, since ``-k start`` forks into the
+            background and may report nothing on stdout/stderr even on a
+            fatal startup error, logging it there instead. That output is
+            otherwise easy to lose entirely: inherited stdio from a plain,
+            uncaptured ``subprocess.run`` doesn't reliably reach the
             pytest-xdist worker's own captured output or the CI log.
 
     """
@@ -233,10 +236,16 @@ def start(conf_file: Path) -> None:
         check=False,
     )
     if result.returncode != 0:
+        error_log = conf_file.parent / "logs" / "error.log"
+        error_log_tail = (
+            error_log.read_text(errors="replace") if error_log.exists() else "(no error.log)"
+        )
         msg = (
             f"{profile.httpd} -f {conf_file} -k start "
             f"failed (exit {result.returncode}):\n"
-            f"{result.stdout}{result.stderr}"
+            f"stdout: {result.stdout!r}\n"
+            f"stderr: {result.stderr!r}\n"
+            f"{error_log}:\n{error_log_tail}"
         )
         raise RuntimeError(msg)
     wait_until_up(f"http://{HOST}:{PORT}/")
