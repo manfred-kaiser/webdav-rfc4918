@@ -23,7 +23,7 @@ import pytest
 
 from tests.credentials import AUTH
 from tests.scripted_server import Reply, Seen, scripted_server
-from webdav.exceptions import ClientError, ResourceLockedError
+from webdav.exceptions import ClientError, InternalServerError, ResourceLockedError
 from webdav.fsspec import WebdavFileSystem
 
 if TYPE_CHECKING:
@@ -52,6 +52,24 @@ def test_a_missing_path_is_a_file_not_found_error(
 ) -> None:
     with pytest.raises(FileNotFoundError):
         getattr(fs, method)("/nope")
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        lambda fs: fs.open("/d", "wb").close(),
+        lambda fs: fs.pipe_file("/d", b"x"),
+        lambda fs: fs.touch("/d", truncate=True),
+    ],
+    ids=["open", "pipe_file", "touch"],
+)
+def test_writing_to_a_directory_is_an_is_a_directory_error(
+    fs: WebdavFileSystem, write: "Callable[[WebdavFileSystem], object]"
+) -> None:
+    fs.pipe_file("/d/f", b"1")
+    with pytest.raises(IsADirectoryError):
+        write(fs)
+    assert fs.find("/d") == ["/d/f"]
 
 
 def test_a_missing_path_is_not_an_error_for_exists_and_the_type_checks(
@@ -551,16 +569,62 @@ def test_touch_creates_a_file_but_cannot_only_update_its_timestamp(
 # ---------------------------------------------------------------------------
 
 
-def test_copy_does_not_overwrite_an_existing_file(fs: WebdavFileSystem) -> None:
-    """``Overwrite: F`` on every COPY/MOVE, deliberately: the destination is never replaced silently."""
+def test_copy_and_move_replace_an_existing_file(fs: WebdavFileSystem) -> None:
+    """As ``LocalFileSystem`` does, and as ``pipe_file`` and ``open("wb")`` do here."""
     fs.pipe_file("/a", b"1")
     fs.pipe_file("/b", b"2")
-    with pytest.raises(FileExistsError):
-        fs.cp("/a", "/b")
-    with pytest.raises(FileExistsError):
-        fs.mv("/a", "/b")
+    fs.pipe_file("/c", b"3")
+    fs.cp("/a", "/b")
+    assert fs.cat_file("/a") == fs.cat_file("/b") == b"1"
+    fs.mv("/a", "/c")
+    assert not fs.exists("/a")
+    assert fs.cat_file("/c") == b"1"
+
+
+def test_copy_replaces_an_existing_file_in_a_new_parent_too(
+    fs: WebdavFileSystem,
+) -> None:
+    """``cp_file`` creates the parents first, then the COPY meets the file that is there."""
+    fs.pipe_file("/a", b"new")
+    fs.pipe_file("/x/y", b"old")
+    fs.cp_file("/a", "/x/y")
+    assert fs.cat_file("/x/y") == b"new"
+    fs.cp_file("/a", "/p/q/r")
+    assert fs.cat_file("/p/q/r") == b"new"
+
+
+def test_a_directory_is_never_replaced_by_a_copy(fs: WebdavFileSystem) -> None:
+    """COPY with ``Overwrite: T`` deletes the destination with ``Depth: infinity``."""
+    fs.pipe_file("/a", b"1")
+    fs.pipe_file("/d/f", b"2")
+    for destination in ("/d", "/d/"):
+        with pytest.raises(FileExistsError):
+            fs.cp_file("/a", destination)
     assert fs.cat_file("/a") == b"1"
-    assert fs.cat_file("/b") == b"2"
+    assert sorted(fs.find("/d")) == ["/d/f"]
+    assert fs.cat_file("/d/f") == b"2"
+
+
+def test_a_file_moved_onto_a_directory_goes_into_it(fs: WebdavFileSystem) -> None:
+    fs.pipe_file("/a", b"1")
+    fs.pipe_file("/d/f", b"2")
+    fs.mv("/a", "/d")
+    assert sorted(fs.find("/")) == ["/d/a", "/d/f"]
+
+
+@pytest.mark.parametrize(
+    ("destination", "error"),
+    [("/f", FileExistsError), ("/f/", NotADirectoryError)],
+)
+def test_a_directory_copied_onto_a_file_leaves_the_file_alone(
+    fs: WebdavFileSystem, destination: str, error: type[OSError]
+) -> None:
+    fs.pipe_file("/f", b"1")
+    fs.pipe_file("/d/x", b"2")
+    with pytest.raises(error):
+        fs.cp("/d", destination, recursive=True)
+    assert fs.cat_file("/f") == b"1"
+    assert fs.cat_file("/d/x") == b"2"
 
 
 def test_copy_and_move_of_a_missing_source(fs: WebdavFileSystem) -> None:
@@ -668,11 +732,50 @@ def test_copy_into_an_existing_directory_by_trailing_slash(
     fs.mkdir("/d")
     fs.cp(["/a", "/b"], "/d/")
     assert sorted(fs.ls("/d", detail=False)) == ["/d/a", "/d/b"]
-    with pytest.raises(
-        FileExistsError
-    ):  # the copy that is already there is not replaced
-        fs.cp("/a", "/d/")
-    assert fs.cat_file("/d/a") == b"1"
+    fs.pipe_file("/a", b"changed")
+    fs.cp("/a", "/d/")  # the copy that is already there is replaced, like a file
+    assert fs.cat_file("/d/a") == b"changed"
+
+
+@pytest.mark.parametrize("operation", ["cp", "mv"])
+@pytest.mark.parametrize("destination", ["/e", "/e/", "e/"])
+def test_a_directory_goes_into_a_destination_with_a_trailing_slash(
+    fs: WebdavFileSystem, operation: str, destination: str
+) -> None:
+    """``cp("d", "e/")`` is "into e", also when ``e`` does not exist yet - as ``cp -r d e/``."""
+    fs.pipe_file("/d/f", b"1")
+    fs.pipe_file("/d/sub/g", b"2")
+    getattr(fs, operation)("/d", destination, recursive=True)
+    expected = (
+        ["/e/d/f", "/e/d/sub/g"] if destination.endswith("/") else ["/e/f", "/e/sub/g"]
+    )
+    kept = [] if operation == "mv" else ["/d/f", "/d/sub/g"]
+    assert sorted(fs.find("/")) == sorted(expected + kept)
+
+
+@pytest.mark.parametrize("destination", ["/t", "/t/", "t"])
+def test_a_directory_is_moved_whole_without_recursive(
+    fs: WebdavFileSystem, destination: str
+) -> None:
+    """A MOVE takes the tree along; fsspec's base class would skip the copy and delete the source."""
+    fs.pipe_file("/s/f", b"1")
+    fs.mkdir("/s/empty")
+    fs.mv("/s", destination)
+    assert not fs.exists("/s")
+    assert sorted(fs.find("/", withdirs=True)) == (
+        ["/", "/t", "/t/empty", "/t/f"]
+        if not destination.endswith("/")
+        else ["/", "/t", "/t/s", "/t/s/empty", "/t/s/f"]
+    )
+
+
+def test_an_empty_directory_is_not_lost_by_a_move_without_recursive(
+    fs: WebdavFileSystem,
+) -> None:
+    fs.mkdir("/e")
+    fs.mv("/e", "/x")
+    assert fs.isdir("/x")
+    assert not fs.exists("/e")
 
 
 def test_moving_a_tree_takes_its_empty_directories_along(fs: WebdavFileSystem) -> None:
@@ -890,6 +993,68 @@ def test_one_filesystem_serves_several_threads(fs: WebdavFileSystem) -> None:
     assert errors == []
 
 
+def test_the_first_writes_into_one_new_directory_race_without_failing(
+    server_url: str,
+) -> None:
+    """dask and zarr write many files into a directory that does not exist yet, at once.
+
+    WsgiDAV answers the MKCOL that loses the race with a 500, not the 405 of "exists already".
+    """
+    filesystem = WebdavFileSystem(server_url, auth=AUTH)
+    errors: list[BaseException] = []
+
+    def work(number: int, directory: str, barrier: threading.Barrier) -> None:
+        try:
+            barrier.wait()
+            filesystem.pipe_file(f"{directory}/{number}.bin", b"x")
+        except BaseException as exc:  # noqa: BLE001 - the main thread reports it
+            errors.append(exc)
+
+    for attempt in range(10):
+        barrier = threading.Barrier(16)
+        directory = f"/race{attempt}/deep"
+        threads = [
+            threading.Thread(target=work, args=(n, directory, barrier))
+            for n in range(16)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    assert errors == []
+    assert len(filesystem.ls("/race9/deep", detail=False)) == 16
+    filesystem.filesystem.close()
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("asynchronous", True),
+        ("asynchronous", False),
+        ("loop", None),
+        ("use_listings_cache", False),
+        ("listings_expiry_time", 5),
+        ("max_paths", 10),
+    ],
+)
+def test_the_options_fsspec_hands_every_filesystem_are_accepted(
+    server_url: str, option: str, value: object
+) -> None:
+    """zarr and xarray open ``webdavs:///...`` with ``asynchronous=True``."""
+    filesystem = fsspec.filesystem(
+        "webdavs", base_url=server_url, auth=AUTH, **{option: value}
+    )
+    filesystem.pipe_file("/a", b"1")
+    assert filesystem.cat_file("/a") == b"1"
+    filesystem.filesystem.close()
+
+
+def test_an_option_nobody_knows_is_still_refused(server_url: str) -> None:
+    """Only fsspec's own options are let through: a typo in a session option is an error."""
+    with pytest.raises(TypeError, match="timeuot"):
+        WebdavFileSystem(server_url, auth=AUTH, timeuot=5)
+
+
 # ---------------------------------------------------------------------------
 # Through fsspec's own front doors
 # ---------------------------------------------------------------------------
@@ -939,6 +1104,49 @@ _FILE_PROPERTIES = (
     b"</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
     b"</d:multistatus>"
 )
+
+
+#: What a PROPFIND on ``/d`` answers: a collection.
+_COLLECTION_PROPERTIES = (
+    b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/d/</d:href>'
+    b"<d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype>"
+    b"</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
+    b"</d:multistatus>"
+)
+
+
+def _mkcol_fails_with_500(collection_exists: bool) -> "Callable[[Seen], Reply]":
+    def respond(seen: Seen) -> Reply:
+        if seen.method == "MKCOL":
+            return 500, {"Content-Type": "text/plain"}, b"mkdir failed"
+        if (
+            seen.method == "PROPFIND"
+            and collection_exists
+            and seen.path.startswith("/d")
+        ):
+            return 207, {"Content-Type": "application/xml"}, _COLLECTION_PROPERTIES
+        return 404, {"Content-Type": "text/plain"}, b""
+
+    return respond
+
+
+def test_a_500_for_mkcol_is_fine_if_the_collection_is_there_afterwards() -> None:
+    """The loser of a race to create ``/d`` - and only for ``exist_ok``."""
+    with scripted_server(_mkcol_fails_with_500(collection_exists=True)) as (url, _):
+        fs = WebdavFileSystem(url)
+        fs.makedirs("/d", exist_ok=True)
+        fs.mkdir("/d")  # create_parents=True is makedirs(exist_ok=True)
+        with pytest.raises(InternalServerError):
+            fs.makedirs("/d", exist_ok=False)
+        fs.filesystem.close()
+
+
+def test_a_500_for_mkcol_is_an_error_if_there_is_no_collection() -> None:
+    with scripted_server(_mkcol_fails_with_500(collection_exists=False)) as (url, _):
+        fs = WebdavFileSystem(url)
+        with pytest.raises(InternalServerError):
+            fs.makedirs("/d", exist_ok=True)
+        fs.filesystem.close()
 
 
 @pytest.mark.parametrize(

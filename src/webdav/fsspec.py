@@ -16,10 +16,15 @@ paths are those of the server: they start at ``/``, the root of the ``base_url``
 fsspec leaves the normalising of a path to ``_strip_protocol``: here it removes
 the ``webdavs://`` prefix and a trailing ``/`` and makes the path absolute, so
 ``a/b``, ``/a/b`` and ``webdavs:///a/b`` are one path and the root is ``/``. There
-is no working directory. ``.``, ``..`` and ``//`` inside a path are resolved
-by the session, which refuses to leave the ``base_url``. The names ``ls`` and
-``info`` return are exactly what ``_strip_protocol`` returns for them, so
+is no working directory. ``.``, ``..`` and ``//`` inside a path are resolved, and a
+path that would leave the ``base_url`` is refused by the session. The names ``ls``
+and ``info`` return are exactly what ``_strip_protocol`` returns for them, so
 every name can be handed back to any method.
+
+A URL may name the server, as ``sftp://host/path`` does: ``webdavs://host[:port]/path``
+gives fsspec the ``host`` and ``port`` (``_get_kwargs_from_urls``), and they are not part of
+the path. ``webdavs`` is WebDAV over TLS, so without a ``base_url`` that is ``https://host``;
+with one, the URL has to name the same server. Credentials in a URL are refused.
 """
 
 import errno
@@ -45,10 +50,13 @@ from typing import (
 import fsspec
 from fsspec import Callback
 from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
+from fsspec.utils import stringify_path
 
+from webdav._webdavs_url import SCHEME, authority_of, host_and_port, server_url
 from webdav.dav.fs_utils import peek_filelike_length
 from webdav.exceptions import (
     ForbiddenError,
+    InternalServerError,
     IsACollectionError,
     IsAResourceError,
     PreconditionFailedError,
@@ -87,6 +95,17 @@ def _absolute(name: str) -> str:
         else:
             parts.append(part)
     return "/" + "/".join(parts)
+
+
+#: Constructor options of fsspec itself, which every filesystem accepts - see
+#: ``AbstractFileSystem.__init__`` (the listings cache) and ``AsyncFileSystem``.
+_FSSPEC_OPTIONS = (
+    "asynchronous",
+    "loop",
+    "use_listings_cache",
+    "listings_expiry_time",
+    "max_paths",
+)
 
 
 def _tuple_from_json(value: Any) -> Any:
@@ -162,6 +181,8 @@ class WebdavFileSystem(AbstractFileSystem):
         base_url: "str | None" = None,
         auth: "AuthTypes | list[str]" = None,
         session: Session | None = None,
+        host: "str | None" = None,
+        port: "int | None" = None,
         **session_opts: Any,
     ) -> None:
         """Instantiate with ``base_url``/``auth``, or an existing ``session``.
@@ -177,20 +198,39 @@ class WebdavFileSystem(AbstractFileSystem):
             session: A pre-built session to use instead (e.g. for mocking,
                 or to reuse a session's connection pool across filesystems);
                 it needs a ``base_url``.
+            host: The host a ``webdavs://host[:port]/path`` URL names - fsspec hands it over
+                (and ``port``) when it opens such a URL, as it does for ``sftp://``. Without
+                a ``base_url`` the server is ``https://host[:port]``; with one, the host has
+                to be that server's.
+            port: See ``host``.
             session_opts: Extra keyword arguments forwarded to
-                :class:`~webdav.session.Session`.
+                :class:`~webdav.session.Session` - except the options fsspec passes to every
+                filesystem (``asynchronous``, ``loop``, ``use_listings_cache``,
+                ``listings_expiry_time``, ``max_paths``), which are accepted and left to fsspec.
 
         Raises:
-            ValueError: There is no ``base_url``, neither given nor on the ``session``.
+            ValueError: There is no ``base_url``, neither given nor on the ``session``
+                nor in ``host``, or ``host`` is another server than the ``base_url``.
 
         """
-        if (session.base_url if session is not None else base_url) is None:
+        base_url = server_url(
+            session.base_url if session is not None else base_url, host, port
+        )
+        if base_url is None:
             msg = (
                 "a WebdavFileSystem is bound to one server: pass base_url "
                 "(or a session that has one) - its paths are relative to it"
             )
             raise ValueError(msg)
-        super().__init__()
+        # What fsspec hands every filesystem: the listings cache takes three of them, and a
+        # synchronous one has no use for ``asynchronous``/``loop`` (zarr and xarray pass
+        # ``asynchronous=True`` to whatever they open). Not the session's business.
+        fsspec_options = {
+            name: session_opts.pop(name)
+            for name in _FSSPEC_OPTIONS
+            if name in session_opts
+        }
+        super().__init__(**fsspec_options)
         # JSON has no tuple: fsspec's to_json()/from_json() hand ("user", "password"),
         # (connect, read) and (certfile, keyfile) back as lists, which the session rejects
         # (or, for auth, would try to call).
@@ -213,11 +253,43 @@ class WebdavFileSystem(AbstractFileSystem):
         one path, and the root is ``/``. ``path`` is a list for some callers
         (``rm([...])``, ``cp`` with several sources) - the base implementation
         already recurses for that case, so the result is the same shape as the input.
+
+        The server of a ``webdavs://host[:port]/path`` URL is not part of the path (see
+        :meth:`_get_kwargs_from_urls`) - and neither is a user or password in it, which
+        are refused.
         """
+        if not isinstance(path, list):
+            authority, path = authority_of(stringify_path(path))
+            if authority:
+                host_and_port(authority)  # refuses credentials
         stripped = super()._strip_protocol(path)
         if isinstance(stripped, list):
             return [_absolute(cast("str", p)) for p in stripped]
         return _absolute(cast("str", stripped))
+
+    @staticmethod
+    def _get_kwargs_from_urls(path: str) -> "dict[str, Any]":
+        """``host`` and ``port`` of a ``webdavs://host[:port]/path`` URL, as for ``sftp://``.
+
+        fsspec calls this with every URL before it makes the filesystem, and
+        :meth:`_strip_protocol` takes them out of the path afterwards. A URL without a host
+        (``webdavs:///path``) gives nothing: the server is then the ``base_url``.
+
+        Raises:
+            ValueError: There are credentials in the URL, or its port is not a number.
+
+        """
+        authority, _ = authority_of(path)
+        if not authority:
+            return {}
+        host, port = host_and_port(authority)
+        return {"host": host, **({"port": port} if port else {})}
+
+    def unstrip_protocol(self, name: str) -> str:
+        """The URL of ``name``: ``webdavs:///a/b`` - the path is absolute, so ``a`` is no host."""
+        if name.startswith(SCHEME):
+            return name
+        return f"{SCHEME}{_absolute(name)}"
 
     def _strip(self, path: str) -> str:
         """``_strip_protocol`` for the common single-path case - everywhere but ``rm``."""
@@ -312,7 +384,15 @@ class WebdavFileSystem(AbstractFileSystem):
         if parent not in ("", self.root_marker):
             self.makedirs(parent, exist_ok=True)
         with _translate_exceptions():
-            self.filesystem.copy(path1, path2, overwrite=False)
+            try:
+                self.filesystem.copy(path1, path2, overwrite=False)
+            except ResourceAlreadyExistsError as exc:
+                # fsspec's copies replace an existing file, as ``pipe_file`` and ``open("wb")``
+                # do here. But COPY with ``Overwrite: T`` deletes whatever is at the destination
+                # with ``Depth: infinity`` (RFC 4918 sec. 9.8.4): a directory is not replaced.
+                if self.isdir(path2):
+                    raise FileExistsError(errno.EEXIST, "File exists", path2) from exc
+                self.filesystem.copy(path1, path2, overwrite=True)
 
     def rmdir(self, path: str) -> None:
         """Remove a directory, if empty."""
@@ -373,6 +453,10 @@ class WebdavFileSystem(AbstractFileSystem):
             return None
         stripped1 = self._strip(path1)
         if not self.isdir(stripped1):
+            return None
+        if path2.endswith("/") and not path1.endswith("/"):
+            # ``cp("d", "e/")`` is "into e", whether or not it exists yet: the result is
+            # ``e/d``, which the generic walk works out and a native COPY/MOVE cannot.
             return None
         stripped2 = self._strip(path2)
         if self.exists(stripped2):
@@ -463,9 +547,12 @@ class WebdavFileSystem(AbstractFileSystem):
         """Move a file/directory from ``path1`` to ``path2``.
 
         Same reasoning as :meth:`copy` for why ``path2`` is not stripped
-        before it reaches ``filesystem.move``/``super().mv()``, why there is
-        no "not recursive, path1 is a directory" special case, and why a
+        before it reaches ``filesystem.move``/``super().mv()``, and why a
         list ``path1``/``path2`` never takes the single-native-MOVE shortcut.
+
+        A directory is always moved with everything in it, ``recursive`` or not - as
+        ``mv`` does and as ``LocalFileSystem`` does. The base implementation would skip the
+        copy of a directory that is not ``recursive`` and still delete the source.
 
         A path onto itself is a no-op, as in fsspec - whatever its spelling: the base
         implementation compares the strings as given, so ``mv("d", "/d")`` would copy
@@ -477,6 +564,8 @@ class WebdavFileSystem(AbstractFileSystem):
             and self._strip(path1) == self._strip(path2)
         ):
             return
+        if not recursive and isinstance(path1, str) and self.isdir(self._strip(path1)):
+            recursive = True
         if recursive:
             self._refuse_into_itself(path1, path2)
         shortcut = self._whole_tree_shortcut(
@@ -515,6 +604,13 @@ class WebdavFileSystem(AbstractFileSystem):
                     raise NotADirectoryError(
                         errno.ENOTDIR, "Not a directory", parent
                     ) from exc
+                raise
+            except InternalServerError:
+                # Writers that create the same parent at once (dask, zarr): the one that loses
+                # the race is answered 405 by most servers, but WsgiDAV answers 500. Only for
+                # ``makedirs(exist_ok=True)``, and only if the collection is there now.
+                if exist_ok and self.isdir(path):
+                    return
                 raise
 
     def mkdir(self, path: str, create_parents: bool = True, **kwargs: Any) -> None:

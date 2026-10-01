@@ -22,8 +22,22 @@ Importing `webdav.fsspec` registers `"webdavs"` with fsspec
 ([`fsspec.register_implementation`](https://filesystem-spec.readthedocs.io)),
 so `fsspec.filesystem("webdavs", base_url=..., auth=...)` and
 `fsspec.open("webdavs:///Documents/Readme.md", base_url=..., auth=...)` work right away, same
-as the explicit import above - no separate setup step. The server is given by `base_url`; the
-URL carries only the path, and a host in it is not interpreted.
+as the explicit import above - no separate setup step.
+
+The server is the `base_url`. A URL may also name it, as `sftp://host/path` does:
+`webdavs://host[:port]/path` gives fsspec the `host` (and `port`) to make the filesystem with,
+and they are not part of the path. `webdavs` is WebDAV over TLS, so without a `base_url` the
+server is `https://host[:port]`; a plain-http server is reached through its `base_url`, and the
+URL then only has to name the same server - another host or port is a `ValueError`, never a
+redirect. A user or password in the URL is refused (it would end up in logs and reprs): pass
+`auth=`.
+
+```python
+import fsspec
+
+fsspec.open("webdavs://webdav.example.org/Documents/Readme.md", auth=("user", "password"))
+fsspec.open("webdavs:///Documents/Readme.md", base_url="http://localhost:8080", auth=...)
+```
 
 ## Paths
 
@@ -33,12 +47,18 @@ server: they start at `/`, the root of the `base_url` (fsspec's `root_marker`, a
 `/dav/` the root; nothing above it can be reached.
 
 - `a/b`, `/a/b` and `webdavs:///a/b` are one path (fsspec's `_strip_protocol` makes it absolute
-  and drops a trailing `/`); there is no working directory.
+  and drops a trailing `/`); there is no working directory. Only what follows `webdavs://` can be
+  a host: `webdavs://a/b` is the path `/b` on the server `a`, while `//a/b` is the path `/a/b`.
 - `.`, `..` and `//` inside a path are resolved; a path that would leave the `base_url` is
   refused with a `ClientError`.
 - The names `ls`, `info`, `find`, `glob` and `walk` return are exactly what `_strip_protocol`
   returns for them, so every name can be handed back to any method.
-- Without a `base_url` (or a `session` that has one) the constructor raises `ValueError`.
+- Without a `base_url` (or a `session` that has one, or a `host`) the constructor raises
+  `ValueError`.
+- fsspec reads `[...]`, `*` and `?` in a path as a glob wherever it expands one (`rm`, `cp`, `get`,
+  `glob`): a file really named `[x]` is removed with `rm_file`.
+- pyarrow compares the names a filesystem returns with the directory it was asked for, so give
+  it absolute paths (`/data/ds`, not `data/ds`) - as for `MemoryFileSystem`, which has a root too.
 
 This differs from {class}`~webdav.fs.client.FileSystem`, whose names are relative to the
 `base_url` without the leading `/` (`Photos/Gorilla.jpg`) and which also takes `/Photos`: the
@@ -55,7 +75,19 @@ The filesystem follows fsspec's conventions (`ls(path, detail=...)`, `open`, `ge
 returns {class}`~webdav.resource.Resource` objects.
 
 - **Errors** are the stdlib ones fsspec expects: `FileNotFoundError`, `FileExistsError`
-  (also for a failed `Overwrite: F`), `IsADirectoryError`, `NotADirectoryError`.
+  (`"xb"` on a file that is there, a directory in the way of a copy), `IsADirectoryError`
+  (also for a write to a directory), `NotADirectoryError`, `PermissionError` (a 403, and a
+  directory copied or moved into itself).
+- **`cp` and `mv`** replace a file that is there, as `LocalFileSystem` does and as `open(path,
+  "wb")` does here - but never a directory: a COPY/MOVE with `Overwrite: T` deletes the
+  destination with everything in it, so a directory in the way is a `FileExistsError`. A
+  directory is moved with everything in it, `recursive` or not, and `cp(d, "e/")` goes *into*
+  `e` also when it does not exist yet, as in `cp -r d e/`. A directory is never copied or moved
+  into itself, nor the root anywhere; `mv` of a path onto itself - however it is spelled - does
+  nothing.
+- **Parallel writers** may create the same parent directory at once (dask, zarr): a server that
+  loses that race and answers 500 instead of "exists" is not an error for `makedirs(exist_ok=True)`
+  if the directory is there afterwards.
 - **Writing** (`open(path, "wb")`, `"xb"`) uploads when the file is closed cleanly; a block that
   raises leaves the resource untouched. `"xb"` creates only if nothing is there (atomic on the
   server). Append mode is not supported.
