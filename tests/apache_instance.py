@@ -17,6 +17,7 @@ from pathlib import Path
 
 #: (.so filename, Apache's own LoadModule directive name for it).
 REQUIRED_MODULES = (
+    ("mod_mpm_prefork.so", "mpm_prefork_module"),
     ("mod_authn_core.so", "authn_core_module"),
     ("mod_authz_core.so", "authz_core_module"),
     ("mod_authn_file.so", "authn_file_module"),
@@ -42,12 +43,17 @@ class _Profile:
     httpd: str
     module_dir: Path
     #: Modules (by .so filename, from REQUIRED_MODULES) this distro's httpd
-    #: already has compiled statically into the core binary - confirmed for
-    #: Debian/Ubuntu's mod_log_config, live on GitHub Actions' ubuntu-latest
-    #: (every other required module there is a normal loadable .so; this
-    #: one alone was missing from the modules directory). A built-in module
-    #: is not expected to exist as a .so, and must not get a LoadModule
-    #: directive either - Apache refuses to load one already built in.
+    #: already has compiled statically into the core binary - confirmed live
+    #: on GitHub Actions' ubuntu-latest for two, for different reasons:
+    #: Debian/Ubuntu's mod_log_config (every other required module there is
+    #: a normal loadable .so; this one alone was missing from the modules
+    #: directory) and openSUSE's MPM (the "apache2-prefork" package name
+    #: itself says as much - that httpd binary is one specific, built-in
+    #: MPM, not a generic one that loads mpm_prefork separately the way
+    #: Debian's does; "AH00534: No MPM loaded" without it). A built-in
+    #: module is not expected to exist as a .so, and must not get a
+    #: LoadModule directive either - Apache refuses to load one already
+    #: built in.
     built_in: "frozenset[str]" = frozenset()
 
     def missing(self) -> list[str]:
@@ -69,7 +75,12 @@ class _Profile:
 #: the install paths (and which modules are built in vs. loadable) differ
 #: per packaging.
 _PROFILES = (
-    _Profile("openSUSE/RPM", "/usr/sbin/httpd", Path("/usr/lib64/apache2-prefork")),
+    _Profile(
+        "openSUSE/RPM",
+        "/usr/sbin/httpd",
+        Path("/usr/lib64/apache2-prefork"),
+        built_in=frozenset({"mod_mpm_prefork.so"}),
+    ),
     _Profile(
         "Debian/Ubuntu",
         "/usr/sbin/apache2",
