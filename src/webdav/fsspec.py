@@ -29,10 +29,7 @@ with one, the URL has to name the same server. Credentials in a URL are refused.
 
 import errno
 import io
-import posixpath
 import tempfile
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -52,20 +49,16 @@ from fsspec import Callback
 from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 from fsspec.utils import stringify_path
 
+from webdav._fsspec_support import absolute, info_of, is_root, translate_exceptions
 from webdav._webdavs_url import SCHEME, authority_of, host_and_port, server_url
 from webdav.dav.fs_utils import peek_filelike_length
 from webdav.exceptions import (
-    ForbiddenError,
     InternalServerError,
-    IsACollectionError,
     IsAResourceError,
-    PreconditionFailedError,
     ResourceAlreadyExistsError,
     ResourceConflictError,
-    ResourceNotFoundError,
 )
 from webdav.fs import FileSystem
-from webdav.resource import Resource
 from webdav.session import Session
 
 if TYPE_CHECKING:
@@ -77,24 +70,6 @@ if TYPE_CHECKING:
     from typing_extensions import Buffer
 
     from webdav.session import AuthTypes
-
-
-def _absolute(name: str) -> str:
-    """``name`` (relative to the base URL, as :class:`~webdav.resource.Resource` names are) as an fsspec path.
-
-    With its leading ``/``, and ``.``, ``..`` and ``//`` resolved, so that two spellings of
-    one path are one string - what ``find``/``walk``/``glob`` build their names from. A ``..``
-    that would leave the root stays in the path: the session refuses it, as it always did.
-    """
-    parts: list[str] = []
-    for part in name.split("/"):
-        if part in ("", "."):
-            continue
-        if part == ".." and parts and parts[-1] != "..":
-            parts.pop()
-        else:
-            parts.append(part)
-    return "/" + "/".join(parts)
 
 
 #: Constructor options of fsspec itself, which every filesystem accepts - see
@@ -111,45 +86,6 @@ _FSSPEC_OPTIONS = (
 def _tuple_from_json(value: Any) -> Any:
     """``value``, or the tuple a JSON array stands for."""
     return tuple(value) if isinstance(value, list) else value
-
-
-def _is_root(path: str) -> bool:
-    """Whether ``path`` names the root of the file system (``/``, ``//``, ``/a/..``, ...)."""
-    return posixpath.normpath("/" + path.lstrip("/")) == "/"
-
-
-def _info(resource: Resource) -> "dict[str, Any]":
-    """A :class:`~webdav.resource.Resource` as fsspec's ``info`` dict (``name``, ``size``, ``type``, ...)."""
-    fields = resource.as_dict()
-    fields["name"] = _absolute(resource.name)
-    fields["size"] = fields.pop("size")
-    fields["type"] = "directory" if fields.pop("is_dir") else "file"
-    return fields
-
-
-@contextmanager
-def _translate_exceptions() -> Iterator[None]:
-    """Translate this library's exceptions into the stdlib ones fsspec expects."""
-    try:
-        yield
-    except ResourceNotFoundError as exc:
-        raise FileNotFoundError(
-            errno.ENOENT, "No such file or directory", exc.path
-        ) from exc
-    except ResourceAlreadyExistsError as exc:
-        raise FileExistsError(errno.EEXIST, "File exists", exc.path) from exc
-    except (
-        PreconditionFailedError
-    ) as exc:  # e.g. Overwrite: F onto an existing destination
-        raise FileExistsError(errno.EEXIST, "File exists", exc.path) from exc
-    except IsACollectionError as exc:
-        raise IsADirectoryError(errno.EISDIR, "Is a directory", exc.path) from exc
-    except IsAResourceError as exc:
-        raise NotADirectoryError(errno.ENOTDIR, "Not a directory", exc.path) from exc
-    except (
-        ForbiddenError
-    ) as exc:  # also COPY/MOVE onto itself or into itself (RFC 4918)
-        raise PermissionError(errno.EACCES, "Permission denied", exc.path) from exc
 
 
 class WebdavFileSystem(AbstractFileSystem):
@@ -264,8 +200,8 @@ class WebdavFileSystem(AbstractFileSystem):
                 host_and_port(authority)  # refuses credentials
         stripped = super()._strip_protocol(path)
         if isinstance(stripped, list):
-            return [_absolute(cast("str", p)) for p in stripped]
-        return _absolute(cast("str", stripped))
+            return [absolute(cast("str", p)) for p in stripped]
+        return absolute(cast("str", stripped))
 
     @staticmethod
     def _get_kwargs_from_urls(path: str) -> "dict[str, Any]":
@@ -289,7 +225,7 @@ class WebdavFileSystem(AbstractFileSystem):
         """The URL of ``name``: ``webdavs:///a/b`` - the path is absolute, so ``a`` is no host."""
         if name.startswith(SCHEME):
             return name
-        return f"{SCHEME}{_absolute(name)}"
+        return f"{SCHEME}{absolute(name)}"
 
     def _strip(self, path: str) -> str:
         """``_strip_protocol`` for the common single-path case - everywhere but ``rm``."""
@@ -318,7 +254,7 @@ class WebdavFileSystem(AbstractFileSystem):
     ) -> "list[str] | list[dict[str, Any]]":
         """List members of a collection. See ``fsspec.AbstractFileSystem.ls``."""
         path = self._strip(path).strip()
-        with _translate_exceptions():
+        with translate_exceptions():
             try:
                 resources = self.filesystem.ls(path)
             except IsAResourceError:
@@ -326,17 +262,17 @@ class WebdavFileSystem(AbstractFileSystem):
                 # fsspec's walk() and find() depend on it.
                 resources = [self.filesystem.info(path)]
         if not detail:
-            return [_absolute(r.name) for r in resources]
-        return [_info(r) for r in resources]
+            return [absolute(r.name) for r in resources]
+        return [info_of(r) for r in resources]
 
     # pylint: enable=signature-differs
 
     def info(self, path: str, **kwargs: Any) -> "dict[str, Any]":
         """Return metadata about a single path."""
         path = self._strip(path)
-        with _translate_exceptions():
+        with translate_exceptions():
             resource = self.filesystem.info(path)
-        return _info(resource)
+        return info_of(resource)
 
     def rm_file(self, path: str) -> None:
         """Remove a file, or an *empty* directory.
@@ -357,10 +293,10 @@ class WebdavFileSystem(AbstractFileSystem):
 
     def _delete(self, path: str) -> None:
         path = self._strip(path)
-        if _is_root(path):
+        if is_root(path):
             msg = "refusing to remove the root of the file system"
             raise ValueError(msg)
-        with _translate_exceptions():
+        with translate_exceptions():
             self.filesystem.remove(path)
 
     def cp_file(self, path1: str, path2: str, **kwargs: Any) -> None:
@@ -383,7 +319,7 @@ class WebdavFileSystem(AbstractFileSystem):
         parent = self._parent(path2)
         if parent not in ("", self.root_marker):
             self.makedirs(parent, exist_ok=True)
-        with _translate_exceptions():
+        with translate_exceptions():
             try:
                 self.filesystem.copy(path1, path2, overwrite=False)
             except ResourceAlreadyExistsError as exc:
@@ -397,10 +333,10 @@ class WebdavFileSystem(AbstractFileSystem):
     def rmdir(self, path: str) -> None:
         """Remove a directory, if empty."""
         path = self._strip(path)
-        if _is_root(path):
+        if is_root(path):
             msg = "refusing to remove the root of the file system"
             raise ValueError(msg)
-        with _translate_exceptions():
+        with translate_exceptions():
             members = self.filesystem.ls(
                 path
             )  # a file is not a directory: NotADirectoryError
@@ -523,7 +459,7 @@ class WebdavFileSystem(AbstractFileSystem):
             parent = self._parent(stripped2)
             if parent not in ("", self.root_marker):
                 self.makedirs(parent, exist_ok=True)
-            with _translate_exceptions():
+            with translate_exceptions():
                 self.filesystem.copy(stripped1, stripped2, overwrite=False)
             return
 
@@ -573,7 +509,7 @@ class WebdavFileSystem(AbstractFileSystem):
         )
         if shortcut is not None:
             stripped1, stripped2 = shortcut
-            with _translate_exceptions():
+            with translate_exceptions():
                 self.filesystem.move(stripped1, stripped2, overwrite=False)
             return
 
@@ -589,7 +525,7 @@ class WebdavFileSystem(AbstractFileSystem):
         """
         # Outside the try: the two cases below are sorted out first, whatever else the
         # server answers (a 403, say) is translated like everywhere else.
-        with _translate_exceptions():
+        with translate_exceptions():
             try:
                 self.filesystem.mkdir(path)
             except ResourceAlreadyExistsError as exc:
@@ -632,13 +568,13 @@ class WebdavFileSystem(AbstractFileSystem):
     def created(self, path: str) -> "datetime | None":
         """Return the ``creationdate`` property."""
         path = self._strip(path)
-        with _translate_exceptions():
+        with translate_exceptions():
             return self.filesystem.created(path)
 
     def modified(self, path: str) -> "datetime | None":
         """Return the ``getlastmodified`` property."""
         path = self._strip(path)
-        with _translate_exceptions():
+        with translate_exceptions():
             return self.filesystem.modified(path)
 
     def _open(
@@ -671,7 +607,7 @@ class WebdavFileSystem(AbstractFileSystem):
                 self, path=path, mode=mode, block_size=block_size, exclusive="x" in mode
             )
 
-        with _translate_exceptions():
+        with translate_exceptions():
             return WebdavFile(
                 self,
                 path,
@@ -686,13 +622,13 @@ class WebdavFileSystem(AbstractFileSystem):
     def checksum(self, path: str) -> "str | None":
         """Return the ``getetag`` property."""
         path = self._strip(path)
-        with _translate_exceptions():
+        with translate_exceptions():
             return self.filesystem.etag(path)
 
     def size(self, path: str) -> "int | None":
         """Return the ``getcontentlength`` property."""
         path = self._strip(path)
-        with _translate_exceptions():
+        with translate_exceptions():
             return self.filesystem.content_length(path)
 
     def sign(self, path: str, expiration: int = 100, **kwargs: Any) -> NoReturn:
@@ -747,7 +683,7 @@ class WebdavFileSystem(AbstractFileSystem):
         if size is not None:
             cb.set_size(size)
 
-        with _translate_exceptions():
+        with translate_exceptions():
             self.filesystem.upload_fileobj(
                 fobj,
                 rpath,
@@ -809,7 +745,7 @@ class WebdavFileSystem(AbstractFileSystem):
             Path(lpath).mkdir(parents=True, exist_ok=True)
             return
         cb = Callback.as_callback(callback)
-        with _translate_exceptions():
+        with translate_exceptions():
             size = self.filesystem.info(rpath).size
             if size is not None:
                 cb.set_size(size)
@@ -1023,7 +959,7 @@ class UploadFile(tempfile.SpooledTemporaryFile):
         COPY, refuses a destination whose parent does not exist yet.
         """
         self.seek(0)
-        with _translate_exceptions():
+        with translate_exceptions():
             self.fs.upload_fileobj(
                 cast("BinaryIO", self),
                 self.path,
