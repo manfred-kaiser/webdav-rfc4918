@@ -15,7 +15,7 @@ import errno
 import pickle
 import threading
 from collections.abc import Iterator
-from typing import TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 
 import fsspec
 import pytest
@@ -24,6 +24,9 @@ from tests.credentials import AUTH
 from tests.scripted_server import Reply, Seen, scripted_server
 from webdav.exceptions import ClientError, ResourceLockedError
 from webdav.fsspec import WebdavFileSystem
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _T = TypeVar("_T")
 
@@ -567,6 +570,22 @@ def test_copy_and_move_of_a_missing_source(fs: WebdavFileSystem) -> None:
     assert not fs.exists("/b")
 
 
+def test_copying_onto_itself_or_into_itself_is_a_permission_error(
+    fs: WebdavFileSystem,
+) -> None:
+    """RFC 4918 forbids it (403); callers get the stdlib error, and nothing is lost."""
+    fs.pipe_file("/a", b"1")
+    fs.pipe_file("/d/x", b"1")
+    with pytest.raises(PermissionError):
+        fs.cp("/a", "/a")
+    with pytest.raises(PermissionError):
+        fs.cp("/d", "/d/inner", recursive=True)
+    with pytest.raises(PermissionError):
+        fs.mv("/d", "/d/inner", recursive=True)
+    assert fs.cat_file("/a") == b"1"
+    assert sorted(fs.find("/d")) == ["/d/x"]
+
+
 def test_moving_a_file_onto_itself_keeps_the_file(fs: WebdavFileSystem) -> None:
     fs.pipe_file("/a", b"1")
     fs.mv("/a", "/a")
@@ -835,6 +854,54 @@ _FILE_PROPERTIES = (
     b"</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
     b"</d:multistatus>"
 )
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda fs: fs.info("/f"),
+        lambda fs: fs.ls("/"),
+        lambda fs: fs.cat_file("/f"),
+        lambda fs: fs.pipe_file("/f", b"x"),
+        lambda fs: fs.rm_file("/f"),
+        lambda fs: fs.mkdir("/d", create_parents=False),
+        lambda fs: fs.mkdir("/d"),
+        lambda fs: fs.cp_file("/f", "/g"),
+        lambda fs: fs.open("/f", "wb").close(),
+    ],
+    ids=[
+        "info",
+        "ls",
+        "cat_file",
+        "pipe_file",
+        "rm_file",
+        "mkdir",
+        "mkdir-p",
+        "cp_file",
+        "open-wb",
+    ],
+)
+def test_a_server_that_forbids_everything_is_a_permission_error(
+    call: "Callable[[WebdavFileSystem], object]",
+) -> None:
+    with scripted_server(lambda _seen: (403, {}, b"")) as (url, _recorder):
+        fs = WebdavFileSystem(url)
+        with pytest.raises(PermissionError):
+            call(fs)
+        fs.filesystem.close()
+
+
+def test_a_failed_upload_still_closes_the_file() -> None:
+    """Like ``io``: close() that fails has closed all the same - the buffer is not left behind."""
+    with scripted_server(lambda _seen: (403, {}, b"")) as (url, _recorder):
+        fs = WebdavFileSystem(url)
+        f = fs.open("/f", "wb")
+        f.write(b"data")
+        with pytest.raises(PermissionError):
+            f.close()
+        assert f.closed
+        f.close()  # closing again is quiet
+        fs.filesystem.close()
 
 
 def test_a_server_without_ranges_cannot_be_seeked() -> None:

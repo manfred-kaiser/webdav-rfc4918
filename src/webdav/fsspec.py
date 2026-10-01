@@ -48,6 +48,7 @@ from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 
 from webdav.dav.fs_utils import peek_filelike_length
 from webdav.exceptions import (
+    ForbiddenError,
     IsACollectionError,
     IsAResourceError,
     PreconditionFailedError,
@@ -108,6 +109,10 @@ def _translate_exceptions() -> Iterator[None]:
         raise IsADirectoryError(errno.EISDIR, "Is a directory", exc.path) from exc
     except IsAResourceError as exc:
         raise NotADirectoryError(errno.ENOTDIR, "Not a directory", exc.path) from exc
+    except (
+        ForbiddenError
+    ) as exc:  # also COPY/MOVE onto itself or into itself (RFC 4918)
+        raise PermissionError(errno.EACCES, "Permission denied", exc.path) from exc
 
 
 class WebdavFileSystem(AbstractFileSystem):
@@ -430,21 +435,24 @@ class WebdavFileSystem(AbstractFileSystem):
         on the error path, in exchange for the specific exception type
         fsspec callers generally expect.
         """
-        try:
-            self.filesystem.mkdir(path)
-        except ResourceAlreadyExistsError as exc:
-            details = self.info(path)
-            if details.get("type") == "directory" and exist_ok:
-                return
-            raise FileExistsError(errno.EEXIST, "File exists", path) from exc
-        except ResourceConflictError as exc:
-            parent = self._parent(path)
-            details = self.info(parent)
-            if details.get("type") != "directory":
-                raise NotADirectoryError(
-                    errno.ENOTDIR, "Not a directory", parent
-                ) from exc
-            raise
+        # Outside the try: the two cases below are sorted out first, whatever else the
+        # server answers (a 403, say) is translated like everywhere else.
+        with _translate_exceptions():
+            try:
+                self.filesystem.mkdir(path)
+            except ResourceAlreadyExistsError as exc:
+                details = self.info(path)
+                if details.get("type") == "directory" and exist_ok:
+                    return
+                raise FileExistsError(errno.EEXIST, "File exists", path) from exc
+            except ResourceConflictError as exc:
+                parent = self._parent(path)
+                details = self.info(parent)
+                if details.get("type") != "directory":
+                    raise NotADirectoryError(
+                        errno.ENOTDIR, "Not a directory", parent
+                    ) from exc
+                raise
 
     def mkdir(self, path: str, create_parents: bool = True, **kwargs: Any) -> None:
         """Create a collection."""
@@ -865,10 +873,12 @@ class UploadFile(tempfile.SpooledTemporaryFile):
             )
 
     def close(self) -> None:
-        """Commit and close."""
+        """Commit and close - closed all the same when the upload fails, as ``io`` closes."""
         if not self.closed:
-            self.commit()
-            super().close()
+            try:
+                self.commit()
+            finally:
+                super().close()
 
     def discard(self) -> None:
         """Close without uploading."""
