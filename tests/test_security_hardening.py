@@ -314,6 +314,11 @@ def test_an_empty_ca_or_crl_list_is_an_error_not_a_weaker_setup(
         build_ssl_context(options=TLSOptions(**options))
 
 
+# Lowering the floor to TLSv1 is what this test is about; CPython itself calls that
+# version deprecated and says so when it is set on a context.
+@pytest.mark.filterwarnings(
+    "ignore:ssl.TLSVersion.TLSv1 is deprecated:DeprecationWarning"
+)
 def test_the_tls_floor_is_secure_by_default_but_can_be_lowered_loudly() -> None:
     context = build_ssl_context()
     assert context.minimum_version >= ssl.TLSVersion.TLSv1_2
