@@ -109,6 +109,13 @@ LogLevel warn
 
 {load_modules}
 
+# Without this, mod_mime falls back to its compiled-in default TypesConfig,
+# which differs by distro and - on Debian/Ubuntu - is a relative path
+# ("conf/mime.types") that doesn't exist under our custom ServerRoot
+# (AH01597). /etc/mime.types is the standard system-wide file present on
+# both distros this project supports.
+TypesConfig /etc/mime.types
+
 DavLockDB "locks/davlock"
 
 # Must be an ABSOLUTE path in both directives, and they must match exactly -
