@@ -179,6 +179,23 @@ def _resource(response: "ResourceResponse", base_url: URL) -> Resource:
     )
 
 
+def _request_body(
+    chunks: "Iterator[bytes]", size: "int | None"
+) -> "Iterator[bytes] | SizedIterator | bytes":
+    """The ``data`` of a PUT of ``chunks``, which are ``size`` bytes (``None``: unknown) long."""
+    if size is None:
+        return chunks
+    if size == 0:
+        # ``requests`` sends an iterable of length 0 chunked, as a lone "0\r\n\r\n" - and a
+        # server that answers before it reads that (a 405 for a collection, a 403) leaves it
+        # on the connection for the next request to trip over: a 400 for a PROPFIND. An empty
+        # body is "Content-Length: 0". (A file that has data after all, against a declared
+        # size of 0, still ends in the ClientError of the generator.)
+        next(chunks, None)
+        return b""
+    return SizedIterator(chunks, size)
+
+
 def _bounded_chunks(
     fileobj: BinaryIO,
     size: "int | None",
@@ -1034,9 +1051,7 @@ class FileSystem:
         # SizedIterator lets `requests` learn the real length itself and
         # keep the upload streamed with a plain Content-Length - passing
         # size via our own header instead doesn't work, see its docstring.
-        body: Iterator[bytes] | SizedIterator = (
-            SizedIterator(chunks, size) if size is not None else chunks
-        )
+        body = _request_body(chunks, size)
         try:
             self._remote.send(
                 Method.PUT, path, data=body, headers=headers, error_path=path

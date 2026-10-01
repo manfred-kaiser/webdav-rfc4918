@@ -7,6 +7,7 @@ import pytest
 from tests.credentials import AUTH
 from tests.scripted_server import Reply, Seen, scripted_server
 from webdav import (
+    ClientError,
     FileSystem,
     HTTPStatusError,
     IsACollectionError,
@@ -69,6 +70,30 @@ def test_upload_onto_a_collection_is_an_error_that_says_so(
     with pytest.raises(IsACollectionError):
         fs.upload_fileobj(io.BytesIO(b"x"), "docs", overwrite=overwrite)
     assert fs.ls("docs") == []
+
+
+def _created(_seen: Seen) -> Reply:
+    return 201, {"Content-Length": "0"}, b""
+
+
+def test_an_empty_upload_has_a_content_length_and_is_not_chunked() -> None:
+    """A chunked body of zero bytes is a lone terminator, which a server that answers first leaves behind."""
+    with scripted_server(_created) as (url, recorder), FileSystem(url) as client:
+        client.upload_fileobj(io.BytesIO(b""), "f", overwrite=True)
+        client.upload_fileobj(io.BytesIO(b"x"), "g", overwrite=True)
+    empty, one = (r for r in recorder.requests if r.method == "PUT")
+    assert empty.headers.get("content-length") == "0"
+    assert "transfer-encoding" not in empty.headers
+    assert one.headers.get("content-length") == "1"
+
+
+def test_a_file_that_has_data_against_a_declared_size_of_zero_is_an_error() -> None:
+    with (
+        scripted_server(_created) as (url, _),
+        FileSystem(url) as client,
+        pytest.raises(ClientError, match="longer"),
+    ):
+        client.upload_fileobj(io.BytesIO(b"x"), "f", size=0, overwrite=True)
 
 
 def test_a_405_for_an_upload_is_not_called_a_collection_if_it_is_none() -> None:
