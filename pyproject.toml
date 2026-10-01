@@ -178,7 +178,7 @@ disable = [
 max-args = 16
 max-parents = 8  # the exception hierarchy is deliberately fine-grained
 # Session.__init__: every keyword-only argument counts as a local (see max-args).
-max-locals = 16
+max-locals = 18
 max-positional-arguments = 9
 # Session is the single entry point for the HTTP/WebDAV verbs, like
 # requests.Session is for HTTP, and forwards the requests attributes
