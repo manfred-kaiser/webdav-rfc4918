@@ -76,6 +76,11 @@ def _absolute(name: str) -> str:
     return "/" + name.lstrip("/")
 
 
+def _tuple_from_json(value: Any) -> Any:
+    """``value``, or the tuple a JSON array stands for."""
+    return tuple(value) if isinstance(value, list) else value
+
+
 def _is_root(path: str) -> bool:
     """Whether ``path`` names the root of the file system (``/``, ``//``, ``/a/..``, ...)."""
     return posixpath.normpath("/" + path.lstrip("/")) == "/"
@@ -142,7 +147,7 @@ class WebdavFileSystem(AbstractFileSystem):
     def __init__(
         self,
         base_url: "str | None" = None,
-        auth: "AuthTypes" = None,
+        auth: "AuthTypes | list[str]" = None,
         session: Session | None = None,
         **session_opts: Any,
     ) -> None:
@@ -153,7 +158,9 @@ class WebdavFileSystem(AbstractFileSystem):
 
         Args:
             base_url: Base URL of the WebDAV server.
-            auth: Passed straight through to :class:`~webdav.session.Session`.
+            auth: Passed straight through to :class:`~webdav.session.Session`. A list
+                of two is read as the ``(user, password)`` tuple it stands for, which is
+                what ``from_json(fs.to_json())`` hands back (as for ``timeout`` and ``cert``).
             session: A pre-built session to use instead (e.g. for mocking,
                 or to reuse a session's connection pool across filesystems);
                 it needs a ``base_url``.
@@ -171,11 +178,18 @@ class WebdavFileSystem(AbstractFileSystem):
             )
             raise ValueError(msg)
         super().__init__()
+        # JSON has no tuple: fsspec's to_json()/from_json() hand ("user", "password"),
+        # (connect, read) and (certfile, keyfile) back as lists, which the session rejects
+        # (or, for auth, would try to call).
+        credentials: AuthTypes = _tuple_from_json(auth)
+        for name in ("timeout", "cert"):
+            if name in session_opts:
+                session_opts[name] = _tuple_from_json(session_opts[name])
         session_opts.setdefault("chunk_size", self.blocksize)
         self.filesystem = (
             FileSystem.from_session(session)
             if session is not None
-            else FileSystem(base_url, auth=auth, **session_opts)
+            else FileSystem(base_url, auth=credentials, **session_opts)
         )
 
     @classmethod

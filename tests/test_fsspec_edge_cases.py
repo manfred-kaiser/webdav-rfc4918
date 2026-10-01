@@ -15,6 +15,7 @@ import errno
 import pickle
 import threading
 from collections.abc import Iterator
+from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar, cast
 
 import fsspec
@@ -752,6 +753,32 @@ def test_an_open_file_survives_pickling_and_continues_where_it_was(
     with fs.open("/f", "rb") as fresh, _through_pickle(fresh) as clone:
         assert clone.tell() == 0
         assert clone.read() == b"0123456789"
+
+
+def test_a_filesystem_survives_a_json_round_trip(
+    server_url: str, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """JSON has no tuples: ``("user", "password")`` and ``(connect, read)`` come back as lists."""
+    folder = tmp_path_factory.mktemp("cert")
+    certfile, keyfile = str(folder / "client.pem"), str(folder / "client.key")
+    for name in (certfile, keyfile):  # never used: the test server speaks plain HTTP
+        Path(name).write_text("")
+    original = WebdavFileSystem(
+        server_url, auth=AUTH, timeout=(5, 30), cert=(certfile, keyfile)
+    )
+    original.pipe_file("/a", b"1")
+    for restored in (
+        fsspec.AbstractFileSystem.from_json(original.to_json()),
+        fsspec.AbstractFileSystem.from_dict(original.to_dict()),
+    ):
+        assert isinstance(restored, WebdavFileSystem)
+        session = restored.filesystem.session
+        assert session.auth == AUTH
+        assert session.timeout == (5, 30)
+        assert session.cert == (certfile, keyfile)
+        assert restored.cat_file("/a") == b"1"
+        restored.filesystem.close()
+    original.filesystem.close()
 
 
 def test_the_password_is_not_in_the_repr(fs: WebdavFileSystem) -> None:
