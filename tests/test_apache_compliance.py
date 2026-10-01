@@ -18,6 +18,8 @@ that changes one is caught here, not discovered in production).
 
 import io
 import os
+import threading
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from tempfile import gettempdir
@@ -458,6 +460,31 @@ def test_apache_if_none_match_star_atomic_create_is_really_atomic(
     buf = io.BytesIO()
     apache_client.download_fileobj("compliance/atomic.txt", buf)
     assert buf.getvalue() == b"first"
+
+
+def test_apache_a_lost_race_to_create_a_collection_is_a_405_not_a_500(
+    apache_client: FileSystem,
+) -> None:
+    """RFC 4918 sec. 9.3.1: MKCOL on what exists is a 405 - also for the loser of a race.
+
+    WsgiDAV answers it with a 500 (so the fsspec filesystem takes a 500 for "exists" when the
+    collection is there afterwards, see ``WebdavFileSystem._mkdir``); this pins what Apache does.
+    """
+    statuses: list[int] = []
+    barrier = threading.Barrier(12)
+    path = f"compliance/race-{uuid.uuid4().hex}"
+
+    def create() -> None:
+        barrier.wait()
+        response = apache_client.session.mkcol(path, raise_on_error=False)
+        statuses.append(response.status_code)
+
+    threads = [threading.Thread(target=create) for _ in range(12)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(statuses) == [201] + [405] * 11
 
 
 # ---------------------------------------------------------------------------
