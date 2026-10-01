@@ -53,7 +53,9 @@ def parse_xml(content: str | bytes) -> Element:
 
     """
     try:
-        return _fromstring(content)  # noqa: S314 # nosec B314 -- see module docstring
+        # Safe against XXE/entity expansion: see the module docstring. (bandit reads every
+        # word after "nosec" as a test id, so the reason cannot sit on that line.)
+        return _fromstring(content)  # noqa: S314 # nosec B314
     except (ParseError, LookupError, ValueError, UnicodeError) as exc:
         # LookupError: an unknown ``encoding=`` declaration; ValueError/
         # UnicodeError: one expat cannot honour (e.g. ``utf-16`` on an ASCII
