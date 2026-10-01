@@ -40,7 +40,19 @@ packages = [ "src/webdav" ]
 
 [tool.hatch.envs.hatch-test]
 dependencies = [ "hypothesis", "pytest", "pytest-cov", "pytest-xdist", "typing-extensions" ]
-extra-dependencies = [ "cheroot", "fsspec", "wsgidav" ]
+# pandas, dask, pyarrow, zarr and xarray: the programs that use the fsspec filesystem, run in
+# tests/test_fsspec_consumers.py - test dependencies only, each test is skipped without its library.
+extra-dependencies = [
+  "cheroot",
+  "dask[dataframe]",
+  "fsspec",
+  "numpy",
+  "pandas",
+  "pyarrow",
+  "wsgidav",
+  "xarray",
+  "zarr",
+]
 
 [tool.hatch.envs.hatch-test.scripts]
 run = "pytest{env:HATCH_TEST_ARGS:} {args:tests/}"
