@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-01
+
 The first release.
 
 ### Added
@@ -47,6 +49,13 @@ The first release.
   exit only; `walk()` like `os.walk` (one `Depth: 1` request per collection, cycle-safe).
 - mTLS with encrypted keys, CRL checking and cipher restriction (`TLSOptions`).
 - A `dav` command (`ls`, `info`, `cat`, `get`, `put`, `mkdir`, `rm`, `mv`, `cp`).
+- An optional fsspec filesystem (`pip install webdav-rfc4918[fsspec]`, `webdav.fsspec.WebdavFileSystem`,
+  protocol `webdavs`), run against fsspec's own conformance suite and against pandas, dask, pyarrow,
+  zarr and xarray (fsspec 2024.12.0 or newer). Its paths start at the root of the `base_url`;
+  `webdavs://host[:port]/path` names the server (https; credentials in the URL are refused); files are
+  read in bounded `Range` requests and `cat_file` asks for exactly the bytes wanted; `cp`/`mv` replace a
+  file but never a directory, and never copy or move a directory into itself; writers that create the
+  same parent directory at once do not fail.
 - Retries of transient failures with backoff - for the safe methods only (`GET`, `HEAD`, `OPTIONS`,
   `PROPFIND`): a retried write reports the opposite of what happened when the first try had worked.
 
@@ -109,4 +118,5 @@ they were fixed):
   CVE-2025-66418, CVE-2026-21441, CVE-2026-44431, CVE-2026-44432), release job checks the tag against the
   version, workflows pinned by commit, no long-lived publishing token.
 
-[Unreleased]: https://github.com/manfred-kaiser/webdav-rfc4918/compare/0.1.0...main
+[Unreleased]: https://github.com/manfred-kaiser/webdav-rfc4918/compare/1.0.0...main
+[1.0.0]: https://github.com/manfred-kaiser/webdav-rfc4918/releases/tag/1.0.0

@@ -4,7 +4,7 @@ requires = [ "hatchling==1.31.0" ]
 
 [project]
 name = "webdav-rfc4918"
-version = "0.1.0"
+version = "1.0.0"
 description = "RFC 4918 compliant WebDAV client, built on requests, with an optional fsspec filesystem and a CLI"
 readme = "README.md"
 keywords = [ "fsspec", "mtls", "rfc4918", "webdav", "webdav-cli", "webdav-client" ]
@@ -13,7 +13,7 @@ authors = [ { name = "Manfred Kaiser", email = "manfred.kaiser@ssh-mitm.at" } ]
 maintainers = [ { name = "Manfred Kaiser", email = "manfred.kaiser@ssh-mitm.at" } ]
 requires-python = ">=3.11"
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 5 - Production/Stable",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
@@ -271,7 +271,7 @@ disallow_incomplete_defs = false
 warn_unused_ignores = false
 
 [tool.bumpversion]
-current_version = "0.1.0"
+current_version = "1.0.0"
 commit = false
 tag = false
 allow_dirty = true
