@@ -53,10 +53,6 @@ def test_the_timeouts_requests_understands_are_accepted(timeout: Any) -> None:
 def test_a_base_url_that_is_no_full_http_url_is_refused(base_url: object) -> None:
     with pytest.raises(ValueError, match="base_url"):
         Session(base_url)  # type: ignore[arg-type]
-    session = Session("http://dav.example")
-    with pytest.raises(ValueError, match="base_url"):
-        session.base_url = base_url  # type: ignore[assignment]
-    assert session.base_url == "http://dav.example"
 
 
 def test_a_base_url_is_never_shown_with_its_credentials_in_the_error() -> None:
@@ -65,12 +61,15 @@ def test_a_base_url_is_never_shown_with_its_credentials_in_the_error() -> None:
     assert "SECRET" not in str(excinfo.value)
 
 
-def test_the_base_url_can_be_lifted_and_set_again() -> None:
+def test_base_url_is_immutable_after_construction() -> None:
+    """Internal code (releasing a lock on cleanup, ...) replays an absolute URL it
+    captured earlier, trusting it was already checked against this session's
+    origin - a base_url that could later point elsewhere would silently
+    invalidate that check. A session for a different server is a new Session."""
     session = Session("http://dav.example/base")
-    session.base_url = None
-    assert session.base_url is None
-    session.base_url = "https://other.example:8443/x/"
-    assert session.resolve_url("a") == "https://other.example:8443/x/a"
+    with pytest.raises(AttributeError):
+        session.base_url = "https://other.example:8443/x/"  # type: ignore[misc]
+    assert session.base_url == "http://dav.example/base"
 
 
 @pytest.mark.parametrize("policy", ["all", "same-origin", None, 1, RedirectPolicy])

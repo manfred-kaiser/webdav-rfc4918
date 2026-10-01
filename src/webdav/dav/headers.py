@@ -15,6 +15,8 @@ from webdav.url_safety import effective_origin, is_url, redact_url
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from webdav.url_safety import Origin
+
 #: The ``Depth`` values each method accepts (RFC 4918 sec. 9.1, 9.8, 9.9, 9.10).
 _ALLOWED_DEPTHS = {
     Method.PROPFIND: ("0", "1", "infinity"),
@@ -65,7 +67,7 @@ def strong_etag(value: str) -> str:
 def destination_header(
     destination: str,
     *,
-    base_url: "str | None",
+    base_origin: "Origin | None",
     resolve: "Callable[[str], str]",
 ) -> str:
     """The ``Destination`` header value: an absolute URI or path-absolute (RFC 4918 sec. 10.3).
@@ -77,7 +79,8 @@ def destination_header(
 
     Args:
         destination: A full URL, or a path.
-        base_url: The session's ``base_url``, if it has one.
+        base_origin: The session's ``base_url``'s origin, if it has one -
+            precomputed by the caller, since ``base_url`` cannot change.
         resolve: Turns a path into a full URL under ``base_url``.
 
     Raises:
@@ -97,15 +100,13 @@ def destination_header(
             msg = f"a Destination has no query, fragment or backslash: {redact_url(destination)!r}"
             raise ClientError(msg)
         origin = effective_origin(destination)
-        if origin is None or (
-            base_url is not None and origin != effective_origin(base_url)
-        ):
+        if origin is None or (base_origin is not None and origin != base_origin):
             msg = f"Destination {redact_url(destination)!r} is not on this session's base_url"
             raise ClientError(msg)
         # ``requote_uri`` leaves a "%" that is not a valid escape as it is;
         # in a URI it can only mean a literal percent sign.
         return str(requote_uri(re.sub(r"%(?![0-9A-Fa-f]{2})", "%25", destination)))
-    if base_url is not None:
+    if base_origin is not None:
         return resolve(destination)
     if destination.startswith("/"):
         return quote(destination, safe="/")

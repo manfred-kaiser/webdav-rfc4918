@@ -273,6 +273,22 @@ def test_a_per_call_chunk_size_is_validated_too(
             )
 
 
+@pytest.mark.parametrize("mode", ["rb", "wb"])
+def test_open_validates_chunk_size_up_front_like_the_other_transfers(
+    server_url: str, mode: str
+) -> None:
+    """Unlike download_file/download_fileobj/upload_fileobj, open() used to pass
+    chunk_size straight through unchecked - a read never validated it at all,
+    and a write only found out after the whole body had been spooled."""
+    with Session(server_url, auth=AUTH, retry=False) as session:
+        session.put("a.txt", b"x")
+        with pytest.raises(ValueError, match="chunk_size"):
+            with FileSystem.from_session(session).open(  # type: ignore[call-overload]
+                "a.txt", mode, chunk_size=0
+            ):
+                pass
+
+
 def test_module_level_transfers_reject_unknown_arguments_and_forward_known_ones(
     server_url: str, tmp_path: Path
 ) -> None:
@@ -443,6 +459,28 @@ def test_an_encoded_slash_in_an_href_is_refused_not_turned_into_a_path_separator
         pytest.raises(MalformedResponseError, match="encoded path separator"),
     ):
         FileSystem(retry=False).ls(f"{url}/a")
+
+
+def test_a_control_character_in_an_href_is_refused() -> None:
+    """``\\x7f`` (and most other control characters) survive well-formed XML
+    untouched - unlike a redirect Location, nothing upstream already refuses
+    them for an href, so _check_href must."""
+    body = _multistatus("/a/", "/a/x\x7fy.txt")
+    with (
+        scripted_server(always((207, {}, body))) as (url, _rec),
+        pytest.raises(MalformedResponseError, match="control character"),
+    ):
+        FileSystem(retry=False).ls(f"{url}/a")
+
+
+def test_a_backslash_in_an_href_is_still_an_ordinary_character() -> None:
+    """Unlike the control-character check above, a backslash is deliberately
+    still accepted here - an ordinary POSIX file-name character, not part of
+    an authority a parser could misread (see test_second_round.py's
+    test_a_backslash_in_a_name_is_an_ordinary_character_on_posix)."""
+    body = _multistatus("/a/", "/a/x\\y.txt")
+    with scripted_server(always((207, {}, body))) as (url, _rec):
+        assert FileSystem(retry=False).ls(f"{url}/a") == ["a/x\\y.txt"]
 
 
 def test_walk_stops_a_server_that_invents_a_new_directory_at_every_level() -> None:

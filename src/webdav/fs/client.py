@@ -312,7 +312,9 @@ class FileSystem:
             props, all_prop=all_prop or not props, include=include
         )
         # Depth: 0 - this is a single-resource lookup, not a traversal.
-        headers = {"Content-Type": "application/xml; charset=utf-8", "Depth": "0"}
+        # No explicit Content-Type: prepare_body() sets it for any
+        # XML_BODY_METHODS call with a body - PROPFIND is one.
+        headers = {"Depth": "0"}
         result = self._remote.propfind(path, headers=headers, data=data)
         return result.get_response_for_path(base.path, rel).properties
 
@@ -325,8 +327,7 @@ class FileSystem:
     ) -> None:
         """Set and/or remove properties via PROPPATCH (RFC 4918 sec. 9.2)."""
         data = build_proppatch_body(set_props, remove_props)
-        headers = {"Content-Type": "application/xml; charset=utf-8"}
-        self._remote.send(Method.PROPPATCH, path, data=data, headers=headers)
+        self._remote.send(Method.PROPPATCH, path, data=data)
 
     def content_length(self, path: str) -> "int | None":
         """Return the ``getcontentlength`` property."""
@@ -401,13 +402,14 @@ class FileSystem:
 
         """
         depth = depth_header(depth, Method.LOCK)
+        # No explicit Content-Type: prepare_body() sets it for any
+        # XML_BODY_METHODS call with a body - LOCK is one.
         headers = {
             "Depth": depth,
             "Timeout": format_timeout(lock_timeout),
-            "Content-Type": "application/xml; charset=utf-8",
         }
-        # The URL that is locked - fixed now, so that whatever happens to the
-        # session (a changed base_url, ...) the UNLOCK goes to the same place.
+        # The URL that is locked - fixed now, so the UNLOCK on cleanup
+        # always goes to the exact resource that was locked.
         url = self._remote.locate(path).url
         # A 207 is not a granted lock: for ``Depth: infinity`` it names the member
         # that could not be locked (RFC 4918 sec. 9.10.6) and raises here.
@@ -439,17 +441,18 @@ class FileSystem:
             self._unlock_quietly(url, active_lock.token)
 
     def _unlock_quietly(self, url: str, token: str) -> None:
-        """Release the lock ``token`` on ``url``, never raising (and never hiding that it failed)."""
+        """Release the lock ``token`` on ``url``, never raising (and never hiding that it failed).
+
+        A failed UNLOCK (a dropped connection, a refusal, a status other
+        than success) must not replace whatever the ``with`` body raised -
+        nor hide that the lock is still there: say so, and go on.
+        """
         try:
             response = self._session.unlock(url, token, raise_on_error=False)
         except requests.RequestException as exc:
-            # A failed UNLOCK (a dropped connection, a refusal) must not
-            # replace whatever the ``with`` body raised - nor hide that the
-            # lock is still there: say so, and go on.
             _LOGGER.warning(
                 "could not release the lock on %s: %s - it stays on the server "
-                "until it times out, unless it is released with a session "
-                "configured for that server",
+                "until it times out",
                 redact_url(url),
                 exc,
             )
@@ -461,21 +464,11 @@ class FileSystem:
             # RFC 4918 sec. 9.11.1: 409 - the resource was not locked (the URL is
             # the one that was locked, so: it may have timed out) - or it is gone.
             # Nothing to release any more, but writes since may have lost the lock.
-            _LOGGER.warning(
-                "the lock on %s was already gone when it was released (the server "
-                "answered %s %s) - it may have timed out",
-                redact_url(url),
-                status,
-                response.reason or "",
-            )
-            return
-        # 403: not permitted to remove it; anything else: the server did not release it.
-        _LOGGER.warning(
-            "could not release the lock on %s: the server answered %s %s",
-            redact_url(url),
-            status,
-            response.reason or "",
-        )
+            message = "the lock on %s was already gone when it was released (the server answered %s %s) - it may have timed out"
+        else:
+            # 403: not permitted to remove it; anything else: the server did not release it.
+            message = "could not release the lock on %s: the server answered %s %s"
+        _LOGGER.warning(message, redact_url(url), status, response.reason or "")
 
     def refresh_lock(
         self,
@@ -521,10 +514,9 @@ class FileSystem:
                 time. Sent with ``Content-Type: application/xml`` when given.
 
         """
-        headers = {"Content-Type": "application/xml; charset=utf-8"} if data else None
         try:
             response = self._remote.send(
-                Method.MKCOL, path, add_trailing_slash=True, data=data, headers=headers
+                Method.MKCOL, path, add_trailing_slash=True, data=data
             )
         except HTTPStatusError as exc:
             if exc.status_code == HTTPStatus.METHOD_NOT_ALLOWED:
@@ -689,6 +681,8 @@ class FileSystem:
         if mode not in _OPEN_MODES:
             msg = f"unsupported mode {mode!r}"
             raise ValueError(msg)
+        if chunk_size is not None:
+            check_chunk_size(chunk_size)
         if mode[0] == "r":
             yield from self._open_read(path, mode, encoding, chunk_size)
         else:
