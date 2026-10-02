@@ -1,0 +1,41 @@
+name: Nextcloud compliance
+
+# Separate from ci.yml/apache-compliance.yml/nginx-compliance.yml on
+# purpose: a cross-check against one of the most common real-world WebDAV
+# deployments this library's users point it at (see
+# docs/nextcloud-compliance-check.md) - scoped to core RFC 4918 only, not
+# Nextcloud's proprietary extensions. New (not yet proven stable across
+# many runs), so continue-on-error for now rather than blocking a merge on
+# day one - promote once it has been green for a while.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nextcloud:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+    - name: Set up Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      with:
+        python-version: '3.13'
+        cache: 'pip'
+    - name: Install hatch
+      run: |
+        python -m pip install pip==26.2.1
+        python -m pip install hatch==1.18.0
+    - name: Run the Nextcloud compliance check (starts/stops its own container - see tests/nextcloud_instance.py)
+      run: hatch test tests/test_nextcloud_compliance.py -v
+    - name: Dump Nextcloud container logs on failure
+      if: failure()
+      run: docker logs webdav-rfc4918-nextcloud-test || true

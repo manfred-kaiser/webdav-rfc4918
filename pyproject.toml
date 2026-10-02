@@ -161,10 +161,13 @@ max-args = 16
   "S314",
   "SLF001", # tests intentionally reach into internals to set up scenarios
 ]
-# Test infrastructure (standing a throwaway Apache instance up/down), not a
-# test itself - same reasoning as tools/** below: a fixed list of trusted,
-# hardcoded binaries (httpd, htpasswd), nothing from untrusted input.
+# Test infrastructure (standing a throwaway Apache/nginx/Nextcloud instance
+# up/down), not a test itself - same reasoning as tools/** below: a fixed
+# list of trusted, hardcoded binaries (httpd, htpasswd, nginx, docker),
+# nothing from untrusted input.
 "tests/apache_instance.py" = [ "S603" ]
+"tests/nginx_instance.py" = [ "S603" ]
+"tests/nextcloud_instance.py" = [ "S603" ]
 "tests/server.py" = [ "T201" ] # interactive test-server helper, not library code
 
 [tool.ruff.lint.flake8-annotations]

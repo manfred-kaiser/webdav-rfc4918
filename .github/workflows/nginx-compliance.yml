@@ -1,0 +1,42 @@
+name: nginx compliance
+
+# Separate from ci.yml and apache-compliance.yml on purpose: a second,
+# independent real-server cross-check (see docs/nginx-compliance-check.md)
+# - nginx's ngx_http_dav_module + nginx-dav-ext-module only implements
+# *exclusive* locks, unlike Apache and wsgidav, which both support shared
+# locks too. New (not yet proven stable across many runs), so
+# continue-on-error for now rather than blocking a merge on day one -
+# promote once it has been green for a while.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nginx:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+    - name: Set up Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      with:
+        python-version: '3.13'
+        cache: 'pip'
+    - name: Install nginx + dav-ext module
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y nginx libnginx-mod-http-dav-ext apache2-utils
+    - name: Install hatch
+      run: |
+        python -m pip install pip==26.2.1
+        python -m pip install hatch==1.18.0
+    - name: Run the nginx compliance check (starts/stops its own instance - see tests/nginx_instance.py)
+      run: hatch test tests/test_nginx_compliance.py -v
