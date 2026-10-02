@@ -4,9 +4,12 @@ name: Nextcloud compliance
 # purpose: a cross-check against one of the most common real-world WebDAV
 # deployments this library's users point it at (see
 # docs/nextcloud-compliance-check.md) - scoped to core RFC 4918 only, not
-# Nextcloud's proprietary extensions. New (not yet proven stable across
-# many runs), so continue-on-error for now rather than blocking a merge on
-# day one - promote once it has been green for a while.
+# Nextcloud's proprietary extensions. Unlike apache-compliance.yml and
+# nginx-compliance.yml, deliberately staying continue-on-error for now
+# even though it has been green: it pulls the pinned image from Docker
+# Hub on every run, an external dependency with its own (rare but real)
+# outage/rate-limit risk that an apt install doesn't have - promote to a
+# required status check once that has also proven stable over time.
 
 on:
   push:

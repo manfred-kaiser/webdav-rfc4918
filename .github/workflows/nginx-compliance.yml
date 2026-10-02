@@ -4,9 +4,12 @@ name: nginx compliance
 # independent real-server cross-check (see docs/nginx-compliance-check.md)
 # - nginx's ngx_http_dav_module + nginx-dav-ext-module only implements
 # *exclusive* locks, unlike Apache and wsgidav, which both support shared
-# locks too. New (not yet proven stable across many runs), so
-# continue-on-error for now rather than blocking a merge on day one -
-# promote once it has been green for a while.
+# locks too. Promoted to a required status check on main (branch
+# protection, admins exempted) after proving stable across many runs - a
+# real failure here now blocks a PR merge the same way ci.yml's own jobs
+# do. apt-based and fast (~30s), unlike nextcloud-compliance.yml, which
+# stays continue-on-error for now (an external Docker Hub pull is a
+# different, less controllable risk than an apt install).
 
 on:
   push:
@@ -21,7 +24,6 @@ permissions:
 jobs:
   nginx:
     runs-on: ubuntu-latest
-    continue-on-error: true
 
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

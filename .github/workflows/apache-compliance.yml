@@ -4,9 +4,9 @@ name: Apache compliance
 # server implementation - this project's actual deployment target, not just
 # wsgidav (see docs/apache-compliance-check.md) - called out as its own
 # workflow (and so its own status/badge) rather than buried as one job among
-# several. New (not yet proven stable across many runs) and only covers one
-# distro's Apache build, so continue-on-error for now rather than blocking a
-# merge on day one - promote once it has been green for a while.
+# several. Promoted to a required status check on main (branch protection,
+# admins exempted) after proving stable across many runs - a real failure
+# here now blocks a PR merge the same way ci.yml's own jobs do.
 
 on:
   push:
@@ -21,7 +21,6 @@ permissions:
 jobs:
   apache:
     runs-on: ubuntu-latest
-    continue-on-error: true
 
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
