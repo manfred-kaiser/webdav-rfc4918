@@ -444,9 +444,10 @@ def test_nginx_423_response_is_never_crashed_on_even_without_a_structured_error_
 def test_nginx_a_clean_delete_of_a_nested_collection_is_204(
     nginx_client: FileSystem,
 ) -> None:
+    """Same trailing-slash requirement as COPY/MOVE (see the usage note in the docs) - also applies to DELETE."""
     nginx_client.mkdir("compliance/cleandel")
     nginx_client.mkdir("compliance/cleandel/sub")
-    nginx_client.remove("compliance/cleandel")
+    nginx_client.remove("compliance/cleandel/")
     assert not nginx_client.exists("compliance/cleandel")
 
 

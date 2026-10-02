@@ -160,13 +160,16 @@ Each is pinned by a dedicated test rather than silently assumed to stay
 true forever - a future nginx-dav-ext release that fixes any of these
 would turn the matching test red, which is the point.
 
-## Usage note: COPY/MOVE of a collection needs a trailing slash
+## Usage note: COPY/MOVE/DELETE of a non-empty collection needs a trailing slash
 
 Not a limitation - nginx just enforces something Apache/wsgidav/Nextcloud
 don't: COPY/MOVE on a collection needs a trailing slash on *both* the
-source path and the `Destination` - without one on either side, nginx
-answers a plain `400 Bad Request` instead of recursing. This library
-already preserves a caller-given trailing slash end to end
+source path and the `Destination`, and DELETE of a non-empty one needs
+one on the path itself - without it, nginx answers a plain `400 Bad
+Request` (COPY/MOVE) or `409 Conflict` (DELETE) instead of recursing.
+This library already preserves a caller-given trailing slash end to end
 (`Session.resolve_url()`'s docstring: "a trailing / says this is a
-collection"), so `fs.copy("src/", "dst/")` (not `fs.copy("src", "dst")`)
-is all that's needed - see `test_nginx_copy_of_a_nested_collection_duplicates_the_whole_subtree`.
+collection"), so `fs.copy("src/", "dst/")`/`fs.remove("dir/")` (not
+`fs.copy("src", "dst")`/`fs.remove("dir")`) is all that's needed - see
+`test_nginx_copy_of_a_nested_collection_duplicates_the_whole_subtree` and
+`test_nginx_a_clean_delete_of_a_nested_collection_is_204`.
