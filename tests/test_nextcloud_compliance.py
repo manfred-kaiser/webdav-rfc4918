@@ -30,7 +30,7 @@ from collections.abc import Iterator
 import pytest
 
 from tests import nextcloud_instance
-from webdav import FileSystem, ResourceAlreadyExistsError, WebDAVError
+from webdav import FileSystem, ResourceAlreadyExistsError
 from webdav.dav.locks import EXCLUSIVE
 
 _ENV_URL = os.environ.get("WEBDAV_TEST_NEXTCLOUD_URL")
@@ -94,24 +94,31 @@ def nc_client() -> Iterator[FileSystem]:
 # ---------------------------------------------------------------------------
 
 
-def test_nextcloud_advertises_class_1_but_not_class_2(nc_client: FileSystem) -> None:
-    """Nextcloud's SabreDAV-based WebDAV endpoint never registers a LOCK plugin.
+def test_nextcloud_advertises_class_2(nc_client: FileSystem) -> None:
+    """Confirmed against a real instance: this pinned Nextcloud release supports locking.
 
-    Pinned as a documented, long-standing limitation (confirmed against a
-    real instance, not assumed) - a future Nextcloud release that adds
-    Class 2 support would turn this red, which is exactly the point of
-    having it here rather than silently assuming the gap stays forever.
+    Older Nextcloud releases (confirmed: 29) did not register a LOCK
+    plugin at all and answered with a plain 501 - locking support was
+    added to Nextcloud's own WebDAV stack at some point before the
+    version pinned here. Pinned both ways on purpose: a future bump that
+    lands on a release where this regresses, or where it was never true
+    to begin with for a differently-configured instance, should turn this
+    red rather than silently assumed away either direction.
     """
     compliances = nc_client.dav_compliance()
     assert "1" in compliances
-    assert "2" not in compliances
+    assert "2" in compliances
 
 
-def test_nextcloud_lock_fails_with_a_clean_webdaverror(nc_client: FileSystem) -> None:
-    """A caller who doesn't know about the Class 2 gap still gets a sane, catchable error (501), not a crash."""
-    nc_client.upload_fileobj(io.BytesIO(b"x"), "lock-attempt.txt")
-    with pytest.raises(WebDAVError), nc_client.locked("lock-attempt.txt", scope=EXCLUSIVE):
-        pass
+def test_nextcloud_lock_and_write_with_held_token(nc_client: FileSystem) -> None:
+    nc_client.upload_fileobj(io.BytesIO(b"v1"), "locked.txt")
+
+    with nc_client.locked("locked.txt", scope=EXCLUSIVE):
+        nc_client.upload_fileobj(io.BytesIO(b"v2"), "locked.txt", overwrite=True)
+
+    buf = io.BytesIO()
+    nc_client.download_fileobj("locked.txt", buf)
+    assert buf.getvalue() == b"v2"
 
 
 def test_nextcloud_mkdir_upload_download_roundtrip(nc_client: FileSystem) -> None:

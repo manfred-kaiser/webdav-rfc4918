@@ -75,16 +75,19 @@ persistent account for the whole run, pinned to a single xdist worker via
 `@pytest.mark.xdist_group(name="nextcloud")` plus this project's
 `--dist=loadgroup` config.
 
-## Known limitation
+## Locking support depends on the Nextcloud version
 
-**No locking support at all (Class 1 only).** Nextcloud's SabreDAV-based
-WebDAV endpoint never registers a plugin for the `LOCK`/`UNLOCK` methods -
-a `LOCK` request gets a plain `501 Not Implemented`, and its `DAV:`
-compliance header never lists class `2`. This is a long-standing,
-by-design characteristic of Nextcloud's own WebDAV stack, not a
-configuration issue on this project's side - confirmed against a real
-instance and pinned by `test_nextcloud_advertises_class_1_but_not_class_2`
-and `test_nextcloud_lock_fails_with_a_clean_webdaverror`.
+The pinned release (`nextcloud:35.0.1-apache`) **does** support WebDAV
+locking (Class 2) - confirmed against a real instance: `LOCK` returns a
+real token, and a write through a held lock succeeds. This was not
+always true: Nextcloud **29** (tested earlier in this project's own
+research) answers `LOCK` with a plain `501 Not Implemented` and never
+lists class `2` at all - locking support was added to Nextcloud's own
+WebDAV stack at some point between those releases. `test_nextcloud_advertises_class_2`
+and `test_nextcloud_lock_and_write_with_held_token` pin the *current*
+pinned version's behavior; if a future image bump lands on a release
+where this regresses, these tests catch it rather than it being silently
+assumed away.
 
 ## Image tag policy
 
