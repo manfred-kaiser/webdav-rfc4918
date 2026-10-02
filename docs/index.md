@@ -38,5 +38,8 @@ reference/redirects
 reference/tls
 reference/cli
 reference/fsspec
+reference/performance
 apache-compliance-check
+nginx-compliance-check
+nextcloud-compliance-check
 ```
