@@ -106,6 +106,22 @@ Confirmed against a real instance, not assumed from Apache's own behavior:
   response** - unlike Apache, they have to be asked for by name. Pinned
   by `test_nextcloud_lockdiscovery_and_supportedlock_are_parsed_from_a_live_response`.
 
+## Other confirmed differences from Apache
+
+Not limitations - Nextcloud is more capable than Apache in each of
+these, confirmed against a real instance:
+
+- **`getetag` is strong by default** (Apache's is weak) - `If-Match`
+  with it works directly, no client-side `ValueError`. Pinned by
+  `test_nextcloud_default_getetag_is_strong`.
+- **A `423` response carries a real precondition code**
+  (`lock-token-submitted`), not Apache's plain HTML. Pinned by
+  `test_nextcloud_423_response_has_a_structured_error_body`.
+- **Extended MKCOL (RFC 5689) is refused with a plain `400`**, not
+  Apache's `415` - SabreDAV's own `BadRequest` exception, naming the
+  missing `{DAV:}resourcetype`. Pinned by
+  `test_nextcloud_extended_mkcol_is_refused_with_400`.
+
 ## Image tag policy
 
 The exact Nextcloud image tag (`tests/nextcloud_instance.py`'s `IMAGE`) is

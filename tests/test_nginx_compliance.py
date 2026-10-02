@@ -10,9 +10,15 @@ Nextcloud (``test_nextcloud_compliance.py``) do not share, confirmed
 against a real instance, not assumed from documentation:
 
 - its ``DAV:`` header lists only class ``2``, never ``1``;
-- it never evaluates ``If-None-Match`` on PUT (no overwrite protection);
+- it never evaluates ``If-None-Match``/``If-Match`` on PUT at all (no
+  overwrite protection, no conditional PUT);
 - a requested *shared* lock is silently granted as *exclusive* instead of
-  being refused or honored.
+  being refused or honored;
+- COPY/MOVE of a collection needs a trailing slash on both URIs, or it
+  answers a plain ``400`` instead of recursing;
+- ``PROPPATCH`` is not supported at all - not even a valid value for
+  nginx-dav-ext's own ``dav_ext_methods`` directive;
+- PROPFIND never returns a ``getetag`` property, for any resource.
 
 Skipped only when no nginx is reachable: with ``WEBDAV_TEST_NGINX_URL``
 set, these tests run against that (possibly remote) instance; otherwise,
@@ -33,11 +39,13 @@ import pytest
 from tests import nginx_instance
 from webdav import (
     FileSystem,
+    HTTPStatusError,
     ResourceAlreadyExistsError,
     ResourceConflictError,
     ResourceLockedError,
 )
 from webdav.dav.locks import EXCLUSIVE, SHARED
+from webdav.exceptions import UnsupportedMediaTypeError
 
 _ENV_URL = os.environ.get("WEBDAV_TEST_NGINX_URL")
 _MISSING = [] if _ENV_URL else nginx_instance.missing_prerequisites()
@@ -397,3 +405,74 @@ def test_nginx_download_fileobj_resumes_after_a_seek(nginx_client: FileSystem) -
         full = reader.read()
     assert first_half == b"abcde"
     assert full == b"abcdefghij"
+
+
+# ---------------------------------------------------------------------------
+# Extended MKCOL, 423 response shape, clean nested delete
+# ---------------------------------------------------------------------------
+
+
+def test_nginx_extended_mkcol_is_refused_with_415(nginx_client: FileSystem) -> None:
+    """A server that doesn't support RFC 5689 answers 415, same as Apache."""
+    with pytest.raises(UnsupportedMediaTypeError):
+        nginx_client.mkdir(
+            "compliance/special", set_props={"displayname": "Special Dir"}
+        )
+
+
+def test_nginx_423_response_is_never_crashed_on_even_without_a_structured_error_body(
+    nginx_client: FileSystem,
+) -> None:
+    """nginx's 423 has no body at all, not even HTML - error_codes must degrade to empty, not raise."""
+    nginx_client.upload_fileobj(io.BytesIO(b"x"), "compliance/errbody.txt")
+    assert _Nginx.url is not None  # set by _nginx_session above
+    other = FileSystem(_Nginx.url, auth=_Nginx.auth)
+    try:
+        with nginx_client.locked("compliance/errbody.txt", scope=EXCLUSIVE):
+            other_session = other.session
+            response = other_session.put(
+                "compliance/errbody.txt", b"y", raise_on_error=False
+            )
+            assert response.status_code == 423
+            with pytest.raises(ResourceLockedError) as exc_info:
+                response.raise_for_status()
+            assert exc_info.value.error_codes == frozenset()
+    finally:
+        other.close()
+
+
+def test_nginx_a_clean_delete_of_a_nested_collection_is_204(
+    nginx_client: FileSystem,
+) -> None:
+    nginx_client.mkdir("compliance/cleandel")
+    nginx_client.mkdir("compliance/cleandel/sub")
+    nginx_client.remove("compliance/cleandel")
+    assert not nginx_client.exists("compliance/cleandel")
+
+
+# ---------------------------------------------------------------------------
+# PROPPATCH and getetag: two things nginx-dav-ext simply does not have
+# ---------------------------------------------------------------------------
+
+
+def test_nginx_does_not_support_proppatch_at_all(nginx_client: FileSystem) -> None:
+    """Confirmed against a real instance, two ways: PROPPATCH is not even
+    a legal value for nginx-dav-ext's own ``dav_ext_methods`` directive
+    (``nginx -t`` refuses it outright), and the method gets a plain
+    ``405`` from nginx's core regardless. Unlike the other nginx
+    limitations here, there is no partial support to speak of - PROPPATCH
+    is entirely absent.
+    """
+    nginx_client.upload_fileobj(io.BytesIO(b"x"), "compliance/noproppatch.txt")
+    with pytest.raises(HTTPStatusError) as exc_info:
+        nginx_client.set_props(
+            "compliance/noproppatch.txt", set_props={"displayname": "won't work"}
+        )
+    assert exc_info.value.status_code == 405
+
+
+def test_nginx_propfind_never_returns_an_etag(nginx_client: FileSystem) -> None:
+    """Confirmed against a real instance: no resource, of any kind, gets a getetag property back."""
+    nginx_client.upload_fileobj(io.BytesIO(b"x"), "compliance/noetag.txt")
+    props = nginx_client.get_props("compliance/noetag.txt")
+    assert props.etag is None

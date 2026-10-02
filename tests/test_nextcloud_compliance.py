@@ -36,6 +36,8 @@ import pytest
 from tests import nextcloud_instance
 from webdav import (
     FileSystem,
+    HTTPStatusError,
+    MultiStatusError,
     ResourceAlreadyExistsError,
     ResourceConflictError,
     ResourceLockedError,
@@ -611,3 +613,94 @@ def test_nextcloud_if_match_with_a_stale_etag_is_refused(nc_client: FileSystem) 
     buf = io.BytesIO()
     nc_client.download_fileobj("compliance/etagstale.txt", buf)
     assert buf.getvalue() == b"v1"
+
+
+# ---------------------------------------------------------------------------
+# Extended MKCOL, ETag strength, 423 response shape, clean nested delete,
+# PROPPATCH of a protected property
+# ---------------------------------------------------------------------------
+
+
+def test_nextcloud_extended_mkcol_is_refused_with_400(nc_client: FileSystem) -> None:
+    """A server that doesn't support RFC 5689 refuses it - confirmed as a plain 400 here, not Apache's 415.
+
+    SabreDAV's own error names this directly
+    (``Sabre\\DAV\\Exception\\BadRequest``: "the mkcol request must include
+    a {DAV:}resourcetype property") - a different, equally valid way for a
+    server to say "I don't understand this extended body", not something
+    this library's own `415` expectation (pinned for Apache) generalizes to.
+    """
+    with pytest.raises(HTTPStatusError) as exc_info:
+        nc_client.mkdir(
+            "compliance/special", set_props={"displayname": "Special Dir"}
+        )
+    assert exc_info.value.status_code == 400
+
+
+def test_nextcloud_default_getetag_is_strong(nc_client: FileSystem) -> None:
+    """Unlike Apache's weak-by-default getetag, confirmed against a real instance: Nextcloud's is strong.
+
+    `If-Match` with it therefore works directly, with no client-side
+    `ValueError` the way Apache's weak default triggers (see
+    `test_apache_default_getetag_is_weak_so_if_match_with_it_is_refused_client_side`).
+    """
+    session: Session = nc_client._session
+    session.put("compliance/strongetag.txt", b"v1").raise_for_status()
+    props = nc_client.get_props("compliance/strongetag.txt", props=["etag"])
+    assert props.etag is not None
+    assert not props.etag.startswith("W/")
+    session.put(
+        "compliance/strongetag.txt", b"v2", if_match=props.etag
+    ).raise_for_status()
+
+
+def test_nextcloud_423_response_has_a_structured_error_body(
+    nc_client: FileSystem,
+) -> None:
+    """Unlike Apache's plain-HTML 423, confirmed against a real instance: Nextcloud's carries a real precondition code.
+
+    `error_codes` surfaces SabreDAV's own ``lock-token-submitted`` here -
+    this library's `error_codes` parsing degrading gracefully for Apache's
+    bodyless case (see the matching Apache test) does not mean every
+    server is that minimal.
+    """
+    nc_client.upload_fileobj(io.BytesIO(b"x"), "compliance/errbody.txt")
+    assert _Nextcloud.url is not None  # set by _nextcloud_session above
+    other = FileSystem(_Nextcloud.url, auth=_Nextcloud.auth)
+    try:
+        with nc_client.locked("compliance/errbody.txt", scope=EXCLUSIVE):
+            other_session = other.session
+            response = other_session.put(
+                "compliance/errbody.txt", b"y", raise_on_error=False
+            )
+            assert response.status_code == 423
+            with pytest.raises(ResourceLockedError) as exc_info:
+                response.raise_for_status()
+            assert "lock-token-submitted" in exc_info.value.error_codes
+    finally:
+        other.close()
+
+
+def test_nextcloud_a_clean_delete_of_a_nested_collection_is_204(
+    nc_client: FileSystem,
+) -> None:
+    nc_client.mkdir("compliance/cleandel")
+    nc_client.mkdir("compliance/cleandel/sub")
+    nc_client.remove("compliance/cleandel")
+    assert not nc_client.exists("compliance/cleandel")
+
+
+def test_nextcloud_proppatch_of_a_protected_property_fails_with_a_real_error_body(
+    nc_client: FileSystem,
+) -> None:
+    """getcontentlength is server-maintained (§15.4) - confirmed here that Nextcloud actually refuses to let a client set it."""
+    nc_client.upload_fileobj(io.BytesIO(b"x"), "compliance/protected_prop.txt")
+    with pytest.raises(MultiStatusError) as exc_info:
+        nc_client.set_props(
+            "compliance/protected_prop.txt", set_props={"getcontentlength": "999"}
+        )
+    assert "getcontentlength" in next(iter(exc_info.value.statuses))
+    props = nc_client.get_props(
+        "compliance/protected_prop.txt", props=["content_length"]
+    )
+    assert props.content_length == 1

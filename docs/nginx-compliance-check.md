@@ -142,6 +142,19 @@ Confirmed against a real instance, not assumed from documentation:
   `<D:lockscope>` entirely. A real interop footgun: a caller asking for
   `scope=SHARED` against nginx believes it holds a shared lock and does
   not. Pinned by `test_nginx_silently_grants_a_shared_lock_request_as_exclusive`.
+- **`PROPPATCH` is not supported at all** - not a partial limitation like
+  the others, it's simply absent: `PROPPATCH` isn't even a legal value
+  for nginx-dav-ext's own `dav_ext_methods` directive (`nginx -t` refuses
+  the config outright), and the method itself gets a plain `405` from
+  nginx's HTTP core. Pinned by `test_nginx_does_not_support_proppatch_at_all`.
+- **PROPFIND never returns a `getetag` property**, for any resource -
+  confirmed empirically, not just for one file. `get_props(...).etag` is
+  always `None` against nginx. Pinned by `test_nginx_propfind_never_returns_an_etag`.
+- **A locked-resource conflict (`423`) has no response body at all**
+  (`Content-Length: 0`), not even Apache's plain HTML - `error_codes`
+  degrades to an empty set here too, for a different underlying reason
+  than Apache's unstructured-but-present body. Pinned by
+  `test_nginx_423_response_is_never_crashed_on_even_without_a_structured_error_body`.
 
 Each is pinned by a dedicated test rather than silently assumed to stay
 true forever - a future nginx-dav-ext release that fixes any of these
