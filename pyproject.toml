@@ -35,6 +35,7 @@ fsspec = [ "fsspec>=2024.12.0" ]
 
 [project.urls]
 Homepage = "https://github.com/manfred-kaiser/webdav-rfc4918"
+Documentation = "https://webdav.readthedocs.io"
 Changelog = "https://github.com/manfred-kaiser/webdav-rfc4918/blob/main/CHANGELOG.md"
 Source = "https://github.com/manfred-kaiser/webdav-rfc4918"
 Tracker = "https://github.com/manfred-kaiser/webdav-rfc4918/issues"

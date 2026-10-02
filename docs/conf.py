@@ -15,6 +15,7 @@ copyright = (  # noqa: A001 # pylint: disable=redefined-builtin
     f"{datetime.datetime.now(tz=datetime.UTC).year}, {author}"
 )
 version = __version__
+html_baseurl = "https://webdav.readthedocs.io/"
 
 extensions = [
     "sphinx_copybutton",
