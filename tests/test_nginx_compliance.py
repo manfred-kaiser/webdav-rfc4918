@@ -276,11 +276,22 @@ def test_nginx_a_race_to_create_a_collection_has_one_winner(
 def test_nginx_copy_of_a_nested_collection_duplicates_the_whole_subtree(
     nginx_client: FileSystem,
 ) -> None:
+    """nginx's dav_module requires a trailing slash on *both* URIs to COPY/MOVE a collection.
+
+    Confirmed against a real instance: the identical request without a
+    trailing slash on the source and ``Destination`` gets a plain ``400
+    Bad Request`` - not a recursion limit, a stricter URI requirement
+    than Apache/wsgidav/Nextcloud enforce. ``resolve_url()`` already
+    preserves a caller-given trailing slash end to end (see its
+    docstring: "a trailing / says this is a collection"), so this is a
+    matter of calling ``copy``/``move`` the way nginx needs, not a
+    library gap.
+    """
     nginx_client.mkdir("compliance/nestedsrc")
     nginx_client.mkdir("compliance/nestedsrc/sub")
     nginx_client.upload_fileobj(io.BytesIO(b"a"), "compliance/nestedsrc/a.txt")
     nginx_client.upload_fileobj(io.BytesIO(b"b"), "compliance/nestedsrc/sub/b.txt")
-    nginx_client.copy("compliance/nestedsrc", "compliance/nesteddst")
+    nginx_client.copy("compliance/nestedsrc/", "compliance/nesteddst/")
     buf = io.BytesIO()
     nginx_client.download_fileobj("compliance/nesteddst/sub/b.txt", buf)
     assert buf.getvalue() == b"b"
@@ -290,10 +301,11 @@ def test_nginx_copy_of_a_nested_collection_duplicates_the_whole_subtree(
 def test_nginx_move_of_a_nested_collection_relocates_the_whole_subtree(
     nginx_client: FileSystem,
 ) -> None:
+    """Same trailing-slash requirement as the COPY case above."""
     nginx_client.mkdir("compliance/movesrc")
     nginx_client.mkdir("compliance/movesrc/sub")
     nginx_client.upload_fileobj(io.BytesIO(b"a"), "compliance/movesrc/sub/a.txt")
-    nginx_client.move("compliance/movesrc", "compliance/movedst")
+    nginx_client.move("compliance/movesrc/", "compliance/movedst/")
     assert not nginx_client.exists("compliance/movesrc")
     buf = io.BytesIO()
     nginx_client.download_fileobj("compliance/movedst/sub/a.txt", buf)
@@ -308,7 +320,7 @@ def test_nginx_move_overwrites_an_existing_destination_collection_when_told_to(
     nginx_client.upload_fileobj(io.BytesIO(b"new"), "compliance/ovsrc/new.txt")
     nginx_client.mkdir("compliance/ovdst")
     nginx_client.upload_fileobj(io.BytesIO(b"stale"), "compliance/ovdst/stale.txt")
-    nginx_client.move("compliance/ovsrc", "compliance/ovdst", overwrite=True)
+    nginx_client.move("compliance/ovsrc/", "compliance/ovdst/", overwrite=True)
     assert nginx_client.exists("compliance/ovdst/new.txt")
     assert not nginx_client.exists("compliance/ovdst/stale.txt")
 

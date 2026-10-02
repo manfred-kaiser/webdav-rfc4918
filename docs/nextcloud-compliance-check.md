@@ -89,6 +89,23 @@ pinned version's behavior; if a future image bump lands on a release
 where this regresses, these tests catch it rather than it being silently
 assumed away.
 
+## Known limitations in locking support, beyond the version gap above
+
+Confirmed against a real instance, not assumed from Apache's own behavior:
+
+- **A recursive DELETE does not check a locked member's token at all.**
+  Apache answers this with `207 Multi-Status` (the locked member blocks
+  the delete); Nextcloud deletes the whole collection, locked member
+  included, with a plain `204`. Pinned by
+  `test_nextcloud_deleting_a_collection_does_not_check_a_locked_members_token`.
+- **An invalid UNLOCK token gets a bare `500 Internal Server Error`**,
+  not a `4xx`. The real lock is still safe (not released by the bogus
+  request) - just the error status is wrong. Pinned by
+  `test_nextcloud_unlock_by_a_different_client_without_the_token_fails`.
+- **`lockdiscovery`/`supportedlock` are not part of an `allprop`
+  response** - unlike Apache, they have to be asked for by name. Pinned
+  by `test_nextcloud_lockdiscovery_and_supportedlock_are_parsed_from_a_live_response`.
+
 ## Image tag policy
 
 The exact Nextcloud image tag (`tests/nextcloud_instance.py`'s `IMAGE`) is
