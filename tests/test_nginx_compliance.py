@@ -4,14 +4,20 @@ Runs as its own GitHub Actions workflow (.github/workflows/nginx-compliance.yml,
 separate from ci.yml and apache-compliance.yml - see
 docs/nginx-compliance-check.md) - nginx's own ``ngx_http_dav_module`` plus
 ``nginx-dav-ext-module`` is a real, independent WebDAV implementation,
-useful here specifically because it only implements *exclusive* locks
-(RFC 4918 sec. 7's shared-lock support is simply not there), unlike Apache
-(tested in ``test_apache_compliance.py``) and wsgidav (the main suite),
-which both support both lock scopes. Skipped only when no nginx is
-reachable: with ``WEBDAV_TEST_NGINX_URL`` set, these tests run against
-that (possibly remote) instance; otherwise, if a local nginx + dav-ext
-install is found (see ``tests/nginx_instance.py``), a throwaway instance
-is started and stopped automatically.
+useful here specifically for the real limitations it has that Apache
+(tested in ``test_apache_compliance.py``), wsgidav (the main suite) and
+Nextcloud (``test_nextcloud_compliance.py``) do not share, confirmed
+against a real instance, not assumed from documentation:
+
+- its ``DAV:`` header lists only class ``2``, never ``1``;
+- it never evaluates ``If-None-Match`` on PUT (no overwrite protection);
+- a requested *shared* lock is silently granted as *exclusive* instead of
+  being refused or honored.
+
+Skipped only when no nginx is reachable: with ``WEBDAV_TEST_NGINX_URL``
+set, these tests run against that (possibly remote) instance; otherwise,
+if a local nginx + dav-ext install is found (see ``tests/nginx_instance.py``),
+a throwaway instance is started and stopped automatically.
 """
 
 import io
@@ -23,12 +29,7 @@ from tempfile import gettempdir
 import pytest
 
 from tests import nginx_instance
-from webdav import (
-    FileSystem,
-    ResourceAlreadyExistsError,
-    ResourceLockedError,
-    WebDAVError,
-)
+from webdav import FileSystem, ResourceLockedError
 from webdav.dav.locks import EXCLUSIVE, SHARED
 
 _ENV_URL = os.environ.get("WEBDAV_TEST_NGINX_URL")
@@ -92,10 +93,20 @@ def nginx_client() -> Iterator[FileSystem]:
 # ---------------------------------------------------------------------------
 
 
-def test_nginx_advertises_class_2(nginx_client: FileSystem) -> None:
+def test_nginx_advertises_class_2_but_not_class_1(nginx_client: FileSystem) -> None:
+    """nginx-dav-ext's ``DAV:`` header lists only ``2``, never ``1`` - confirmed against a real instance.
+
+    RFC 4918 sec. 18 requires class 2 compliance to also be class 1
+    compliant, and §10.1 says the header should reflect every class a
+    resource supports - this is nginx-dav-ext not fully following that,
+    not a startup race (reproduced 7/7 times, including immediately after
+    a fresh restart). The server's actual *behavior* is still class 1
+    (MKCOL/PUT/DELETE/COPY/MOVE all work - see the round-trip tests below);
+    only the advertised header is incomplete.
+    """
     compliances = nginx_client.dav_compliance()
-    assert "1" in compliances
     assert "2" in compliances, "server does not advertise Class 2 (locking) support"
+    assert "1" not in compliances
 
 
 def test_nginx_mkdir_upload_download_roundtrip(nginx_client: FileSystem) -> None:
@@ -118,12 +129,22 @@ def test_nginx_move_and_copy_roundtrip(nginx_client: FileSystem) -> None:
     assert not nginx_client.exists("compliance/copied.txt")
 
 
-def test_nginx_overwrite_protection(nginx_client: FileSystem) -> None:
+def test_nginx_does_not_honor_overwrite_protection(nginx_client: FileSystem) -> None:
+    """nginx's plain ``ngx_http_dav_module`` never evaluates ``If-None-Match`` on PUT.
+
+    Confirmed against a real instance: ``overwrite=False`` sends
+    ``If-None-Match: *``, same as against Apache/wsgidav/Nextcloud, but
+    nginx answers ``204`` and overwrites anyway instead of ``412``. Pinned
+    as a known, real interop gap - a caller relying on this library's
+    race-free overwrite protection does not get it against nginx-dav-ext.
+    """
     nginx_client.upload_fileobj(io.BytesIO(b"v1"), "compliance/protected.txt")
-    with pytest.raises(ResourceAlreadyExistsError):
-        nginx_client.upload_fileobj(
-            io.BytesIO(b"v2"), "compliance/protected.txt", overwrite=False
-        )
+    nginx_client.upload_fileobj(
+        io.BytesIO(b"v2"), "compliance/protected.txt", overwrite=False
+    )
+    buf = io.BytesIO()
+    nginx_client.download_fileobj("compliance/protected.txt", buf)
+    assert buf.getvalue() == b"v2"
 
 
 # ---------------------------------------------------------------------------
@@ -163,17 +184,18 @@ def test_nginx_exclusive_lock_blocks_a_second_client(nginx_client: FileSystem) -
         other.close()
 
 
-def test_nginx_does_not_support_shared_locks(nginx_client: FileSystem) -> None:
-    """nginx-dav-ext only implements exclusive locks (RFC 4918 sec. 7 shared locks: absent).
+def test_nginx_silently_grants_a_shared_lock_request_as_exclusive(
+    nginx_client: FileSystem,
+) -> None:
+    """nginx-dav-ext ignores the requested lockscope and always grants an exclusive lock.
 
-    Pinned as a documented limitation of this server, not a client-side
-    assumption - a future nginx-dav-ext release that adds shared-lock
-    support would turn this test red, which is exactly the point of
-    having it here rather than silently assuming the gap stays forever.
+    Confirmed against a real instance: a LOCK request with
+    ``<D:lockscope><D:shared/></D:lockscope>`` gets a ``200`` with a token,
+    not refused - but the granted lock's own ``<D:lockscope>`` in the
+    response is ``<D:exclusive/>``, not what was asked for. A real interop
+    footgun worth pinning explicitly: a caller requesting ``scope=SHARED``
+    against nginx believes it holds a shared lock and does not.
     """
     nginx_client.upload_fileobj(io.BytesIO(b"v1"), "compliance/shared.txt")
-    with (
-        pytest.raises(WebDAVError),
-        nginx_client.locked("compliance/shared.txt", scope=SHARED),
-    ):
-        pass
+    with nginx_client.locked("compliance/shared.txt", scope=SHARED) as active_lock:
+        assert active_lock.scope == EXCLUSIVE

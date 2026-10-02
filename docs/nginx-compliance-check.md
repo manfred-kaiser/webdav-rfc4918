@@ -5,10 +5,10 @@
 `mod_dav` instance (see `docs/apache-compliance-check.md`).
 `tests/test_nginx_compliance.py` adds a third, independent implementation:
 nginx's own `ngx_http_dav_module` plus the `nginx-dav-ext-module`
-(PROPFIND/PROPPATCH/OPTIONS/LOCK/UNLOCK). Worth having specifically because
-this combination only implements *exclusive* locks - RFC 4918 sec. 7's
-shared-lock support is simply not there, unlike Apache and wsgidav (both
-Class 2, both scopes). Same opt-in shape as the Apache suite:
+(PROPFIND/PROPPATCH/OPTIONS/LOCK/UNLOCK). Worth having specifically for
+the real limitations it has that Apache, wsgidav and Nextcloud don't share
+(see "Known limitations" below) - confirmed against a real instance, not
+assumed. Same opt-in shape as the Apache suite:
 
 - **If nginx + the dav-ext module are installed** (see
   `tests/nginx_instance.py`), running `pytest` - the whole suite, or just
@@ -122,10 +122,27 @@ via `@pytest.mark.xdist_group(name="nginx")` plus this project's
 `--dist=loadgroup` config - safe to just run `pytest` (`-nauto` and all)
 without thinking about it.
 
-## Known limitation
+## Known limitations
 
-**Shared locks are not supported.** `nginx-dav-ext-module` only implements
-*exclusive* locks - a `LOCK` request with `<D:shared/>` fails. Pinned by
-`test_nginx_does_not_support_shared_locks`, so a future module release
-that adds shared-lock support is noticed, not silently assumed to still
-be missing.
+Confirmed against a real instance, not assumed from documentation:
+
+- **`DAV:` header lists only class `2`, never `1`.** Reproduced
+  consistently (immediately after start, after a restart, repeatedly) -
+  not a startup race. The server's actual *behavior* is still class 1
+  (MKCOL/PUT/DELETE/COPY/MOVE all work); only the advertised header is
+  incomplete, which is itself worth knowing if anything inspects
+  `dav_compliance()` to decide what a server can do. Pinned by
+  `test_nginx_advertises_class_2_but_not_class_1`.
+- **No overwrite protection.** `ngx_http_dav_module` never evaluates
+  `If-None-Match` on `PUT` - `overwrite=False` silently overwrites instead
+  of refusing with `412`. Pinned by
+  `test_nginx_does_not_honor_overwrite_protection`.
+- **A shared lock request is silently granted as exclusive**, not refused
+  and not honored as shared. `nginx-dav-ext-module` ignores the requested
+  `<D:lockscope>` entirely. A real interop footgun: a caller asking for
+  `scope=SHARED` against nginx believes it holds a shared lock and does
+  not. Pinned by `test_nginx_silently_grants_a_shared_lock_request_as_exclusive`.
+
+Each is pinned by a dedicated test rather than silently assumed to stay
+true forever - a future nginx-dav-ext release that fixes any of these
+would turn the matching test red, which is the point.
