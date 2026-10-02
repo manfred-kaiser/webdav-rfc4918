@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `webdav`/`webdavs` are now registered with fsspec via its `fsspec.specs` entry point.
+
 ## [1.0.0] - 2026-10-01
 
 The first release.

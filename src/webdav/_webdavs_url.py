@@ -1,4 +1,4 @@
-"""The server a ``webdavs://host[:port]/path`` URL of the fsspec filesystem names.
+"""The server a ``webdav(s)://host[:port]/path`` URL of the fsspec filesystem names.
 
 fsspec lets a URL carry what a filesystem is made with (``sftp://user@host:22/path``): a
 backend takes it out in ``_get_kwargs_from_urls`` and leaves the path in ``_strip_protocol``.
@@ -8,21 +8,52 @@ from urllib.parse import urlsplit
 
 from webdav.url_safety import redact_url
 
-#: What a URL of the filesystem starts with. Only what follows it can name a server.
-SCHEME = "webdavs://"
+#: The two schemes the fsspec filesystem accepts, and the transport each implies
+#: when a URL names a host without a ``base_url`` - same convention as the CLI's
+#: own ``_SCHEME_MAPPING`` (``webdav``/``dav`` are plain HTTP, ``webdavs``/``davs``
+#: are TLS, like ``ftp``/``ftps``).
+_TRANSPORTS = {"webdav": "http", "webdavs": "https"}
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
-def authority_of(path: str) -> "tuple[str, str]":
-    """``(authority, path)`` of a ``webdavs://host[:port]/path`` URL; ``("", path)`` of anything else.
+def _scheme_and_rest(path: str) -> "tuple[str, str] | None":
+    """The matching scheme and what follows ``scheme://`` in ``path``, or ``None``."""
+    for scheme in _TRANSPORTS:
+        prefix = f"{scheme}://"
+        if path.startswith(prefix):
+            return scheme, path[len(prefix) :]
+    return None
 
-    Only what follows ``webdavs://`` is an authority: ``//a/b`` and ``a/b`` are paths.
+
+def authority_of(path: str) -> "tuple[str, str]":
+    """``(authority, path)`` of a ``webdav(s)://host[:port]/path`` URL; ``("", path)`` otherwise.
+
+    Only what follows ``webdav://``/``webdavs://`` is an authority: ``//a/b`` and ``a/b`` are paths.
     """
-    if not path.startswith(SCHEME):
+    found = _scheme_and_rest(path)
+    if found is None:
         return "", path
-    authority, slash, rest = path[len(SCHEME) :].partition("/")
-    return authority, slash + rest
+    _, rest = found
+    authority, slash, tail = rest.partition("/")
+    return authority, slash + tail
+
+
+def transport_of(path: str) -> "str | None":
+    """The transport (``"http"``/``"https"``) a ``webdav(s)://...`` URL implies, or ``None``.
+
+    ``None`` means ``path`` does not start with either scheme - not that there is no host.
+    """
+    found = _scheme_and_rest(path)
+    return _TRANSPORTS[found[0]] if found else None
+
+
+_SCHEMES_BY_TRANSPORT = {transport: scheme for scheme, transport in _TRANSPORTS.items()}
+
+
+def scheme_for(transport: str) -> str:
+    """``"webdav"``/``"webdavs"`` for ``"http"``/``"https"`` - the reverse of :func:`transport_of`."""
+    return _SCHEMES_BY_TRANSPORT[transport]
 
 
 def host_and_port(authority: str) -> "tuple[str, int | None]":
@@ -50,13 +81,17 @@ def host_and_port(authority: str) -> "tuple[str, int | None]":
 
 
 def server_url(
-    base_url: "str | None", host: "str | None", port: "int | None"
+    base_url: "str | None",
+    host: "str | None",
+    port: "int | None",
+    transport: str = "https",
 ) -> "str | None":
-    """The ``base_url`` for what a URL named: the ``host`` and ``port`` of ``webdavs://host:port/path``.
+    """The ``base_url`` for what a URL named: the ``host`` and ``port`` of ``webdav(s)://host:port/path``.
 
-    ``webdavs`` is WebDAV over TLS: without a ``base_url`` the server is ``https://host:port``
-    (a plain-http one is reached through its ``base_url``). With one, it stays - the URL may
-    only name the same server, never redirect to another.
+    Without a ``base_url`` the server is ``{transport}://host:port`` - ``https`` for a
+    ``webdavs://`` URL, ``http`` for a ``webdav://`` one (see ``_get_kwargs_from_urls``,
+    which works out ``transport`` from the URL actually given). With a ``base_url``, it
+    stays - the URL may only name the same server, never redirect to another.
 
     Raises:
         ValueError: ``base_url`` is another server than the one the URL names.
@@ -66,7 +101,7 @@ def server_url(
         return base_url
     if base_url is None:
         name = f"[{host}]" if ":" in host else host
-        return f"https://{name}" + (f":{port}" if port else "")
+        return f"{transport}://{name}" + (f":{port}" if port else "")
     given = urlsplit(base_url)
     if (given.hostname or "").lower() != host.lower() or (
         port is not None and port != (given.port or _DEFAULT_PORTS.get(given.scheme))

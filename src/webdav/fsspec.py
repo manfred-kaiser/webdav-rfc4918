@@ -5,26 +5,44 @@ storage-backend interface in the Python data ecosystem - wrapping the
 client this way is what lets other projects (pandas, dask, ...) read/write
 a WebDAV server without knowing anything WebDAV-specific.
 
-Importing this module registers ``"webdavs"`` with fsspec
-(:func:`fsspec.register_implementation`) - deliberately not ``"webdav"``,
-which fsspec's own registry already maps to ``webdav4`` by default; see the
-module's own docstring note below for why that one is left alone.
+Installing this package registers both ``"webdav"`` and ``"webdavs"`` with fsspec
+through the ``fsspec.specs`` entry point (see ``pyproject.toml``) - fsspec's own
+officially recommended way for a third-party backend to announce itself
+(https://filesystem-spec.readthedocs.io/en/latest/developer.html#implementing-a-backend).
+``fsspec.filesystem("webdav"/"webdavs", ...)`` and
+``fsspec.open("webdav://..."/"webdavs://...")`` work without ever importing this
+module (``clobber=True``, like every entry-point registration fsspec itself
+processes - this claims both names outright rather than deferring to whatever
+fsspec's registry already has for them). The explicit
+:func:`fsspec.register_implementation` call at the bottom of this module is a
+narrower fallback, for the rarer case where this package is used without its
+installed entry-point metadata (e.g. vendored, or run straight from a source
+checkout on ``PYTHONPATH``) - it only ever claims ``"webdavs"``, which has no
+competing claim anywhere: a plain ``import webdav.fsspec`` silently winning
+``"webdav"`` away from whatever already claimed it would be a different,
+more surprising thing than the deliberate, opt-in entry-point registration above.
 
 Paths. A filesystem is bound to one server, through its ``base_url``, and its
 paths are those of the server: they start at ``/``, the root of the ``base_url``
 (``root_marker``), as they do for ``LocalFileSystem`` or ``MemoryFileSystem``.
-fsspec leaves the normalising of a path to ``_strip_protocol``: here it removes
-the ``webdavs://`` prefix and a trailing ``/`` and makes the path absolute, so
-``a/b``, ``/a/b`` and ``webdavs:///a/b`` are one path and the root is ``/``. There
-is no working directory. ``.``, ``..`` and ``//`` inside a path are resolved, and a
-path that would leave the ``base_url`` is refused by the session. The names ``ls``
-and ``info`` return are exactly what ``_strip_protocol`` returns for them, so
-every name can be handed back to any method.
+This also sidesteps a bug in fsspec's own bulk-copy helpers, for a top-level
+path with no ``/`` at all, that a ``root_marker == ""`` filesystem can hit (see
+fsspec/filesystem_spec#2215). fsspec leaves the normalising of a path to
+``_strip_protocol``: here it removes the ``webdav://``/``webdavs://`` prefix and a
+trailing ``/`` and makes the path absolute, so ``a/b``, ``/a/b`` and
+``webdavs:///a/b`` are one path and the root is ``/``. There is no working
+directory. ``.``, ``..`` and ``//`` inside a path are resolved, and a path that
+would leave the ``base_url`` is refused by the session. The names ``ls`` and
+``info`` return are exactly what ``_strip_protocol`` returns for them, so every
+name can be handed back to any method.
 
-A URL may name the server, as ``sftp://host/path`` does: ``webdavs://host[:port]/path``
-gives fsspec the ``host`` and ``port`` (``_get_kwargs_from_urls``), and they are not part of
-the path. ``webdavs`` is WebDAV over TLS, so without a ``base_url`` that is ``https://host``;
-with one, the URL has to name the same server. Credentials in a URL are refused.
+A URL may name the server, as ``sftp://host/path`` does: ``webdav(s)://host[:port]/path``
+gives fsspec the ``host``/``port``/``transport`` (``_get_kwargs_from_urls``), and they are
+not part of the path. ``webdavs`` is WebDAV over TLS, ``webdav`` plain HTTP - like
+``ftps``/``ftp`` - so without a ``base_url`` that is ``https://host`` or ``http://host``
+respectively; with one, the URL has to name the same server (its own scheme does not have
+to match - a ``webdav://`` URL against an ``https://`` ``base_url`` is fine). Credentials in
+a URL are refused.
 """
 
 import errno
@@ -43,6 +61,7 @@ from typing import (
     cast,
     overload,
 )
+from urllib.parse import urlsplit
 
 import fsspec
 from fsspec import Callback
@@ -51,7 +70,13 @@ from fsspec.utils import stringify_path
 
 from webdav._fsspec_ranges import UNKNOWN, fetch_range
 from webdav._fsspec_support import absolute, info_of, is_root, translate_exceptions
-from webdav._webdavs_url import SCHEME, authority_of, host_and_port, server_url
+from webdav._webdavs_url import (
+    authority_of,
+    host_and_port,
+    scheme_for,
+    server_url,
+    transport_of,
+)
 from webdav.dav.fs_utils import peek_filelike_length
 from webdav.exceptions import (
     ForbiddenError,
@@ -93,12 +118,11 @@ def _tuple_from_json(value: Any) -> Any:
 class WebdavFileSystem(AbstractFileSystem):
     """Provides access to a WebDAV server through the fsspec API."""
 
-    # Deliberately not also "webdav": fsspec's own registry already maps that
-    # to webdav4 by default, and this library would rather coexist than
-    # fight over it - see register_implementation() below this class. "dav"/
-    # "davs" (the other real-world spelling, used by GNOME/gvfs) and "webdav"
-    # itself can be added later without touching anything else here.
-    protocol = ("webdavs",)
+    # Both "webdav" and "webdavs" are claimed - see the "fsspec.specs" entry
+    # points in pyproject.toml, which is what actually registers them
+    # (clobber=True, like every entry-point registration fsspec itself
+    # processes), and the module docstring above for why.
+    protocol = ("webdavs", "webdav")
 
     # Paths are WebDAV paths: they start at the root of the server (or of its
     # ``base_url``), ``/``. That is what fsspec's ``root_marker`` is for, and
@@ -121,6 +145,7 @@ class WebdavFileSystem(AbstractFileSystem):
         session: Session | None = None,
         host: "str | None" = None,
         port: "int | None" = None,
+        transport: str = "https",
         **session_opts: Any,
     ) -> None:
         """Instantiate with ``base_url``/``auth``, or an existing ``session``.
@@ -136,11 +161,14 @@ class WebdavFileSystem(AbstractFileSystem):
             session: A pre-built session to use instead (e.g. for mocking,
                 or to reuse a session's connection pool across filesystems);
                 it needs a ``base_url``.
-            host: The host a ``webdavs://host[:port]/path`` URL names - fsspec hands it over
-                (and ``port``) when it opens such a URL, as it does for ``sftp://``. Without
-                a ``base_url`` the server is ``https://host[:port]``; with one, the host has
-                to be that server's.
+            host: The host a ``webdav(s)://host[:port]/path`` URL names - fsspec hands it
+                over (and ``port``/``transport``) when it opens such a URL, as it does the
+                host for ``sftp://``. Without a ``base_url`` the server is
+                ``{transport}://host[:port]``; with one, the host has to be that server's.
             port: See ``host``.
+            transport: ``"https"`` (default) or ``"http"`` - the transport a bare ``host``
+                (no ``base_url``) is reached over. fsspec sets this from whichever of
+                ``webdavs://``/``webdav://`` the URL used; irrelevant once ``base_url`` is given.
             session_opts: Extra keyword arguments forwarded to
                 :class:`~webdav.session.Session` - except the options fsspec passes to every
                 filesystem (``asynchronous``, ``loop``, ``use_listings_cache``,
@@ -152,7 +180,10 @@ class WebdavFileSystem(AbstractFileSystem):
 
         """
         base_url = server_url(
-            session.base_url if session is not None else base_url, host, port
+            session.base_url if session is not None else base_url,
+            host,
+            port,
+            transport,
         )
         if base_url is None:
             msg = (
@@ -185,14 +216,14 @@ class WebdavFileSystem(AbstractFileSystem):
 
     @classmethod
     def _strip_protocol(cls, path: "str | list[str]") -> "str | list[str]":
-        """Strip the ``webdavs://`` protocol prefix, and make the path absolute.
+        """Strip the ``webdav://``/``webdavs://`` protocol prefix, and make the path absolute.
 
         Every path has its leading ``/`` (``root_marker``): ``/d`` and ``d`` are
         one path, and the root is ``/``. ``path`` is a list for some callers
         (``rm([...])``, ``cp`` with several sources) - the base implementation
         already recurses for that case, so the result is the same shape as the input.
 
-        The server of a ``webdavs://host[:port]/path`` URL is not part of the path (see
+        The server of a ``webdav(s)://host[:port]/path`` URL is not part of the path (see
         :meth:`_get_kwargs_from_urls`) - and neither is a user or password in it, which
         are refused.
         """
@@ -207,11 +238,13 @@ class WebdavFileSystem(AbstractFileSystem):
 
     @staticmethod
     def _get_kwargs_from_urls(path: str) -> "dict[str, Any]":
-        """``host`` and ``port`` of a ``webdavs://host[:port]/path`` URL, as for ``sftp://``.
+        """``host``/``port``/``transport`` of a ``webdav(s)://host[:port]/path`` URL, as for ``sftp://``.
 
-        fsspec calls this with every URL before it makes the filesystem, and
-        :meth:`_strip_protocol` takes them out of the path afterwards. A URL without a host
-        (``webdavs:///path``) gives nothing: the server is then the ``base_url``.
+        ``transport`` is ``"https"`` for a ``webdavs://`` URL, ``"http"`` for a ``webdav://``
+        one - see :class:`WebdavFileSystem`'s own ``transport`` argument. fsspec calls this
+        with every URL before it makes the filesystem, and :meth:`_strip_protocol` takes
+        these out of the path afterwards. A URL without a host (``webdavs:///path``) gives
+        nothing: the server is then the ``base_url``.
 
         Raises:
             ValueError: There are credentials in the URL, or its port is not a number.
@@ -221,13 +254,27 @@ class WebdavFileSystem(AbstractFileSystem):
         if not authority:
             return {}
         host, port = host_and_port(authority)
-        return {"host": host, **({"port": port} if port else {})}
+        transport = transport_of(path)
+        return {
+            "host": host,
+            **({"port": port} if port else {}),
+            **({"transport": transport} if transport else {}),
+        }
 
     def unstrip_protocol(self, name: str) -> str:
-        """The URL of ``name``: ``webdavs:///a/b`` - the path is absolute, so ``a`` is no host."""
-        if name.startswith(SCHEME):
+        """The URL of ``name``: ``webdav(s):///a/b`` - the path is absolute, so ``a`` is no host.
+
+        The scheme matches this filesystem's own server: ``webdavs://`` for an ``https://``
+        ``base_url``, ``webdav://`` for a plain ``http://`` one - whichever of the two names
+        was actually used to reach this server, not necessarily the one it was constructed
+        through (:class:`WebdavFileSystem` accepts either for the same instance).
+        """
+        if transport_of(name) is not None:
             return name
-        return f"{SCHEME}{absolute(name)}"
+        # A live WebdavFileSystem always has one: __init__ refuses to construct it without.
+        base_url = cast("str", self.filesystem.session.base_url)
+        scheme = scheme_for(urlsplit(base_url).scheme)
+        return f"{scheme}://{absolute(name)}"
 
     def _strip(self, path: str) -> str:
         """``_strip_protocol`` for the common single-path case - everywhere but ``rm``."""
@@ -1036,10 +1083,12 @@ class UploadFile(tempfile.SpooledTemporaryFile):
         )
 
 
-# "webdavs" has no existing claim anywhere in fsspec's registry (unlike
-# "webdav", which fsspec's own known_implementations already maps to
-# webdav4) - this fills an empty slot in fsspec's live registry rather than
-# overriding anyone's. No clobber=True: if something else has already
-# claimed "webdavs" by the time this module is imported, that is a real
-# conflict worth a loud error, not something to silently win.
+# Belt-and-suspenders fallback for the entry-point registration in
+# pyproject.toml (see the module docstring): only matters if this module is
+# imported without that metadata being present. "webdavs" has no existing
+# claim anywhere in fsspec's registry - this fills an empty slot in fsspec's
+# live registry rather than overriding anyone's. No clobber=True: if
+# something else has already claimed "webdavs" by the time this module is
+# imported, that is a real conflict worth a loud error, not something to
+# silently win.
 fsspec.register_implementation("webdavs", WebdavFileSystem)

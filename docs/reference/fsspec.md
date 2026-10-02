@@ -18,19 +18,23 @@ fs.exists("Documents/Readme.md")
 fs.ls("Photos", detail=False)         # ['/Photos/Gorilla.jpg', ...]
 ```
 
-Importing `webdav.fsspec` registers `"webdavs"` with fsspec
-([`fsspec.register_implementation`](https://filesystem-spec.readthedocs.io)),
-so `fsspec.filesystem("webdavs", base_url=..., auth=...)` and
-`fsspec.open("webdavs:///Documents/Readme.md", base_url=..., auth=...)` work right away, same
-as the explicit import above - no separate setup step.
+Installing `webdav-rfc4918[fsspec]` registers both `"webdav"` and `"webdavs"` with fsspec
+through the
+[`fsspec.specs` entry point](https://filesystem-spec.readthedocs.io/en/latest/developer.html#implementing-a-backend)
+(fsspec's own recommended way for a third-party backend to announce itself), so
+`fsspec.filesystem("webdav"/"webdavs", base_url=..., auth=...)` and
+`fsspec.open("webdav://..."/"webdavs://...", auth=...)` work right away - no import needed,
+explicit or otherwise (`clobber=True`, like every entry-point registration fsspec itself
+processes, claims both names outright).
 
 The server is the `base_url`. A URL may also name it, as `sftp://host/path` does:
-`webdavs://host[:port]/path` gives fsspec the `host` (and `port`) to make the filesystem with,
-and they are not part of the path. `webdavs` is WebDAV over TLS, so without a `base_url` the
-server is `https://host[:port]`; a plain-http server is reached through its `base_url`, and the
-URL then only has to name the same server - another host or port is a `ValueError`, never a
-redirect. A user or password in the URL is refused (it would end up in logs and reprs): pass
-`auth=`.
+`webdav(s)://host[:port]/path` gives fsspec the `host`/`port`/transport to make the
+filesystem with, and they are not part of the path. `webdavs` is WebDAV over TLS, `webdav`
+plain HTTP - like `ftps`/`ftp` - so without a `base_url` the server is `https://host[:port]`
+or `http://host[:port]` respectively; with one, the URL only has to name the same server
+(its own scheme need not match - `webdav://` against an `https://` `base_url` is fine) -
+another host or port is a `ValueError`, never a redirect. A user or password in the URL is
+refused (it would end up in logs and reprs): pass `auth=`.
 
 ```python
 import fsspec
@@ -47,8 +51,9 @@ server: they start at `/`, the root of the `base_url` (fsspec's `root_marker`, a
 `/dav/` the root; nothing above it can be reached.
 
 - `a/b`, `/a/b` and `webdavs:///a/b` are one path (fsspec's `_strip_protocol` makes it absolute
-  and drops a trailing `/`); there is no working directory. Only what follows `webdavs://` can be
-  a host: `webdavs://a/b` is the path `/b` on the server `a`, while `//a/b` is the path `/a/b`.
+  and drops a trailing `/`); there is no working directory. Only what follows `webdav://`/
+  `webdavs://` can be a host: `webdavs://a/b` is the path `/b` on the server `a`, while `//a/b`
+  is the path `/a/b`.
 - `.`, `..` and `//` inside a path are resolved; a path that would leave the `base_url` is
   refused with a `ClientError`.
 - The names `ls`, `info`, `find`, `glob` and `walk` return are exactly what `_strip_protocol`
@@ -64,11 +69,18 @@ This differs from {class}`~webdav.fs.client.FileSystem`, whose names are relativ
 `base_url` without the leading `/` (`Photos/Gorilla.jpg`) and which also takes `/Photos`: the
 fsspec name is always `"/" + name`.
 
-**Why `"webdavs"` and not `"webdav"`:** fsspec's own registry already maps
-`"webdav"` to [`webdav4`](https://pypi.org/project/webdav4/) by default -
-this library would rather coexist with that than silently take it over the
-moment it is imported. `"webdavs"` had no existing claim anywhere, so it is
-the uncontested, cooperative starting point.
+**Why both names:** this library claims `"webdav"` and `"webdavs"` outright through the
+officially-sanctioned `fsspec.specs` entry point (`clobber=True`, like every entry-point
+registration fsspec itself processes), having verified full conformance with fsspec's own
+test suite (`fsspec.tests.abstract`; see `tests/test_fsspec_abstract.py`) - including a
+fsspec bug it ran into and reported along the way
+([fsspec/filesystem_spec#2215](https://github.com/fsspec/filesystem_spec/issues/2215),
+partially fixed upstream since as
+[fsspec/filesystem_spec#2217](https://github.com/fsspec/filesystem_spec/pull/2217)). A plain
+`import webdav.fsspec` (without the package being installed with its entry-point metadata)
+only ever claims `"webdavs"`, never `"webdav"` - silently winning a name away from whatever
+already claimed it is a different, more surprising thing than the deliberate, opt-in
+entry-point registration above.
 
 The filesystem follows fsspec's conventions (`ls(path, detail=...)`, `open`, `get`, `put`,
 `rm`, ...), which differ in places from {class}`~webdav.fs.client.FileSystem`, whose `ls` always

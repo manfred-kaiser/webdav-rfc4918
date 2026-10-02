@@ -181,21 +181,37 @@ def test_fsspec_opens_a_url_without_a_host_against_the_given_base_url(
 
 
 # ---------------------------------------------------------------------------
-# A host in the URL names the server: webdavs://host[:port]/path
+# A host in the URL names the server: webdav(s)://host[:port]/path
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     ("url", "path", "options"),
     [
-        ("webdavs://host/d/f", "/d/f", {"host": "host"}),
-        ("webdavs://host:8443/d/f", "/d/f", {"host": "host", "port": 8443}),
-        ("webdavs://HOST", "/", {"host": "HOST"}),
-        ("webdavs://host/", "/", {"host": "host"}),
-        ("webdavs://[::1]:8443/x", "/x", {"host": "::1", "port": 8443}),
-        ("webdavs://host/a/../b/./c", "/b/c", {"host": "host"}),
+        ("webdavs://host/d/f", "/d/f", {"host": "host", "transport": "https"}),
+        (
+            "webdavs://host:8443/d/f",
+            "/d/f",
+            {"host": "host", "port": 8443, "transport": "https"},
+        ),
+        ("webdavs://HOST", "/", {"host": "HOST", "transport": "https"}),
+        ("webdavs://host/", "/", {"host": "host", "transport": "https"}),
+        (
+            "webdavs://[::1]:8443/x",
+            "/x",
+            {"host": "::1", "port": 8443, "transport": "https"},
+        ),
+        ("webdavs://host/a/../b/./c", "/b/c", {"host": "host", "transport": "https"}),
         ("webdavs:///d/f", "/d/f", {}),
         ("webdavs:///", "/", {}),
+        # webdav:// (no "s") is the same, but over plain HTTP
+        ("webdav://host/d/f", "/d/f", {"host": "host", "transport": "http"}),
+        (
+            "webdav://host:8080/d/f",
+            "/d/f",
+            {"host": "host", "port": 8080, "transport": "http"},
+        ),
+        ("webdav:///d/f", "/d/f", {}),
         # without the scheme there is no authority: a leading "//" is a path
         ("//a/b/", "/a/b", {}),
         ("a/b", "/a/b", {}),
@@ -237,6 +253,19 @@ def test_without_a_base_url_the_host_of_the_url_is_the_server_over_tls() -> None
         filesystem.filesystem.close()
     filesystem, path = fsspec.core.url_to_fs("webdavs://dav.example:8443/d/f")
     assert filesystem.filesystem.session.base_url == "https://dav.example:8443"
+
+
+def test_a_plain_webdav_url_reaches_its_host_over_http() -> None:
+    """``webdav://`` (no "s") is plain HTTP, like ``ftp`` vs. ``ftps``.
+
+    ``transport`` defaults to ``"https"`` (for a bare ``host=`` with no URL at all), but
+    fsspec sets it to ``"http"`` itself when the URL is a ``webdav://`` one.
+    """
+    filesystem = WebdavFileSystem(host="dav.example", transport="http")
+    assert filesystem.filesystem.session.base_url == "http://dav.example"
+    filesystem.filesystem.close()
+    filesystem, path = fsspec.core.url_to_fs("webdav://dav.example:8080/d/f")
+    assert filesystem.filesystem.session.base_url == "http://dav.example:8080"
     assert path == "/d/f"
     filesystem.filesystem.close()
 
@@ -343,9 +372,12 @@ def test_a_filesystem_made_from_a_url_survives_serialisation(server_url: str) ->
 
 @pytest.mark.parametrize("name", ["a/b", "/a/b", "./a/../a/b", "//a//b"])
 def test_a_url_is_made_of_the_absolute_path(fs: WebdavFileSystem, name: str) -> None:
-    """``webdavs://a/b`` would name the host ``a``: the round trip has to keep the root."""
+    """``webdav://a/b`` would name the host ``a``: the round trip has to keep the root.
+
+    ``fs`` is plain HTTP, so the round trip uses ``webdav://``, not ``webdavs://``.
+    """
     url = fs.unstrip_protocol(name)
-    assert url == "webdavs:///a/b"
+    assert url == "webdav:///a/b"
     assert fs._strip_protocol(url) == "/a/b"
     assert fs.unstrip_protocol(url) == url
 

@@ -1094,8 +1094,11 @@ def test_fsspec_open_writes_text(server_url: str) -> None:
 def test_unstrip_protocol_is_what_the_url_front_door_accepts(
     fs: WebdavFileSystem,
 ) -> None:
+    # The `fs` fixture's test server is plain HTTP, so the round trip uses
+    # "webdav://", not "webdavs://" - unstrip_protocol() matches the server's
+    # actual transport, not a fixed scheme.
     url = fs.unstrip_protocol("/a/b")
-    assert url == "webdavs:///a/b"
+    assert url == "webdav:///a/b"
     assert fs._strip_protocol(url) == "/a/b"
 
 

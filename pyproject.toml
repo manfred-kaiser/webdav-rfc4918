@@ -25,6 +25,10 @@ dependencies = [ "requests>=2.32.4,<3", "urllib3>=2.7.0,<3" ]
 [project.scripts]
 dav = "webdav.cli:main"
 
+[project.entry-points."fsspec.specs"]
+webdav = "webdav.fsspec:WebdavFileSystem"
+webdavs = "webdav.fsspec:WebdavFileSystem"
+
 [project.optional-dependencies]
 docs = [ "myst-parser", "sphinx", "sphinx-copybutton", "sphinx-rtd-theme" ]
 fsspec = [ "fsspec>=2024.12.0" ]
