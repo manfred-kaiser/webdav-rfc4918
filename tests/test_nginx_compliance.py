@@ -22,6 +22,8 @@ a throwaway instance is started and stopped automatically.
 
 import io
 import os
+import threading
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from tempfile import gettempdir
@@ -29,7 +31,12 @@ from tempfile import gettempdir
 import pytest
 
 from tests import nginx_instance
-from webdav import FileSystem, ResourceLockedError
+from webdav import (
+    FileSystem,
+    ResourceAlreadyExistsError,
+    ResourceConflictError,
+    ResourceLockedError,
+)
 from webdav.dav.locks import EXCLUSIVE, SHARED
 
 _ENV_URL = os.environ.get("WEBDAV_TEST_NGINX_URL")
@@ -199,3 +206,182 @@ def test_nginx_silently_grants_a_shared_lock_request_as_exclusive(
     nginx_client.upload_fileobj(io.BytesIO(b"v1"), "compliance/shared.txt")
     with nginx_client.locked("compliance/shared.txt", scope=SHARED) as active_lock:
         assert active_lock.scope == EXCLUSIVE
+
+
+def test_nginx_delete_of_a_locked_resource_without_the_token_fails(
+    nginx_client: FileSystem,
+) -> None:
+    nginx_client.upload_fileobj(io.BytesIO(b"x"), "compliance/delwrong.txt")
+    assert _Nginx.url is not None  # set by _nginx_session above
+    other = FileSystem(_Nginx.url, auth=_Nginx.auth)
+    try:
+        with (
+            nginx_client.locked("compliance/delwrong.txt", scope=EXCLUSIVE),
+            pytest.raises(ResourceLockedError),
+        ):
+            other.remove("compliance/delwrong.txt")
+    finally:
+        other.close()
+    assert nginx_client.exists("compliance/delwrong.txt")
+
+
+# ---------------------------------------------------------------------------
+# MKCOL negative cases
+# ---------------------------------------------------------------------------
+
+
+def test_nginx_mkcol_on_an_existing_file_is_resourcealreadyexists(
+    nginx_client: FileSystem,
+) -> None:
+    nginx_client.upload_fileobj(io.BytesIO(b"x"), "compliance/plain.txt")
+    with pytest.raises(ResourceAlreadyExistsError):
+        nginx_client.mkdir("compliance/plain.txt")
+
+
+def test_nginx_mkcol_with_a_missing_ancestor_is_a_conflict(
+    nginx_client: FileSystem,
+) -> None:
+    with pytest.raises(ResourceConflictError):
+        nginx_client.mkdir("compliance/nonexistent-parent/child")
+
+
+def test_nginx_a_race_to_create_a_collection_has_one_winner(
+    nginx_client: FileSystem,
+) -> None:
+    """RFC 4918 sec. 9.3.1: exactly one concurrent MKCOL wins; nothing else about the losers is assumed here."""
+    statuses: list[int] = []
+    barrier = threading.Barrier(12)
+    path = f"compliance/race-{uuid.uuid4().hex}"
+
+    def create() -> None:
+        barrier.wait()
+        response = nginx_client.session.mkcol(path, raise_on_error=False)
+        statuses.append(response.status_code)
+
+    threads = [threading.Thread(target=create) for _ in range(12)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert statuses.count(201) == 1
+    assert not [status for status in statuses if status < 400 and status != 201]
+    assert nginx_client.isdir(path)
+
+
+# ---------------------------------------------------------------------------
+# Nested collections: COPY/MOVE of a whole subtree, and overwriting one
+# ---------------------------------------------------------------------------
+
+
+def test_nginx_copy_of_a_nested_collection_duplicates_the_whole_subtree(
+    nginx_client: FileSystem,
+) -> None:
+    nginx_client.mkdir("compliance/nestedsrc")
+    nginx_client.mkdir("compliance/nestedsrc/sub")
+    nginx_client.upload_fileobj(io.BytesIO(b"a"), "compliance/nestedsrc/a.txt")
+    nginx_client.upload_fileobj(io.BytesIO(b"b"), "compliance/nestedsrc/sub/b.txt")
+    nginx_client.copy("compliance/nestedsrc", "compliance/nesteddst")
+    buf = io.BytesIO()
+    nginx_client.download_fileobj("compliance/nesteddst/sub/b.txt", buf)
+    assert buf.getvalue() == b"b"
+    assert nginx_client.exists("compliance/nestedsrc/sub/b.txt")
+
+
+def test_nginx_move_of_a_nested_collection_relocates_the_whole_subtree(
+    nginx_client: FileSystem,
+) -> None:
+    nginx_client.mkdir("compliance/movesrc")
+    nginx_client.mkdir("compliance/movesrc/sub")
+    nginx_client.upload_fileobj(io.BytesIO(b"a"), "compliance/movesrc/sub/a.txt")
+    nginx_client.move("compliance/movesrc", "compliance/movedst")
+    assert not nginx_client.exists("compliance/movesrc")
+    buf = io.BytesIO()
+    nginx_client.download_fileobj("compliance/movedst/sub/a.txt", buf)
+    assert buf.getvalue() == b"a"
+
+
+def test_nginx_move_overwrites_an_existing_destination_collection_when_told_to(
+    nginx_client: FileSystem,
+) -> None:
+    """§9.9.3: with Overwrite: T, an existing destination collection is replaced, not merged with."""
+    nginx_client.mkdir("compliance/ovsrc")
+    nginx_client.upload_fileobj(io.BytesIO(b"new"), "compliance/ovsrc/new.txt")
+    nginx_client.mkdir("compliance/ovdst")
+    nginx_client.upload_fileobj(io.BytesIO(b"stale"), "compliance/ovdst/stale.txt")
+    nginx_client.move("compliance/ovsrc", "compliance/ovdst", overwrite=True)
+    assert nginx_client.exists("compliance/ovdst/new.txt")
+    assert not nginx_client.exists("compliance/ovdst/stale.txt")
+
+
+def test_nginx_copy_onto_an_existing_destination_is_resourcealreadyexists(
+    nginx_client: FileSystem,
+) -> None:
+    nginx_client.upload_fileobj(io.BytesIO(b"src"), "compliance/ow_src.txt")
+    nginx_client.upload_fileobj(io.BytesIO(b"dst"), "compliance/ow_dst.txt")
+    with pytest.raises(ResourceAlreadyExistsError):
+        nginx_client.copy("compliance/ow_src.txt", "compliance/ow_dst.txt", overwrite=False)
+
+
+def test_nginx_move_onto_an_existing_destination_is_resourcealreadyexists(
+    nginx_client: FileSystem,
+) -> None:
+    nginx_client.upload_fileobj(io.BytesIO(b"src"), "compliance/owm_src.txt")
+    nginx_client.upload_fileobj(io.BytesIO(b"dst"), "compliance/owm_dst.txt")
+    with pytest.raises(ResourceAlreadyExistsError):
+        nginx_client.move("compliance/owm_src.txt", "compliance/owm_dst.txt", overwrite=False)
+
+
+# ---------------------------------------------------------------------------
+# GET on a collection, isdir, walk - against a real nested tree
+# ---------------------------------------------------------------------------
+
+
+def test_nginx_get_on_a_collection_does_not_crash(nginx_client: FileSystem) -> None:
+    nginx_client.mkdir("compliance/plaincoll")
+    session = nginx_client.session
+    response = session.get("compliance/plaincoll/")
+    assert response.status_code < 500
+
+
+def test_nginx_isdir_correctly_identifies_a_real_collection(
+    nginx_client: FileSystem,
+) -> None:
+    nginx_client.mkdir("compliance/adircheck")
+    nginx_client.upload_fileobj(io.BytesIO(b"x"), "compliance/afilecheck.txt")
+    assert nginx_client.isdir("compliance/adircheck") is True
+    assert nginx_client.isdir("compliance/afilecheck.txt") is False
+
+
+def test_nginx_walk_covers_a_real_nested_tree(nginx_client: FileSystem) -> None:
+    nginx_client.mkdir("compliance/walkroot")
+    nginx_client.mkdir("compliance/walkroot/sub")
+    nginx_client.upload_fileobj(io.BytesIO(b"x"), "compliance/walkroot/top.txt")
+    nginx_client.upload_fileobj(io.BytesIO(b"x"), "compliance/walkroot/sub/deep.txt")
+    seen_files: set[str] = set()
+    for _path, _dirs, files in nginx_client.walk("compliance/walkroot"):
+        seen_files.update(f.name for f in files)
+    assert "compliance/walkroot/top.txt" in seen_files
+    assert "compliance/walkroot/sub/deep.txt" in seen_files
+
+
+# ---------------------------------------------------------------------------
+# Range/resumable reads, against a real server
+# ---------------------------------------------------------------------------
+
+
+def test_nginx_supports_range_reads(nginx_client: FileSystem) -> None:
+    nginx_client.upload_fileobj(io.BytesIO(b"0123456789"), "compliance/range.txt")
+    with nginx_client.open("compliance/range.txt", "rb") as reader:
+        assert reader.read(4) == b"0123"
+        reader.seek(7)
+        assert reader.read() == b"789"
+
+
+def test_nginx_download_fileobj_resumes_after_a_seek(nginx_client: FileSystem) -> None:
+    nginx_client.upload_fileobj(io.BytesIO(b"abcdefghij"), "compliance/range2.txt")
+    with nginx_client.open("compliance/range2.txt", "rb") as reader:
+        first_half = reader.read(5)
+        reader.seek(0)
+        full = reader.read()
+    assert first_half == b"abcde"
+    assert full == b"abcdefghij"
