@@ -22,5 +22,5 @@ exception escaping from server-controlled data.
 
 ## What the library promises
 
-See "Security notes" in the README and the redirect/TLS/session reference pages, and the
+See "Security" in the README and the redirect/TLS/session reference pages, and the
 "Security" sections of the CHANGELOG for what has been fixed and how.
