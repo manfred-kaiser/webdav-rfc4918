@@ -94,17 +94,17 @@ WsgiDAV runs the rest of the test suite.
 
 | Server | CI (main) | Tests | Docs |
 |---|---|---|---|
-| Nextcloud | [![Nextcloud](https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/nextcloud-compliance.yml/badge.svg?branch=main)](https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/nextcloud-compliance.yml) | 43 | [docs](https://webdav.readthedocs.io/en/latest/nextcloud-compliance-check.html) |
-| Apache `mod_dav` | [![Apache](https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/apache-compliance.yml/badge.svg?branch=main)](https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/apache-compliance.yml) | 42 | [docs](https://webdav.readthedocs.io/en/latest/apache-compliance-check.html) |
-| nginx + `dav-ext` | [![nginx](https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/nginx-compliance.yml/badge.svg?branch=main)](https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/nginx-compliance.yml) | 26 | [docs](https://webdav.readthedocs.io/en/latest/nginx-compliance-check.html) |
+| Nextcloud | [![Nextcloud](https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/nextcloud-compliance.yml/badge.svg?branch=main)](https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/nextcloud-compliance.yml) | 40+ | [docs](https://webdav.readthedocs.io/en/latest/nextcloud-compliance-check.html) |
+| Apache `mod_dav` | [![Apache](https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/apache-compliance.yml/badge.svg?branch=main)](https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/apache-compliance.yml) | 100+ | [docs](https://webdav.readthedocs.io/en/latest/apache-compliance-check.html) |
+| nginx + `dav-ext` | [![nginx](https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/nginx-compliance.yml/badge.svg?branch=main)](https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/nginx-compliance.yml) | 25+ | [docs](https://webdav.readthedocs.io/en/latest/nginx-compliance-check.html) |
 | WsgiDAV | [![WsgiDAV](https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/ci.yml) | rest of the suite | - |
 
-The test suite runs on every commit: 1404 tests with 93% code coverage. It
+The test suite runs on every commit: 1400+ tests with over 90% code coverage. It
 includes:
 
-- fsspec's own conformance suite (137 tests)
-- 134 tests that each check one clause of RFC 4918
-- 72 tests for the security defaults described below
+- fsspec's own conformance suite (130+ tests)
+- 130+ tests that each check one clause of RFC 4918
+- 70+ tests for the security defaults described below
 
 
 ## Security
@@ -131,7 +131,7 @@ A WebDAV server, or a redirect to one, can be hostile. The defaults:
 [`fsspec`](https://filesystem-spec.readthedocs.io) is the storage interface
 behind pandas, dask and most of the Python data ecosystem. This package adds
 a WebDAV backend, so those tools can read and write a WebDAV server like any
-other storage. It passes fsspec's own conformance suite (137 tests).
+other storage. It passes fsspec's own conformance suite (130+ tests).
 
 ```sh
 pip install webdav-rfc4918[fsspec]

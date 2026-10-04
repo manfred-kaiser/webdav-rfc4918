@@ -6,28 +6,33 @@ separate cross-check against a real Apache + `mod_dav` instance - an
 independent implementation, useful because WebDAV servers are known to
 disagree on locking/property edge cases in particular, and because this
 project's primary deployment target is Apache specifically. It is an
-ordinary `pytest` suite (41 tests, reproducible like any other) - not
+ordinary `pytest` suite (over 100 tests, reproducible like any other) - not
 "manual" in the sense of needing a human to drive it, just opt-in:
 
 - **If Apache is installed** (`httpd` + the `mod_dav*` modules - see
   `tests/apache_instance.py`), running `pytest` - the whole suite, or just
   `pytest tests/test_apache_compliance.py` - automatically starts a
-  throwaway instance, runs these 41 tests against it, and stops it again
+  throwaway instance, runs these tests against it, and stops it again
   afterwards. No flags, no environment variables, nothing to remember.
 - **If it is not installed**, the same `pytest` run skips this file with a
   clear reason (visible in the `-ra` summary) instead of failing.
 - **On GitHub**, this runs as its own workflow
   (`.github/workflows/apache-compliance.yml`, a separate status/badge from
-  the main `ci.yml`), which installs Apache first - `ci.yml`'s own jobs
-  still skip this file, same as any environment without Apache installed.
-  New and `continue-on-error: true` for now (only proven stable against
-  openSUSE's Apache build so far, not yet Ubuntu's - see below); it does
-  not block a merge yet.
+  the main `ci.yml`), which installs Ubuntu's `apache2` package first -
+  `ci.yml`'s own jobs still skip this file, same as any environment without
+  Apache installed. It is a required status check on `main`: a failure
+  here blocks a merge like one in `ci.yml`.
 - **To point at a specific instance instead** (a remote one, or one with
   non-default configuration you want to test against), set
   `WEBDAV_TEST_APACHE_URL` (`WEBDAV_TEST_APACHE_USER`/`_PASSWORD` default to
   `testuser`/`testpass123`) - then that instance is used as-is and nothing
   is started or stopped automatically.
+
+A handful of tests need a *second*, differently configured instance next to
+the shared one (`FileETag`, `DavDepthInfinity`, `DavMinTimeout`, no
+`DavLockDB`, no `mod_dav_lock`: ports 8781-8785, see `_PORTS` in the test
+module). They start and stop it themselves, and are skipped when only a
+remote instance (`WEBDAV_TEST_APACHE_URL`) is available.
 
 ## Automatic (plain `pytest`)
 
@@ -45,6 +50,27 @@ run (not just this one file in isolation).
 Run it twice in a row to see for yourself that it is reproducible - each
 run starts from a clean `dav-root` and tears Apache down at the end, so the
 next run starts from the same state as the first.
+
+## Against a build of your own
+
+Set `WEBDAV_TEST_APACHE_PREFIX` to the install directory of an Apache built
+from the release tarball (`bin/httpd`, `bin/htpasswd`, `modules/`) and the
+fixture uses that one, before the distro layouts:
+
+```console
+$ ./configure --prefix=$HOME/.local/opt/httpd-2.4.69 --with-apr=... --with-apr-util=... \
+      --with-pcre=.../pcre2-config --enable-dav --enable-dav-fs --enable-dav-lock \
+      --enable-mods-shared=few --enable-so --with-mpm=prefork
+$ make -j && make install
+$ WEBDAV_TEST_APACHE_PREFIX=$HOME/.local/opt/httpd-2.4.69 pytest tests/test_apache_compliance.py
+```
+
+(The prefork MPM is compiled in, `mod_unixd` is a loadable module there -
+`tests/apache_instance.py` knows both.) Reading the sources of the release you
+test is the way to find out *why* it answers as it does: the findings below
+name the function that decides each one - read the 2.4.x tarball, not trunk,
+which has changed some of them (e.g. `dav_fs_get_resource` answers 404 there
+where 2.4.69 answers 400).
 
 ## Manual control: `tools/apache_compliance_check.py`
 
@@ -180,56 +206,184 @@ to point at it, this project's own `dav-root` grouping does not apply to
 behind. The automatic fixture and `tools/apache_compliance_check.py` both
 do this for you by default (`--no-clean` opts out, for the script).
 
-## Known differences from the RFC text / from `wsgidav`
+## What Apache does, and why
 
-Found and confirmed independently (`curl`, bypassing this library entirely)
-while building out `tests/test_apache_compliance.py`. None of these are bugs
-in Apache's `mod_dav` - RFC 4918 explicitly leaves them open - but they are
-real, and worth knowing if Apache is the server this library talks to in
-production:
+Each of these was measured against a real 2.4.69 instance (`curl`, bypassing
+this library entirely, and the tests named below) *and* traced in the source
+of that release - the function that decides it is named. None of them is a bug
+in `mod_dav`: RFC 4918 leaves most of them open. All of them matter if Apache is
+the server this library talks to in production.
 
-- **`getetag` is a weak validator (`W/"..."`) by default.** RFC 9110 sec.
-  13.1.1 requires `If-Match` to use *strong* comparison, so
-  `strong_etag()` correctly refuses a weak ETag - which means passing
-  Apache's own current `getetag` straight into `Session.put(if_match=...)`
-  fails client-side (`ValueError`) against a stock install. Configure
-  Apache with a strong `FileETag` (e.g. `FileETag INode MTime Size`) to
-  get a working If-Match-based conditional PUT. See
-  `test_apache_default_getetag_is_weak_so_if_match_with_it_is_refused_client_side`.
-- **The empty resource a `LOCK` on an unmapped URL creates (RFC 4918 sec.
-  9.10.4) does not survive the lock being released.** The RFC only says it
-  "SHOULD NOT disappear" (not a MUST) - Apache takes the RFC up on that
-  latitude; `wsgidav` keeps it. `FileSystem.locked()`'s docstring notes
-  this explicitly. See
-  `test_apache_locking_an_unmapped_url_creates_a_resource_while_held`.
-- **`MKCOL` on an already-existing plain resource answers `400 Bad
-  Request`, not `405 Method Not Allowed`.** `FileSystem.mkdir()` always
-  sends the trailing-slash form of the URL (RFC 4918 sec. 5.2); Apache's
-  own path resolution rejects that against an existing non-collection
-  resource before it would get to say "method not allowed". Handled
-  transparently - `mkdir()` still raises `ResourceAlreadyExistsError` -
-  since this release; see
-  `test_mkcol_on_an_existing_plain_resource_is_still_recognized_when_the_server_says_400`
-  in `tests/test_rfc_compliance.py` for the (server-agnostic, CI-running)
-  regression test.
-- **A collection operation (DELETE/COPY/MOVE) blocked by one member can
-  answer a non-207 top-level status with a full multistatus body
-  anyway.** Confirmed: a DELETE blocked by one locked member answers `424
-  Failed Dependency` at the top level, with a `<D:multistatus>` body
-  underneath naming exactly which member and why - RFC 4918 sec. 13 ties
-  this detail to a 207 response, but nothing stops a server from wrapping
-  the same shape under a different status. Handled transparently since
-  this release (`webdav.dav.multistatus.multistatus_failure`) - the
-  specific `MultiStatusError` is still raised, not a generic
-  `FailedDependencyError`; see
-  `test_a_multistatus_body_under_a_non_207_status_still_raises_multistatuserror`
-  in `tests/test_rfc_compliance.py`.
-- **No RFC 5689 (Extended MKCOL) support** - `extended-mkcol` is absent
-  from the `DAV` header, and a `set_props=`/`data=` MKCOL body gets `415
-  Unsupported Media Type`, same as `wsgidav`. `build_mkcol_body()`/
-  `parse_mkcol_response()` still work correctly against a server that
-  *does* support it (unit-tested in `tests/test_rfc_compliance.py`
-  directly against RFC 5689's own worked examples).
+### ETags
+
+- **`getetag` is weak (`W/"..."`) for a file changed less than a second
+  ago, and strong after that.** The rule is `request_time - mtime < 1s` in
+  the core (`ap_make_etag_ex`, `modules/http/http_etag.c`); no setting
+  changes it. `FileETag INode MTime Size` only changes what the value is made
+  of - the earlier advice to configure it to get a strong ETag was wrong.
+  Pinned by `test_apache_etag_is_weak_right_after_a_write`,
+  `..._is_strong_once_the_file_is_a_second_old` and
+  `test_apache_file_etag_directive_does_not_make_a_fresh_etag_strong`.
+- **So the ETag taken right after a write cannot be used for `If-Match`.**
+  RFC 9110 sec. 13.1.1 requires strong comparison, `strong_etag()` refuses a
+  weak one client-side (`ValueError`), and Apache itself answers a `W/...`
+  `If-Match` with `412` - even its own current ETag. Ask again after a second.
+  The answer to the `PUT` carries no `ETag` header at all. Pinned by
+  `test_apache_a_weak_etag_taken_right_after_a_write_is_refused_client_side`,
+  `..._if_match_with_the_strong_etag_of_an_aged_file_replaces_it`,
+  `test_apache_refuses_a_weak_if_match_on_its_own` and
+  `test_apache_put_response_carries_no_etag_header`.
+
+### Creating things
+
+- **`overwrite=False` (`If-None-Match: *`) is not atomic on Apache.**
+  `dav_method_put` checks the condition (`dav_validate_request`) when the
+  request arrives, then streams the body into a temporary file and renames it
+  over the target (`dav_fs_close_stream`, `apr_file_rename`). A creator that
+  arrives and finishes in between does not stop the one already let through:
+  its file is replaced, and both are told `201`. A sequential second creator
+  is refused with `412` as expected. Where exactly one writer must win, hold a
+  lock (which Apache does enforce). Pinned by
+  `test_apache_if_none_match_star_is_checked_before_the_body_is_read` (a
+  deterministic demonstration: the first request is held up halfway through its
+  body), `test_apache_concurrent_if_none_match_star_creators_only_ever_get_201_or_412`,
+  `test_apache_a_sequential_second_creator_is_refused` and
+  `test_apache_a_lock_makes_the_creator_exclusive`.
+- **`MKCOL` on an existing plain resource: `405` without, `400` with the
+  trailing slash.** `FileSystem.mkdir()` always sends the slash (RFC 4918 sec.
+  5.2); `dav_fs_get_resource` then sees "extraneous path components" below a
+  file and answers `400` (2.4; trunk: `404`). The same `400` answers a path
+  *below* a file, which does not exist - so `mkdir()` only reports
+  `ResourceAlreadyExistsError` for the `400` if a `PROPFIND` finds the
+  resource (without the slash), and otherwise raises the `400`. Pinned by
+  `test_apache_mkcol_on_an_existing_file_is_405_but_400_with_the_trailing_slash`,
+  `..._mkdir_on_a_file_is_already_exists_but_below_a_file_it_is_not`, and, with
+  a scripted server, the `test_a_400_from_mkcol_...` tests in
+  `tests/test_rfc_compliance.py`.
+- **Racing `MKCOL`s: one `201`, the others `405` or `403`.**
+  `dav_fs_create_collection` maps every `apr_dir_make` error except
+  ENOSPC/ENOENT to `403`, so a loser that passed the "exists" check and then
+  met EEXIST gets `403` ("Unable to create collection"), not the `405` of
+  RFC 4918 sec. 9.3.1. `makedirs(exist_ok=True)` in the fsspec layer accepts
+  that when the collection is there afterwards. Pinned by
+  `test_apache_losers_of_a_mkcol_race_get_403_or_405`.
+- **No RFC 5689 (Extended MKCOL):** `extended-mkcol` is absent from the `DAV`
+  header, and *any* `MKCOL` body - whatever it says, with or without a
+  `Content-Type` - gets `415` (`process_mkcol_body`) and creates nothing.
+  `build_mkcol_body()`/`parse_mkcol_response()` still work against a server
+  that supports it (unit-tested against RFC 5689's own examples).
+
+### Locking
+
+- **A `LOCK` on an unmapped URL creates a *lock-null* resource, not an empty
+  file.** Apache implements RFC 2518 sec. 7.4 (`dav_fs_add_locknull_state`: an
+  entry in `.DAV/.locknull`, no file): `PROPFIND` finds it (so `exists()` is
+  true, and `isfile()` too - its `resourcetype` is empty and there is no
+  `getetag`/`getcontentlength` to tell it from an empty file), `GET` and `HEAD`
+  answer `404`, the parent's `Depth: 1` listing names it. It is gone after
+  `UNLOCK` (`dav_fs_remove_locknull_member`) - unless a `PUT` through the lock
+  filled it first: that makes a real file that outlives the lock. This is not
+  Apache using RFC 4918's latitude ("SHOULD NOT disappear"); it is the model
+  RFC 4918 replaced. wsgidav does create the empty resource. Pinned by
+  `test_apache_lock_on_an_unmapped_url_is_lock_null_and_not_a_resource`,
+  `..._looks_like_an_empty_file`, `..._put_with_the_token_makes_a_lock_null_resource_a_real_file`
+  and `..._put_without_the_token_cannot_fill_a_lock_null_resource`.
+- **`Timeout`:** the first token Apache understands wins, in the order sent
+  (`Second-30, Second-3600` is 30, not the shorter or the longer one);
+  `Infinite`, nothing it understands, and no header at all are all infinite
+  (`dav_get_timeout`). The client's own default is 600 seconds
+  (`DEFAULT_LOCK_TIMEOUT`), `lock_timeout=None` asks for infinite. `DavMinTimeout`
+  raises a shorter timeout (not an infinite one) to its minimum. A refresh
+  (`LOCK` with `If`, no body) answers the new timeout and no `Lock-Token`
+  header. Pinned by `test_apache_lock_timeout_header`, `..._a_lock_without_a_timeout_never_runs_out`,
+  `..._the_client_asks_for_600_seconds_by_default_and_for_none_with_none`,
+  `..._a_refresh_answers_the_new_timeout_and_no_lock_token` and
+  `test_apache_davmintimeout_raises_a_short_timeout_but_not_infinite`.
+- **`UNLOCK` with anything but the right token is a `400`** - no header, no
+  angle brackets, `<>`, garbage, an unknown token, the token of another
+  resource, a token already released (and a second `UNLOCK` with the right
+  one) - never `403`/`409`/`412` (`dav_method_unlock`, and the dummy `If`
+  header `dav_validate_request` builds from the `Lock-Token`). The lock stays.
+  Pinned by `test_apache_unlock_with_anything_but_the_right_token_is_a_400`.
+- **Shared locks:** several coexist (also for one principal), any *one* of the
+  tokens is enough to write, none is a `423`; an exclusive and a shared lock
+  exclude each other in both directions. A `LOCK` without a `Depth` header is
+  `infinity`. Pinned by `test_apache_any_one_shared_token_is_enough_to_write`
+  and the lock-scope tests above it.
+- **`DAV: 1,2` does not mean locking works.** The class comes from the
+  provider having lock hooks (`dav_method_options`) - `mod_dav_fs` always has
+  them. Without a `DavLockDB` it still advertises `2`, and a `LOCK` is a `500`
+  ("A lock database was not specified"). `mod_dav_lock` is a different, generic
+  provider's lock store and is not needed: locking works without it as long as
+  `DavLockDB` is set. Pinned by
+  `test_apache_without_a_lockdb_it_advertises_class_2_and_cannot_lock` and
+  `test_apache_locking_needs_the_lockdb_of_mod_dav_fs_but_not_mod_dav_lock`.
+
+### The `If` header and what a lock does to its neighbours
+
+- **An untagged `If: (<token>)` is evaluated for every resource the method
+  touches** (`dav_validate_resource_state`) - source and destination of a
+  `COPY`/`MOVE`, the new member of a collection. A list that asserts a token the
+  resource does not hold is false, so the whole request is `412`; a list *tagged*
+  with another URL simply does not apply to it. That is why the session tags
+  every token with the URL of the lock (what `Session.copy`/`move` and the
+  write methods send): onto a locked file, `COPY` is `423` without a token, `412`
+  with an untagged one, `204` with one tagged for the destination. Pinned by
+  `test_apache_untagged_if_with_...` (three tests) and
+  `test_apache_the_session_tags_the_tokens_it_sends`.
+- **A new member of a locked collection is a `207`, not a `423`.** With the
+  collection locked by someone else, a `PUT` or `MKCOL` of a *new* name answers
+  `207 Multi-Status` (`DAV_VALIDATE_PARENT`): the new member is `424 Failed
+  Dependency`, the collection `423 Locked` - and nothing is created. A status
+  a `PUT` is not expected to answer; the client raises `MultiStatusError`
+  naming the collection, not `ResourceLockedError`. An *existing* member of a
+  collection locked with `Depth: infinity` is a plain `423`. The holder of the
+  lock writes there normally. Pinned by
+  `test_apache_a_new_member_of_a_locked_collection_is_a_207_and_not_created`,
+  `..._an_existing_member_of_an_infinity_locked_collection_is_a_plain_423` and
+  `..._the_client_reports_a_new_member_in_a_locked_collection_as_a_multistatuserror`.
+- **A collection operation blocked by a locked member answers `424` (not
+  `207`) with a full multistatus underneath, and does nothing.**
+  `DAV_VALIDATE_USE_424` makes `DELETE`/`COPY`/`MOVE` refuse up front: the
+  body names exactly the blocking resource (`423 Locked`) - for a `MOVE` out of
+  a locked collection that is the collection - and the other members are left
+  alone. RFC 4918 sec. 13 ties this detail to a `207`; handled transparently
+  (`webdav.dav.multistatus.multistatus_failure`), the specific
+  `MultiStatusError` is raised. Pinned by
+  `test_apache_delete_blocked_by_a_locked_member_is_a_424_that_deletes_nothing`,
+  `..._move_out_of_a_locked_collection_is_a_424_naming_the_collection` and, in
+  `tests/test_rfc_compliance.py`,
+  `test_a_multistatus_body_under_a_non_207_status_still_raises_multistatuserror`.
+- **A `423` has no `<D:error>` body.** Nothing in `mod_dav` builds one for a
+  lock (`dav_new_error_tag` has no caller), so it is the core's plain HTML
+  error page; `error_codes` is empty. Pinned by
+  `test_apache_423_is_the_cores_html_error_page_and_never_a_dav_error`.
+
+### Properties and reading
+
+- **A failed `PROPPATCH` is a `207` with a `409` and a status line of its
+  own.** A live property (`getcontentlength`, ...) is read-only ("Property is
+  read-only."); `dav_failed_proppatch` writes the status line itself with a
+  literal `(status)` where the reason phrase belongs - `HTTP/1.1 409 (status)`.
+  The update is all or nothing: a writable property in the same request fails
+  with it. Pinned by `test_apache_a_failed_proppatch_is_a_207_with_a_409_and_a_status_line_of_its_own`,
+  `..._the_client_names_the_read_only_property` and `..._a_proppatch_is_all_or_nothing`.
+- **`PROPFIND` with `Depth: infinity` - or no `Depth` header, which means the
+  same - on a collection is a `403`** unless `DavDepthInfinity On`
+  (`dav_method_propfind`). A file needs no `Depth`. This library has no default
+  depth on purpose. Pinned by
+  `test_apache_depth_infinity_and_no_depth_at_all_are_forbidden_on_a_collection`,
+  `..._a_file_needs_no_depth` and `..._depth_infinity_is_answered_with_davdepthinfinity_on`.
+- **`GET` is the core's, not `mod_dav`'s** (`handle_get` is off for the
+  filesystem provider): ranges work (`206`, `Content-Range`, `416` for an
+  unsatisfiable one) and a collection is refused by the default handler
+  ("Attempt to serve directory") with a `404` when no `mod_dir`/`mod_autoindex`
+  is loaded - what `GET` on a collection answers depends on that configuration.
+  `COPY` of a collection needs no trailing slash (unlike nginx); `Overwrite: F`
+  onto an existing destination is `412` for `COPY` and `MOVE`; a destination
+  with a missing parent is `409`. Pinned by `test_apache_ranges_are_answered_by_the_core`,
+  `test_apache_get_on_a_collection_is_the_cores_404` and the `COPY`/`MOVE` tests
+  after them.
 
 ## Troubleshooting
 

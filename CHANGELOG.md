@@ -11,6 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `webdav`/`webdavs` are now registered with fsspec via its `fsspec.specs` entry point.
 - Documentation is now hosted at https://webdav.readthedocs.io.
+- The Apache compliance suite now pins what Apache's `mod_dav` does, traced in its 2.4.69 source:
+  ETag weakness, lock-null resources, the `If-None-Match: *` race, `If` header tagging, `Timeout`
+  handling, `UNLOCK` errors, the `207` for a new member of a locked collection, and more (see
+  `docs/apache-compliance-check.md`). `WEBDAV_TEST_APACHE_PREFIX` runs it against an Apache built
+  from the release tarball.
+
+### Fixed
+
+- `FileSystem.mkdir()` took every bodyless `400` from `MKCOL` for "already exists". Apache answers the
+  same `400` for a path *below* a plain file, which does not exist: the `400` now only means
+  `ResourceAlreadyExistsError` if the resource is there, and is raised as it is otherwise.
+- The documentation promised an atomic `overwrite=False` / `"xb"` (`If-None-Match: *`) and a strong
+  ETag from Apache's `FileETag`. It is as atomic as the server makes it - Apache's `mod_dav` checks the
+  condition before it reads the body, so two creators at once can both succeed - and a fresh Apache ETag
+  is weak for one second whatever `FileETag` says. The docstrings and the Apache page now say so, as they
+  now do for lock-null resources (what a `LOCK` on an unmapped URL creates on Apache).
 
 ## [1.0.0] - 2026-10-01
 
