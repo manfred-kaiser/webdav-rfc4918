@@ -504,7 +504,11 @@ defaults to Berkeley DB**, which is not. Seen on GitHub Actions' `ubuntu-latest`
 | 40 x `LOCK` on 40 resources, all answered `200` | in 5 of 10 rounds 1 to 8 locks were not enforced a second later - the resource could be written without the token |
 | 16 x `PROPPATCH` of 16 different properties on one file | one or more properties missing in 6 of 10 rounds (in the full suite sometimes most of them) |
 
-Every request is answered as if it had worked. What this means in production:
+Every request is answered as if it had worked. Worse, the damage can last: after
+such a burst the lock database of the Ubuntu instance was unusable for the rest of
+the run - no lock was enforced, valid tokens were refused with `412`, locks
+vanished from `PROPFIND` - and it stayed that way for the next run that reused
+the same directory. What this means in production:
 
 - A lock taken *while other locks are being taken or released* is not reliable
   on such a server. Locks that are taken one at a time are.
@@ -518,9 +522,11 @@ Every request is answered as if it had worked. What this means in production:
   (one writer per collection, or a lock taken by a single process in front of
   the server).
 
-The tests above ask for the strict result only where the instance under test
-uses sdbm (`_dbm_is_sdbm()`: the lock database is `davlock.pag`/`davlock.dir`),
-and for what holds on both everywhere else.
+The tests above therefore run on an instance of their own (a damaged database must
+not take the other tests down with it), ask for the strict result only where that
+instance uses sdbm (`_dbm_is_sdbm()`: the lock database is `davlock.pag`/`davlock.dir`),
+and for what holds on both everywhere else. A clean start also removes the lock
+database of the previous run.
 
 ## Troubleshooting
 

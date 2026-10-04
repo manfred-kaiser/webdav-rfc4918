@@ -82,8 +82,6 @@ class _Apache:
     """Where the instance this test session uses lives - set once, by ``_apache_session`` below."""
 
     url: "str | None" = None
-    #: The directory of the instance this session started - ``None`` for one it was pointed at.
-    instance_dir: "Path | None" = None
     auth: "tuple[str, str]" = (apache_instance.TEST_USER, apache_instance.TEST_PASSWORD)
 
 
@@ -108,7 +106,6 @@ def _apache_session() -> Iterator[None]:
     conf_file = apache_instance.write_instance(instance_dir)
     apache_instance.start(conf_file)
     _Apache.url = f"http://{apache_instance.HOST}:{apache_instance.PORT}"
-    _Apache.instance_dir = instance_dir
     try:
         yield
     finally:
@@ -745,6 +742,7 @@ _PORTS = {
     "keepalive_idle": 8787,
     "timeout": 8788,
     "limit": 8789,
+    "dbm": 8791,
 }
 
 _needs_local_apache = pytest.mark.skipif(
@@ -2254,20 +2252,26 @@ def test_apache_the_lock_database_directory_cannot_be_written(
 # ===========================================================================
 
 
-def _dbm_is_sdbm() -> bool:
-    """Whether the instance under test keeps its lock and property databases in sdbm files.
+def _dbm_is_sdbm(instance_dir: Path) -> bool:
+    """Whether the instance in ``instance_dir`` keeps its lock and property databases in sdbm files.
 
     The DBM type is not a setting of ``mod_dav_fs``: it is the default of the APR-util the server
-    was built with. sdbm (a build from the release tarball, ``davlock.pag`` / ``davlock.dir``) holds up
+    was built with. sdbm (a build from the release tarball: ``davlock.pag`` / ``davlock.dir``) holds up
     when several processes write at once; Debian's and Ubuntu's APR-util defaults to Berkeley DB, which
-    does not - concurrent writes can be lost (see "Parallel" in docs/apache-compliance-check.md). The
-    tests below ask for the strict result only where it is guaranteed, and for what holds on both
-    everywhere else. An instance this session did not start cannot be told, and counts as not sdbm.
+    does not - concurrent writes can be lost, and the database damaged (see "The DBM type decides" in
+    docs/apache-compliance-check.md). The tests that write from many clients at once ask for the strict
+    result only where it is guaranteed, and for what holds on both everywhere else.
     """
-    instance_dir = _Apache.instance_dir
-    return (
-        instance_dir is not None and next(instance_dir.rglob("*.pag"), None) is not None
-    )
+    return next(instance_dir.rglob("*.pag"), None) is not None
+
+
+@contextmanager
+def _isolated_instance(tmp_path: Path) -> Iterator[tuple[str, Path]]:
+    """An instance of its own - its base URL and directory - for a test that writes to the lock or
+    property database from many clients at once. With Berkeley DB that can damage the database for
+    good: the shared instance, and every test after, must not have to live with it."""
+    with _variant(tmp_path, "dbm") as base:
+        yield base, tmp_path / "dbm"
 
 
 def test_apache_parallel_uploads_through_one_filesystem_arrive_intact(
@@ -2287,72 +2291,83 @@ def test_apache_parallel_uploads_through_one_filesystem_arrive_intact(
         assert buf.getvalue() == body
 
 
+@_needs_local_apache
 def test_apache_of_many_simultaneous_locks_on_one_resource_one_is_granted_on_sdbm(
-    scratch: str,
+    tmp_path: Path,
 ) -> None:
     """The lock database is shared by all the server's processes. With sdbm exactly one request gets
     the lock and the rest a 423. With Berkeley DB (Debian, Ubuntu) two can be granted the same lock -
     seen once in 25 rounds of sixteen on Ubuntu's 2.4.58 - so only "at least one, nothing but 200
     and 423" holds there."""
-    path = f"{scratch}/contended.txt"
-    _http("PUT", path, data=b"x").raise_for_status()
-    results = _in_parallel(16, lambda _i: _lock(path))
-    statuses = collections.Counter(r.status_code for r in results)
-    assert set(statuses) <= {200, 423}
-    assert statuses[200] >= 1
-    if _dbm_is_sdbm():
-        assert statuses == {200: 1, 423: 15}
-    for response in results:
-        if response.status_code == 200:
-            _unlock(path, _token(response))
-    if _dbm_is_sdbm():
-        assert _http("PUT", path, data=b"y").status_code == 204
+    with _isolated_instance(tmp_path) as (base, instance_dir):
+        _http("PUT", "contended.txt", base=base, data=b"x").raise_for_status()
+        results = _in_parallel(16, lambda _i: _lock("contended.txt", base=base))
+        statuses = collections.Counter(r.status_code for r in results)
+        assert set(statuses) <= {200, 423}
+        assert statuses[200] >= 1
+        sdbm = _dbm_is_sdbm(instance_dir)
+        if sdbm:
+            assert statuses == {200: 1, 423: 15}
+        for response in results:
+            if response.status_code == 200:
+                _unlock("contended.txt", _token(response), base=base)
+        if sdbm:
+            assert (
+                _http("PUT", "contended.txt", base=base, data=b"y").status_code == 204
+            )
 
 
+@_needs_local_apache
 def test_apache_many_simultaneous_locks_on_different_resources_are_all_granted(
-    scratch: str,
+    tmp_path: Path,
 ) -> None:
     """Every request is told 200 with a token of its own. Whether the lock database then holds all of
     them depends on its DBM type: with sdbm none is lost; with Berkeley DB (Debian, Ubuntu) up to a
     fifth were not enforced a second later (1 to 8 of 40 in half of the rounds on Ubuntu's 2.4.58).
     """
-    for index in range(40):
-        _http("PUT", f"{scratch}/l{index}.txt", data=b"x").raise_for_status()
-    results = _in_parallel(40, lambda i: _lock(f"{scratch}/l{i}.txt"))
-    assert {r.status_code for r in results} == {200}
-    assert len({_token(r) for r in results}) == 40
-    if _dbm_is_sdbm():
-        discovery = _http("PROPFIND", scratch, headers={"Depth": "1"}).text
-        assert all(_token(r) in discovery for r in results)  # none was lost
-    for index, response in enumerate(results):
-        _unlock(f"{scratch}/l{index}.txt", _token(response))
+    with _isolated_instance(tmp_path) as (base, instance_dir):
+        for index in range(40):
+            _http("PUT", f"l{index}.txt", base=base, data=b"x").raise_for_status()
+        results = _in_parallel(40, lambda i: _lock(f"l{i}.txt", base=base))
+        assert {r.status_code for r in results} == {200}
+        assert len({_token(r) for r in results}) == 40
+        if _dbm_is_sdbm(instance_dir):
+            discovery = _http("PROPFIND", "", base=base, headers={"Depth": "1"}).text
+            assert all(_token(r) in discovery for r in results)  # none was lost
+        for index, response in enumerate(results):
+            _unlock(f"l{index}.txt", _token(response), base=base)
 
 
+@_needs_local_apache
 def test_apache_through_the_client_a_contended_lock_is_held_by_one_and_leaks_none(
-    apache_client: FileSystem, scratch: str
+    tmp_path: Path,
 ) -> None:
-    """The client side holds everywhere: each outcome is "held" or "refused", the session keeps no
-    token afterwards. That no lock is left on the server holds with sdbm - with Berkeley DB a lost
-    update can undo an ``UNLOCK``."""
-    path = f"{scratch}/cycle.txt"
-    apache_client.upload_fileobj(io.BytesIO(b"x"), path)
-    outcomes: collections.Counter[str] = collections.Counter()
+    """The client side holds everywhere: each outcome is "held" or "refused" (and with sdbm at least
+    one is held), the session keeps no token afterwards. That no lock is left on the server holds with
+    sdbm - with Berkeley DB a lost update can undo an ``UNLOCK``, and it can damage the database.
+    """
+    with (
+        _isolated_instance(tmp_path) as (base, instance_dir),
+        FileSystem(base, auth=_Apache.auth) as fs,
+    ):
+        fs.upload_fileobj(io.BytesIO(b"x"), "cycle.txt")
+        outcomes: collections.Counter[str] = collections.Counter()
 
-    def cycle(_index: int) -> None:
-        for _ in range(3):
-            try:
-                with apache_client.locked(path, lock_timeout=30):
-                    apache_client.upload_fileobj(io.BytesIO(b"w"), path, overwrite=True)
-                outcomes["held"] += 1
-            except ResourceLockedError:
-                outcomes["refused"] += 1
+        def cycle(_index: int) -> None:
+            for _ in range(3):
+                try:
+                    with fs.locked("cycle.txt", lock_timeout=30):
+                        fs.upload_fileobj(io.BytesIO(b"w"), "cycle.txt", overwrite=True)
+                    outcomes["held"] += 1
+                except ResourceLockedError:
+                    outcomes["refused"] += 1
 
-    _in_parallel(12, cycle)
-    assert set(outcomes) <= {"held", "refused"}
-    assert outcomes["held"] >= 1
-    assert apache_client.session.locks.token_for(f"{_Apache.url}/{path}") is None
-    if _dbm_is_sdbm():
-        assert _http("PUT", path, data=b"free").status_code == 204
+        _in_parallel(12, cycle)
+        assert set(outcomes) <= {"held", "refused"}
+        assert fs.session.locks.token_for(f"{base}/cycle.txt") is None
+        if _dbm_is_sdbm(instance_dir):
+            assert outcomes["held"] >= 1
+            assert _http("PUT", "cycle.txt", base=base, data=b"free").status_code == 204
 
 
 def test_apache_simultaneous_overwrites_leave_exactly_one_whole_file(
@@ -2394,35 +2409,37 @@ def test_apache_a_reader_never_sees_a_half_written_file(scratch: str) -> None:
     assert all(content in (first, second) for content in seen)
 
 
+@_needs_local_apache
 def test_apache_simultaneous_property_updates_on_one_resource_are_kept_on_sdbm(
-    apache_client: FileSystem, scratch: str
+    tmp_path: Path,
 ) -> None:
     """Sixteen clients each set their own property on the same file: all are told 207. With sdbm all
     sixteen properties are there afterwards; with Berkeley DB (Debian, Ubuntu) one or more were lost
     in most rounds (one of sixteen in six of ten on Ubuntu's 2.4.58)."""
-    path = f"{scratch}/props.txt"
-    apache_client.upload_fileobj(io.BytesIO(b"x"), path)
     namespace = "https://example.org/ns"
 
-    def update(index: int) -> int:
+    def update(index: int, base: str) -> int:
         body = (
             f'<?xml version="1.0"?><D:propertyupdate xmlns:D="DAV:" xmlns:Z="{namespace}">'
             f"<D:set><D:prop><Z:p{index}>v{index}</Z:p{index}></D:prop></D:set></D:propertyupdate>"
         )
-        return _http("PROPPATCH", path, data=body).status_code
+        return _http("PROPPATCH", "props.txt", base=base, data=body).status_code
 
-    assert set(_in_parallel(16, update)) == {207}
-    props = apache_client.get_props(
-        path, props=[(namespace, f"p{i}") for i in range(16)]
-    )
-    kept = [props.text(namespace, f"p{i}") for i in range(16)]
-    assert all(
-        value in (None, f"v{i}") for i, value in enumerate(kept)
-    )  # never a wrong value
-    if _dbm_is_sdbm():
-        assert kept == [f"v{i}" for i in range(16)]
-    else:
-        assert any(value is not None for value in kept)
+    with (
+        _isolated_instance(tmp_path) as (base, instance_dir),
+        FileSystem(base, auth=_Apache.auth) as fs,
+    ):
+        fs.upload_fileobj(io.BytesIO(b"x"), "props.txt")
+        assert set(_in_parallel(16, lambda i: update(i, base))) == {207}
+        props = fs.get_props(
+            "props.txt", props=[(namespace, f"p{i}") for i in range(16)]
+        )
+        kept = [props.text(namespace, f"p{i}") for i in range(16)]
+        assert all(
+            value in (None, f"v{i}") for i, value in enumerate(kept)
+        )  # never a wrong value
+        if _dbm_is_sdbm(instance_dir):
+            assert kept == [f"v{i}" for i in range(16)]
 
 
 def test_apache_copy_move_and_delete_of_one_source_at_once_have_one_winner_where_one_is_possible(

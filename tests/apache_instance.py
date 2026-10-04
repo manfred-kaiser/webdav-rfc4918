@@ -227,7 +227,10 @@ def write_instance(
         raise RuntimeError(msg)
     dav_root = instance_dir / "dav-root"
     if clean:
+        # The lock database too: a run that damaged it (Berkeley DB can be, by many writers at
+        # once) must not hand that to the next one.
         shutil.rmtree(dav_root, ignore_errors=True)
+        shutil.rmtree(instance_dir / "locks", ignore_errors=True)
     for sub in ("logs", "dav-root", "locks"):
         (instance_dir / sub).mkdir(parents=True, exist_ok=True)
     htpasswd_file = instance_dir / "htpasswd"
@@ -305,7 +308,9 @@ def start(conf_file: Path, *, port: int = PORT) -> None:
     if result.returncode != 0:
         error_log = conf_file.parent / "logs" / "error.log"
         error_log_tail = (
-            error_log.read_text(errors="replace") if error_log.exists() else "(no error.log)"
+            error_log.read_text(errors="replace")
+            if error_log.exists()
+            else "(no error.log)"
         )
         msg = (
             f"{profile.httpd} -f {conf_file} -k start "
@@ -318,9 +323,17 @@ def start(conf_file: Path, *, port: int = PORT) -> None:
     wait_until_up(f"http://{HOST}:{port}/")
 
 
-def stop(conf_file: Path) -> None:
-    """Stop the Apache instance ``conf_file`` describes."""
+def stop(conf_file: Path, timeout: float = 10.0) -> None:
+    """Stop the Apache instance ``conf_file`` describes, and wait until it is gone.
+
+    ``-k stop`` only asks: the port is free, and the next instance may start on it, once the
+    server has removed its PID file.
+    """
     subprocess.run([httpd_binary(), "-f", str(conf_file), "-k", "stop"], check=False)
+    pid_file = conf_file.parent / "logs" / "httpd.pid"
+    deadline = time.monotonic() + timeout
+    while pid_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
 
 
 def httpd_binary() -> str:
