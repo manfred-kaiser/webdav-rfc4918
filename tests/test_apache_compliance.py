@@ -17,8 +17,11 @@ that changes one is caught here, not discovered in production).
 """
 
 import base64
+import collections
 import contextlib
+import hashlib
 import io
+import logging
 import os
 import re
 import socket
@@ -29,7 +32,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from tempfile import gettempdir
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO, cast
 from urllib.parse import urlsplit
 from xml.etree.ElementTree import Element
 
@@ -40,9 +43,11 @@ from tests import apache_instance
 from webdav import FileSystem, ResourceAlreadyExistsError, ResourceLockedError
 from webdav.dav.locks import EXCLUSIVE, SHARED
 from webdav.exceptions import (
+    ForbiddenError,
     HTTPStatusError,
     InternalServerError,
     MultiStatusError,
+    PreconditionFailedError,
     ResourceConflictError,
     UnsupportedMediaTypeError,
 )
@@ -733,6 +738,10 @@ _PORTS = {
     "mintimeout": 8783,
     "nolockdb": 8784,
     "nodavlock": 8785,
+    "keepalive_max": 8786,
+    "keepalive_idle": 8787,
+    "timeout": 8788,
+    "limit": 8789,
 }
 
 _needs_local_apache = pytest.mark.skipif(
@@ -826,6 +835,16 @@ def _variant(tmp_path: Path, name: str, **options: Any) -> Iterator[str]:
         yield f"http://{apache_instance.HOST}:{port}"
     finally:
         apache_instance.stop(conf_file)
+
+
+@contextmanager
+def _variant_fs(tmp_path: Path, name: str, **options: Any) -> Iterator[FileSystem]:
+    """A client of :func:`_variant`'s instance."""
+    with (
+        _variant(tmp_path, name, **options) as base,
+        FileSystem(base, auth=_Apache.auth) as fs,
+    ):
+        yield fs
 
 
 # ---------------------------------------------------------------------------
@@ -1791,3 +1810,618 @@ def test_apache_ranges_are_answered_by_the_core(scratch: str) -> None:
     assert _http("GET", path, headers={"Range": "bytes=0-3"}).content == b"0123"
     assert _http("HEAD", path).headers["Accept-Ranges"] == "bytes"
     assert _http("GET", path, headers={"Range": "bytes=100-"}).status_code == 416
+
+
+# ===========================================================================
+# Over time: locks that run out, connections that the server closes, a server
+# that gives up on a slow upload (mod_dav_fs lock.c, the core's Timeout and
+# KeepAlive handling)
+# ===========================================================================
+
+
+def _in_parallel(count: int, work: Any) -> list[Any]:
+    """Run ``work(index)`` in ``count`` threads that all start at once; their results, in no order."""
+    barrier = threading.Barrier(count)
+    results: list[Any] = []
+
+    def run(index: int) -> None:
+        barrier.wait()
+        results.append(work(index))
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    return results
+
+
+def test_apache_an_expired_lock_is_gone_and_its_token_is_refused(scratch: str) -> None:
+    """A lock is not a record that is swept on a timer: it is dropped when the next request looks at
+    it. From then on the resource is free for everybody - and the old token is worth nothing:
+    writing with it is a 412, so is refreshing it, and ``UNLOCK`` of it is a 400 (not 409).
+    """
+    path = f"{scratch}/expiring.txt"
+    _http("PUT", path, data=b"v1").raise_for_status()
+    token = _token(_lock(path, timeout="Second-1"))
+    assert _http("PUT", path, data=b"v2").status_code == 423  # while it lasts
+    time.sleep(2.2)
+    assert token not in _http("PROPFIND", path, headers={"Depth": "0"}).text
+    stale = {"If": f"(<{token}>)"}
+    assert _http("PUT", path, data=b"v3", headers=stale).status_code == 412
+    assert (
+        _http("LOCK", path, headers={**stale, "Timeout": "Second-60"}).status_code
+        == 412
+    )
+    assert _unlock(path, token).status_code == 400
+    # free for everybody: a write without a token, a lock of somebody else
+    assert _http("PUT", path, data=b"v4").status_code == 204
+    other = _lock(path)
+    assert other.status_code == 200
+    _unlock(path, _token(other))
+
+
+def test_apache_the_client_meets_an_expired_lock_with_a_412_and_a_log_line(
+    apache_client: FileSystem, scratch: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A write under an expired lock, and a refresh of it, are ``PreconditionFailedError`` - the lock
+    is not silently taken for held. Leaving the block tries to release it: Apache answers 400 for
+    the token it no longer knows, which is logged as a lock that is already gone, not as a failure.
+    """
+    path = f"{scratch}/client-expiry.txt"
+    apache_client.upload_fileobj(io.BytesIO(b"v1"), path)
+    with (
+        caplog.at_level(logging.WARNING, logger="webdav"),
+        apache_client.locked(path, lock_timeout=1) as active_lock,
+    ):
+        time.sleep(2.2)
+        with pytest.raises(PreconditionFailedError):
+            apache_client.upload_fileobj(io.BytesIO(b"v2"), path, overwrite=True)
+        with pytest.raises(PreconditionFailedError):
+            apache_client.refresh_lock(path, active_lock.token, lock_timeout=30)
+    assert [r for r in caplog.records if "already gone" in r.getMessage()]
+    assert not [r for r in caplog.records if "could not release" in r.getMessage()]
+    apache_client.upload_fileobj(io.BytesIO(b"v3"), path, overwrite=True)  # free again
+
+
+def test_apache_an_expired_lock_null_resource_stays_visible_until_it_is_locked_again(
+    apache_client: FileSystem, scratch: str
+) -> None:
+    """A client that locks an unmapped URL and never comes back leaves a lock-null entry behind that
+    outlives its lock: ``PROPFIND`` on the path keeps answering (so ``exists()`` stays true), ``GET``
+    does not - and ``DELETE`` cannot remove what is not a resource (404). What clears it is another
+    ``LOCK`` + ``UNLOCK`` of the path, or a ``PUT`` / ``MKCOL`` that makes it a real one.
+    """
+    ghosts = [
+        f"{scratch}/ghost-{name}" for name in ("unlock", "put", "mkcol", "delete")
+    ]
+    for ghost in ghosts:
+        _lock(ghost, timeout="Second-1").raise_for_status()
+    time.sleep(2.2)
+    for (
+        ghost
+    ) in (
+        ghosts
+    ):  # asked directly, before anything lists the collection (see the next test)
+        assert apache_client.exists(ghost)
+        assert _http("GET", ghost).status_code == 404
+    assert _http("DELETE", ghosts[3]).status_code == 404
+    assert apache_client.exists(ghosts[3])
+    fresh = _lock(ghosts[0])
+    assert _unlock(ghosts[0], _token(fresh)).status_code == 204
+    assert not apache_client.exists(ghosts[0])
+    assert _http("PUT", ghosts[1], data=b"x").status_code == 201
+    assert _http("GET", ghosts[1]).content == b"x"
+    assert _http("MKCOL", f"{ghosts[2]}/").status_code == 201
+    assert apache_client.isdir(ghosts[2])
+
+
+def _collection_with_expired_lock_null_entries(
+    apache_client: FileSystem, scratch: str, count: int
+) -> str:
+    """A collection that holds ``count`` lock-null entries whose locks have run out (1 s) - nobody has asked since."""
+    collection = f"{scratch}/poisoned-{count}"
+    apache_client.mkdir(collection)
+    for index in range(count):
+        _lock(f"{collection}/ghost{index}.txt", timeout="Second-1").raise_for_status()
+    time.sleep(2.2)
+    return collection
+
+
+def test_apache_a_listing_that_meets_an_expired_lock_null_entry_is_aborted_once_per_entry(
+    apache_client: FileSystem, scratch: str
+) -> None:
+    """An Apache bug (``dav_fs_get_locks``: it drops the expired lock while ``PROPFIND`` has the lock
+    database open read-only, which ``DAV_DEBUG`` - compiled in, not a setting - turns into a 500 with
+    "INTERNAL DESIGN ERROR ... opened readonly" in the error log, after the answer has started): the
+    connection is closed with no response. The entry is dropped all the same, so the *next* listing
+    works - one failed listing per expired entry."""
+    collection = _collection_with_expired_lock_null_entries(apache_client, scratch, 2)
+    for _ in range(2):
+        with pytest.raises(requests.exceptions.ConnectionError):
+            _http("PROPFIND", f"{collection}/", headers={"Depth": "1"})
+    listing = _http("PROPFIND", f"{collection}/", headers={"Depth": "1"})
+    assert listing.status_code == 207
+    assert "ghost" not in listing.text
+    # asking about the collection itself was never a problem
+    assert (
+        _http("PROPFIND", f"{collection}/", headers={"Depth": "0"}).status_code == 207
+    )
+
+
+def test_apache_ls_gets_through_an_expired_lock_null_entry_by_retrying(
+    apache_client: FileSystem, scratch: str
+) -> None:
+    """``PROPFIND`` is retried (``retry=True``, three attempts), so the aborted listing is absorbed:
+    a little slower (the retry waits), no error. Up to two entries are absorbed this way.
+    """
+    collection = _collection_with_expired_lock_null_entries(apache_client, scratch, 1)
+    started = time.monotonic()
+    assert apache_client.ls(collection) == []
+    assert time.monotonic() - started >= 0.5  # it did have to try again
+
+
+def test_apache_ls_fails_once_past_the_retries_and_then_works_for_a_collection_with_many(
+    apache_client: FileSystem, scratch: str
+) -> None:
+    """With more expired entries than there are attempts the first ``ls`` is a ``ConnectionError`` -
+    which cleared some of them, so asking again is all it takes (the cost of leaving a lock on a name
+    nothing was ever written to)."""
+    collection = _collection_with_expired_lock_null_entries(apache_client, scratch, 4)
+    with pytest.raises(requests.exceptions.ConnectionError):
+        apache_client.ls(collection)
+    for _ in range(4):
+        with contextlib.suppress(requests.exceptions.ConnectionError):
+            assert apache_client.ls(collection) == []
+            return
+    pytest.fail("the listing never recovered")
+
+
+def test_apache_a_connection_the_server_closes_after_a_few_requests_is_not_an_error(
+    tmp_path: Path,
+) -> None:
+    """``MaxKeepAliveRequests 3``: every third answer says ``Connection: close`` - for sixty requests
+    in a row, writes included (which are never retried), the client opens a new connection each time.
+    """
+    extra_conf = "KeepAlive On\nMaxKeepAliveRequests 3"
+    with _variant_fs(tmp_path, "keepalive_max", extra_conf=extra_conf) as fs:
+        for index in range(20):
+            fs.upload_fileobj(io.BytesIO(b"x"), f"f{index}.txt")
+            assert fs.exists(f"f{index}.txt")
+            fs.remove(f"f{index}.txt")
+
+
+def test_apache_a_connection_that_idled_past_the_keepalive_timeout_is_not_an_error(
+    tmp_path: Path,
+) -> None:
+    """``KeepAliveTimeout 1``: the server has closed the pooled connection by the time the next
+    request goes out, a write included - the client must see that before it sends, not after.
+    """
+    extra_conf = "KeepAlive On\nKeepAliveTimeout 1"
+    with _variant_fs(tmp_path, "keepalive_idle", extra_conf=extra_conf) as fs:
+        fs.upload_fileobj(io.BytesIO(b"x"), "first.txt")
+        for index in range(2):
+            time.sleep(1.4)
+            fs.upload_fileobj(io.BytesIO(b"y"), f"idle{index}.txt")
+        assert fs.exists("idle1.txt")
+
+
+class _SlowReader(io.RawIOBase):
+    """A file object that makes the upload wait ``pause`` seconds before each of its ``parts``."""
+
+    def __init__(self, parts: "list[bytes]", pause: float) -> None:
+        super().__init__()
+        self._parts = list(parts)
+        self._pause = pause
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        if not self._parts:
+            return 0
+        time.sleep(self._pause)
+        part = self._parts.pop(0)
+        buffer[: len(part)] = part
+        return len(part)
+
+
+def _slow(parts: "list[bytes]", pause: float) -> BinaryIO:
+    """A file object for ``upload_fileobj`` that makes the upload wait ``pause`` seconds before each part."""
+    return cast("BinaryIO", _SlowReader(parts, pause))
+
+
+def test_apache_gives_up_on_a_stalled_upload_with_408_and_creates_nothing(
+    tmp_path: Path,
+) -> None:
+    """``Timeout 1``: a body that stops for longer than that is a 408 (not retried, a PUT) - no partial
+    file, not even a temporary one the next listing could show - while a slow but moving one is fine.
+    """
+    with _variant_fs(tmp_path, "timeout", extra_conf="Timeout 1") as fs:
+        with pytest.raises(HTTPStatusError) as exc_info:
+            fs.upload_fileobj(_slow([b"a" * 1024, b"b" * 1024], 1.6), "slow.txt")
+        assert exc_info.value.status_code == 408
+        assert not fs.exists("slow.txt")
+        fs.upload_fileobj(_slow([b"a" * 1024, b"b" * 1024], 0.3), "steady.txt")
+        props = fs.get_props("steady.txt", props=["content_length"])
+        assert props.content_length == 2048
+        assert [name for name in fs.ls("") if "tmp" in name] == []
+
+
+def test_apache_limitrequestbody_refuses_with_413_before_anything_is_stored(
+    tmp_path: Path,
+) -> None:
+    """With ``LimitRequestBody 1048576``: below the limit it is stored; above it - announced by its
+    length, huge, or streamed without a length - a 413, and the file that was there stays as it was.
+    """
+    extra_conf = "LimitRequestBody 1048576"
+    with _variant_fs(tmp_path, "limit", extra_conf=extra_conf) as fs:
+        fs.upload_fileobj(io.BytesIO(b"small"), "kept.bin")
+        too_large = [
+            io.BytesIO(bytes(2 << 20)),
+            io.BytesIO(bytes(40 << 20)),
+            _slow([bytes(2 << 20)], 0),
+        ]
+        for source in too_large:  # announced, huge, and without a length
+            with pytest.raises(HTTPStatusError) as exc_info:
+                fs.upload_fileobj(source, "kept.bin", overwrite=True)
+            assert exc_info.value.status_code == 413
+        with pytest.raises(HTTPStatusError):
+            fs.upload_fileobj(io.BytesIO(bytes(2 << 20)), "new.bin")
+        assert not fs.exists("new.bin")
+        buf = io.BytesIO()
+        fs.download_fileobj("kept.bin", buf)
+        assert buf.getvalue() == b"small"
+        fs.upload_fileobj(io.BytesIO(bytes(512 << 10)), "fits.bin")
+        assert (
+            fs.get_props("fits.bin", props=["content_length"]).content_length
+            == 512 << 10
+        )
+
+
+# ===========================================================================
+# Size: what goes through the client and Apache without being held in memory,
+# and names that have to survive being a URL
+# ===========================================================================
+
+
+def _random_file(path: Path, mebibytes: int) -> str:
+    """Write ``mebibytes`` MiB of random bytes to ``path``; its SHA-256."""
+    digest = hashlib.sha256()
+    with path.open("wb") as handle:
+        for _ in range(mebibytes):
+            block = os.urandom(1 << 20)
+            digest.update(block)
+            handle.write(block)
+    return digest.hexdigest()
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while block := handle.read(1 << 20):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def test_apache_a_large_file_round_trips_byte_for_byte(
+    apache_client: FileSystem, scratch: str, tmp_path: Path
+) -> None:
+    source = tmp_path / "large.bin"
+    expected = _random_file(source, 48)
+    apache_client.upload_file(source, f"{scratch}/large.bin")
+    assert (
+        apache_client.get_props(
+            f"{scratch}/large.bin", props=["content_length"]
+        ).content_length
+        == 48 << 20
+    )
+    target = tmp_path / "large.out"
+    apache_client.download_file(f"{scratch}/large.bin", target)
+    assert _sha256(target) == expected
+    # a range far into it is answered from the right place, without sending what comes before
+    tail = _http(
+        "GET",
+        f"{scratch}/large.bin",
+        headers={"Range": f"bytes={40 << 20}-{(40 << 20) + 9}"},
+    )
+    assert tail.status_code == 206
+    with source.open("rb") as handle:
+        handle.seek(40 << 20)
+        assert tail.content == handle.read(10)
+
+
+def test_apache_an_upload_of_unknown_length_is_streamed_chunked_and_complete(
+    apache_client: FileSystem, scratch: str
+) -> None:
+    """No length to announce: ``Transfer-Encoding: chunked`` - which ``mod_dav`` reads to the end."""
+    parts = [bytes([65 + index]) * (1 << 20) for index in range(8)]
+    apache_client.upload_fileobj(_slow(parts, 0), f"{scratch}/chunked.bin")
+    buf = io.BytesIO()
+    apache_client.download_fileobj(f"{scratch}/chunked.bin", buf)
+    assert buf.getvalue() == b"".join(parts)
+
+
+def test_apache_an_empty_file_is_stored_and_read_back_empty(
+    apache_client: FileSystem, scratch: str
+) -> None:
+    apache_client.upload_fileobj(io.BytesIO(b""), f"{scratch}/empty.txt")
+    assert (
+        apache_client.get_props(
+            f"{scratch}/empty.txt", props=["content_length"]
+        ).content_length
+        == 0
+    )
+    buf = io.BytesIO()
+    apache_client.download_fileobj(f"{scratch}/empty.txt", buf)
+    assert buf.getvalue() == b""
+
+
+def test_apache_a_collection_of_many_members_is_listed_in_full_and_removed_at_once(
+    apache_client: FileSystem, scratch: str
+) -> None:
+    count = 1200
+    apache_client.mkdir(f"{scratch}/many")
+
+    def create(offset: int) -> None:
+        with requests.Session() as session:
+            session.auth = _Apache.auth
+            for index in range(offset, count, 8):
+                session.put(
+                    f"{_Apache.url}/{scratch}/many/f{index:05d}.txt",
+                    data=b"x",
+                    timeout=10,
+                )
+
+    threads = [threading.Thread(target=create, args=(offset,)) for offset in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    names = [name.rsplit("/", 1)[-1] for name in apache_client.ls(f"{scratch}/many")]
+    assert sorted(names) == [f"f{index:05d}.txt" for index in range(count)]
+    apache_client.remove(f"{scratch}/many")
+    assert not apache_client.exists(f"{scratch}/many")
+
+
+_ODD_NAMES = [
+    "a b", "a#b", "a?b", "a%b", "a%20b", "a%2Fb", "a+b", "a&b", "a;b", "a=b", "a'b", 'a"b',
+    "a<b>", "a|b", "a[b]", "ä ö ü ß", "日本語", "emoji-😀", "é-combining", " lead", "trail ",
+    "a..b", ".hidden", "-dash", "x" * 255, "é" * 127,
+]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "name", _ODD_NAMES, ids=[f"{i}-{n[:12]}" for i, n in enumerate(_ODD_NAMES)]
+)
+def test_apache_a_name_survives_the_round_trip(
+    apache_client: FileSystem, scratch: str, name: str
+) -> None:
+    """Every character that means something in a URL, and some that are not ASCII, is stored under
+    exactly that name - ``%20`` stays the six characters it is, it is not read as a space.
+    """
+    path = f"{scratch}/{name}"
+    apache_client.upload_fileobj(io.BytesIO(name.encode()), path)
+    buf = io.BytesIO()
+    apache_client.download_fileobj(path, buf)
+    assert buf.getvalue() == name.encode()
+    assert name in [member.rsplit("/", 1)[-1] for member in apache_client.ls(scratch)]
+    apache_client.remove(path)
+    assert not apache_client.exists(path)
+
+
+def test_apache_names_that_differ_only_in_case_are_two_resources(
+    apache_client: FileSystem, scratch: str
+) -> None:
+    apache_client.upload_fileobj(io.BytesIO(b"upper"), f"{scratch}/CASE")
+    apache_client.upload_fileobj(io.BytesIO(b"lower"), f"{scratch}/case")
+    assert sorted(m.rsplit("/", 1)[-1] for m in apache_client.ls(scratch)) == [
+        "CASE",
+        "case",
+    ]
+
+
+@pytest.mark.parametrize(
+    "name", ["x" * 256, "é" * 128], ids=["256-bytes", "128-two-byte-chars"]
+)
+def test_apache_a_name_longer_than_255_bytes_is_a_403(
+    apache_client: FileSystem, scratch: str, name: str
+) -> None:
+    """The file system's limit, not the URL's: ``apr_file_open`` fails and ``mod_dav`` answers 403."""
+    with pytest.raises(ForbiddenError):
+        apache_client.upload_fileobj(io.BytesIO(b"x"), f"{scratch}/{name}")
+
+
+@pytest.mark.parametrize("path", [".DAV", ".DAV/inside"])
+def test_apache_the_lock_database_directory_cannot_be_written(
+    apache_client: FileSystem, scratch: str, path: str
+) -> None:
+    """``dav_fs_is_state_path``: ``.DAV`` holds Apache's own state (locks, properties) - a client does not
+    get to name it, at any level of the tree."""
+    with pytest.raises(ForbiddenError):
+        apache_client.upload_fileobj(io.BytesIO(b"x"), f"{scratch}/{path}")
+
+
+# ===========================================================================
+# Parallel: what many clients at once do to each other (prefork processes, a
+# shared lock database, temporary files that are renamed into place)
+# ===========================================================================
+
+
+def test_apache_parallel_uploads_through_one_filesystem_arrive_intact(
+    apache_client: FileSystem, scratch: str
+) -> None:
+    bodies = {index: os.urandom(1 << 20) for index in range(32)}
+
+    def upload(index: int) -> None:
+        apache_client.upload_fileobj(
+            io.BytesIO(bodies[index]), f"{scratch}/up{index}.bin"
+        )
+
+    _in_parallel(32, upload)
+    for index, body in bodies.items():
+        buf = io.BytesIO()
+        apache_client.download_fileobj(f"{scratch}/up{index}.bin", buf)
+        assert buf.getvalue() == body
+
+
+def test_apache_of_many_simultaneous_locks_on_one_resource_exactly_one_is_granted(
+    scratch: str,
+) -> None:
+    """The lock database is shared by all the server's processes; a lock granted twice would be a
+    lock that protects nothing."""
+    path = f"{scratch}/contended.txt"
+    _http("PUT", path, data=b"x").raise_for_status()
+    results = _in_parallel(16, lambda _i: _lock(path))
+    assert collections.Counter(r.status_code for r in results) == {200: 1, 423: 15}
+    for response in results:
+        if response.status_code == 200:
+            assert _unlock(path, _token(response)).status_code == 204
+    assert _http("PUT", path, data=b"y").status_code == 204
+
+
+def test_apache_many_simultaneous_locks_on_different_resources_are_all_granted(
+    scratch: str,
+) -> None:
+    for index in range(40):
+        _http("PUT", f"{scratch}/l{index}.txt", data=b"x").raise_for_status()
+    results = _in_parallel(40, lambda i: _lock(f"{scratch}/l{i}.txt"))
+    assert {r.status_code for r in results} == {200}
+    assert len({_token(r) for r in results}) == 40
+    discovery = _http("PROPFIND", scratch, headers={"Depth": "1"}).text
+    assert all(
+        _token(r) in discovery for r in results
+    )  # none was lost from the database
+
+
+def test_apache_through_the_client_a_contended_lock_is_held_by_one_and_leaks_none(
+    apache_client: FileSystem, scratch: str
+) -> None:
+    path = f"{scratch}/cycle.txt"
+    apache_client.upload_fileobj(io.BytesIO(b"x"), path)
+    outcomes: collections.Counter[str] = collections.Counter()
+
+    def cycle(_index: int) -> None:
+        for _ in range(3):
+            try:
+                with apache_client.locked(path, lock_timeout=30):
+                    apache_client.upload_fileobj(io.BytesIO(b"w"), path, overwrite=True)
+                outcomes["held"] += 1
+            except ResourceLockedError:
+                outcomes["refused"] += 1
+
+    _in_parallel(12, cycle)
+    assert set(outcomes) <= {"held", "refused"}
+    assert outcomes["held"] >= 1
+    assert apache_client.session.locks.token_for(f"{_Apache.url}/{path}") is None
+    assert (
+        _http("PUT", path, data=b"free").status_code == 204
+    )  # no lock is left on the server
+
+
+def test_apache_simultaneous_overwrites_leave_exactly_one_whole_file(
+    scratch: str,
+) -> None:
+    """The temporary file is renamed over the target: whichever writer is last wins, whole - the result
+    is never a mixture of two bodies."""
+    path = f"{scratch}/overwritten.bin"
+    bodies = {index: bytes([65 + index]) * (2 << 20) for index in range(16)}
+    results = _in_parallel(16, lambda i: _http("PUT", path, data=bodies[i]).status_code)
+    assert set(results) <= {201, 204}
+    assert _http("GET", path).content in bodies.values()
+
+
+def test_apache_a_reader_never_sees_a_half_written_file(scratch: str) -> None:
+    path = f"{scratch}/replaced.bin"
+    first, second = b"A" * (4 << 20), b"B" * (4 << 20)
+    _http("PUT", path, data=first).raise_for_status()
+    stop = threading.Event()
+    seen: list[bytes] = []
+
+    def read() -> None:
+        while not stop.is_set():
+            seen.append(_http("GET", path).content)
+
+    readers = [threading.Thread(target=read) for _ in range(4)]
+    for reader in readers:
+        reader.start()
+    try:
+        for index in range(12):
+            _http(
+                "PUT", path, data=second if index % 2 == 0 else first
+            ).raise_for_status()
+    finally:
+        stop.set()
+        for reader in readers:
+            reader.join()
+    assert seen
+    assert all(content in (first, second) for content in seen)
+
+
+def test_apache_simultaneous_property_updates_on_one_resource_are_all_kept(
+    apache_client: FileSystem, scratch: str
+) -> None:
+    """The property database is locked per update: sixteen clients each setting their own property
+    on the same file lose none of them."""
+    path = f"{scratch}/props.txt"
+    apache_client.upload_fileobj(io.BytesIO(b"x"), path)
+    namespace = "https://example.org/ns"
+
+    def update(index: int) -> int:
+        body = (
+            f'<?xml version="1.0"?><D:propertyupdate xmlns:D="DAV:" xmlns:Z="{namespace}">'
+            f"<D:set><D:prop><Z:p{index}>v{index}</Z:p{index}></D:prop></D:set></D:propertyupdate>"
+        )
+        return _http("PROPPATCH", path, data=body).status_code
+
+    assert set(_in_parallel(16, update)) == {207}
+    props = apache_client.get_props(
+        path, props=[(namespace, f"p{i}") for i in range(16)]
+    )
+    assert [props.text(namespace, f"p{i}") for i in range(16)] == [
+        f"v{i}" for i in range(16)
+    ]
+
+
+def test_apache_copy_move_and_delete_of_one_source_at_once_have_one_winner_where_one_is_possible(
+    scratch: str,
+) -> None:
+    """A source can be copied any number of times, but only moved or deleted once. The losers are told
+    404 (it was gone when they looked) or 500 (it went between looking and renaming: ``dav_fs_move_resource``
+    answers "Could not rename resource" for the ENOENT) - which one is down to timing.
+    """
+    _http("PUT", f"{scratch}/src.txt", data=b"src").raise_for_status()
+    copies = _in_parallel(
+        12,
+        lambda i: _http(
+            "COPY",
+            f"{scratch}/src.txt",
+            headers={"Destination": f"{_Apache.url}/{scratch}/copy{i}.txt"},
+        ).status_code,
+    )
+    assert set(copies) == {201}  # a source can be copied any number of times
+    assert all(
+        _http("GET", f"{scratch}/copy{i}.txt").content == b"src" for i in range(12)
+    )
+    moves = _in_parallel(
+        12,
+        lambda i: _http(
+            "MOVE",
+            f"{scratch}/src.txt",
+            headers={"Destination": f"{_Apache.url}/{scratch}/moved{i}.txt"},
+        ).status_code,
+    )
+    assert moves.count(201) == 1  # ... but only once moved
+    assert set(moves) <= {201, 404, 500}
+    assert (
+        sum(
+            _http("HEAD", f"{scratch}/moved{i}.txt").status_code == 200
+            for i in range(12)
+        )
+        == 1
+    )
+    deletes = _in_parallel(
+        12, lambda _i: _http("DELETE", f"{scratch}/copy0.txt").status_code
+    )
+    assert deletes.count(204) == 1
+    assert set(deletes) <= {204, 404, 500}
