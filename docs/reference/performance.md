@@ -112,7 +112,11 @@ load is pinned by `tests/test_apache_compliance.py` (see
 | 100 threads, one `LOCK` each on 100 different files | 100 of 100 granted, 2.9 s |
 | 32 threads, `LOCK` on one file | exactly 1 granted, 31 x `423` |
 
+These were measured on an Apache built with sdbm as its DBM. On Debian and Ubuntu (Berkeley DB) locks and
+properties set by many clients at once can be lost - see "The DBM type decides" in the compliance check.
+
 Where Apache differs from WsgiDAV under load is not speed but what the losers of
-a race are told: see "Parallel" and "Over time" in the compliance check - in
-particular that `If-None-Match: *` is not atomic, and that an unreleased lock on
-a name nothing was written to breaks the next listing of its collection.
+a race are told, and what its DBM files keep: see "Parallel", "The DBM type decides"
+and "Over time" in the compliance check - in particular that `If-None-Match: *` is
+not atomic, and that an unreleased lock on a name nothing was written to breaks the
+next listing of its collection.

@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documentation is now hosted at https://webdav.readthedocs.io.
 - The Apache test suite now covers what `mod_dav` does: ETags, locks, timeouts, large files, odd names, parallel clients.
 - `WEBDAV_TEST_APACHE_PREFIX` runs the Apache tests against an Apache built from source.
-- The Apache page documents what was found, among it an Apache bug that aborts a listing.
+- The Apache page documents what was found: an Apache bug that aborts a listing, and that Berkeley DB (Debian, Ubuntu) loses concurrent lock and property writes.
 
 ### Fixed
 

@@ -461,27 +461,65 @@ the server this library talks to in production.
 ### Parallel
 
 Many clients at once, against Apache's prefork processes, one lock database and
-temporary files that are renamed into place. All of it holds up:
+temporary files that are renamed into place.
 
 - **Parallel uploads** through one shared `FileSystem` arrive intact.
-- **Of many simultaneous `LOCK`s on one resource exactly one is granted** (`423`
-  for the rest) - the database is shared by all processes - and locks on
-  different resources are all granted and none is lost from the database.
-  Through the client, a contended `locked()` is held by one and refused
-  (`ResourceLockedError`) for the others, and no lock or token bookkeeping is
-  left behind.
 - **Simultaneous overwrites leave one whole file** - the temporary file is
   renamed over the target - and **a reader never sees a half-written file**.
-- **Simultaneous `PROPPATCH`es of different properties on one resource lose
-  none** (the property database is locked per update).
 - **A source can be copied any number of times at once, but only moved or
   deleted once.** The losers are told `404` (gone when they looked) or `500`
   (gone between looking and renaming - `dav_fs_move_resource`: "Could not rename
   resource" for the `ENOENT`): which one is timing.
+- **Many simultaneous `LOCK`s on one resource:** every answer is `200` or `423`,
+  at least one is `200`. With sdbm exactly one is.
+- **Simultaneous `LOCK`s on different resources:** every one is told `200`, with a
+  token of its own. With sdbm every lock is there afterwards.
+- **Simultaneous `PROPPATCH`es of different properties on one resource** are all
+  told `207`, and no property ever has a wrong value. With sdbm all of them are
+  there afterwards.
+- **Through the client**, a contended `locked()` is held by one and refused
+  (`ResourceLockedError`) for the others, and the session keeps no token. With
+  sdbm no lock is left on the server.
 
-Pinned by the `test_apache_parallel_...`, `..._simultaneous_...`,
-`..._of_many_simultaneous_locks_...`, `..._a_reader_never_sees_a_half_written_file`
-and `..._copy_move_and_delete_of_one_source_at_once_...` tests.
+"With sdbm" is the catch, see the next section. Pinned by the
+`test_apache_parallel_...`, `..._simultaneous_...`, `..._of_many_simultaneous_locks_...`,
+`..._a_reader_never_sees_a_half_written_file` and
+`..._copy_move_and_delete_of_one_source_at_once_...` tests.
+
+### The DBM type decides: Berkeley DB loses concurrent writes
+
+`mod_dav_fs` keeps locks (one file for the whole server, `DavLockDB`) and dead
+properties (one file per directory, in `.DAV/`) in DBM files. The DBM type is not
+a `mod_dav_fs` setting: it is the default of the APR-util the server was built
+with. A build from the release tarball uses **sdbm** - safe for several processes
+writing at once; nothing was lost in any local run (600 locks, and sixteen
+properties set at once, in every run of the suite). **Debian's and Ubuntu's APR-util
+defaults to Berkeley DB**, which is not. Seen on GitHub Actions' `ubuntu-latest`
+(Apache 2.4.58, `libaprutil1` 1.6.3, `apr_dbm_db`):
+
+| Sixteen to forty requests at once | Result |
+|---|---|
+| 16 x `LOCK` on one resource | granted twice in 1 of 25 rounds (always at least once) |
+| 40 x `LOCK` on 40 resources, all answered `200` | in 5 of 10 rounds 1 to 8 locks were not enforced a second later - the resource could be written without the token |
+| 16 x `PROPPATCH` of 16 different properties on one file | one or more properties missing in 6 of 10 rounds (in the full suite sometimes most of them) |
+
+Every request is answered as if it had worked. What this means in production:
+
+- A lock taken *while other locks are being taken or released* is not reliable
+  on such a server. Locks that are taken one at a time are.
+- Properties set by several clients on the same resource at once can overwrite
+  each other.
+- The data files themselves are not affected (the temporary file is renamed
+  into place), and sequential use is fine: the rest of the suite passes on
+  Ubuntu.
+- There is nothing to configure. Where this matters, build Apache with sdbm as
+  the DBM default, or keep concurrent locking and `PROPPATCH` out of the picture
+  (one writer per collection, or a lock taken by a single process in front of
+  the server).
+
+The tests above ask for the strict result only where the instance under test
+uses sdbm (`_dbm_is_sdbm()`: the lock database is `davlock.pag`/`davlock.dir`),
+and for what holds on both everywhere else.
 
 ## Troubleshooting
 
