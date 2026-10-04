@@ -7,11 +7,12 @@ tests/test_security_edge_cases.py's adversarial-server coverage).
 
 import io
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from xml.etree.ElementTree import Element
 
 import pytest
 
-from tests.scripted_server import always, scripted_server
+from tests.scripted_server import Reply, Seen, always, scripted_server
 from webdav import FileSystem, Session
 from webdav.dav.conditional import Condition, build_if_header, build_if_header_single
 from webdav.dav.date_utils import from_rfc1123
@@ -48,6 +49,10 @@ from webdav.exceptions import (
     ResourceLockedError,
     UnsupportedMediaTypeError,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 
 # ---------------------------------------------------------------------------
 # XML/grammar-level fixes - no server needed
@@ -862,15 +867,76 @@ def test_mkcol_on_an_existing_plain_resource_is_also_resourcealreadyexists(
         fs.mkdir("plain.txt")
 
 
+_PLAIN_RESOURCE_PROPFIND = (
+    207,
+    {"Content-Type": "application/xml"},
+    (
+        b'<?xml version="1.0"?><D:multistatus xmlns:D="DAV:"><D:response>'
+        b"<D:href>/plain.txt</D:href><D:propstat><D:prop><D:resourcetype/></D:prop>"
+        b"<D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>"
+    ),
+)
+
+
+def _mkcol_says_400(propfind: Reply) -> "Callable[[Seen], Reply]":
+    """A server that answers every MKCOL with 400 and every other method with ``propfind``."""
+
+    def respond(seen: Seen) -> Reply:
+        return (400, {}, b"") if seen.method == "MKCOL" else propfind
+
+    return respond
+
+
 def test_mkcol_on_an_existing_plain_resource_is_still_recognized_when_the_server_says_400() -> (
     None
 ):
-    """A real server (Apache's mod_dav, confirmed live) answers 400, not 405, for this same conflict -
+    """A real server (Apache's mod_dav 2.4, confirmed live) answers 400, not 405, for this same conflict -
     the trailing slash mkdir() always adds (§5.2) lands on an existing plain resource, and Apache's
-    own path resolution rejects that before it would even get to say "method not allowed"."""
-    with scripted_server(always((400, {}, b""))) as (url, _rec):
+    own path resolution rejects that before it would even get to say "method not allowed".
+    The 400 only counts as "exists" because the resource is there: see the tests below.
+    """
+    with scripted_server(_mkcol_says_400(_PLAIN_RESOURCE_PROPFIND)) as (url, rec):
         with pytest.raises(ResourceAlreadyExistsError):
             FileSystem(retry=False).mkdir(f"{url}/plain.txt")
+    assert [(r.method, r.path) for r in rec.requests] == [
+        ("MKCOL", "/plain.txt/"),
+        ("PROPFIND", "/plain.txt"),
+    ]
+    assert rec.requests[1].headers["depth"] == "0"
+
+
+def test_a_400_from_mkcol_is_checked_against_the_resource_without_the_trailing_slash() -> (
+    None
+):
+    """The slash the caller gave is dropped for the existence check: Apache answers a PROPFIND
+    on ``plain.txt/`` with the same 400, which would prove nothing."""
+    with scripted_server(_mkcol_says_400(_PLAIN_RESOURCE_PROPFIND)) as (url, rec):
+        with pytest.raises(ResourceAlreadyExistsError):
+            FileSystem(retry=False).mkdir(f"{url}/plain.txt/")
+    assert rec.requests[-1].path == "/plain.txt"
+
+
+def test_a_400_from_mkcol_is_not_taken_for_exists_when_nothing_is_there() -> None:
+    """Apache answers the same 400 for a path *below* a plain resource, which does not exist -
+    reporting "already exists" for it would be wrong, so the 400 stays what it is."""
+    with scripted_server(_mkcol_says_400((404, {}, b""))) as (url, _rec):
+        with pytest.raises(HTTPStatusError) as exc_info:
+            FileSystem(retry=False).mkdir(f"{url}/plain.txt/child")
+    assert exc_info.value.status_code == 400
+    assert not isinstance(exc_info.value, ResourceAlreadyExistsError)
+
+
+@pytest.mark.parametrize("status", [400, 403, 500])
+def test_a_400_from_mkcol_stays_a_400_when_the_existence_check_fails_too(
+    status: int,
+) -> None:
+    """The check is only a way to explain the 400: if it cannot be answered (the server
+    refuses it as well), the 400 the caller asked about is what it gets - not the check's error.
+    """
+    with scripted_server(_mkcol_says_400((status, {}, b""))) as (url, _rec):
+        with pytest.raises(HTTPStatusError) as exc_info:
+            FileSystem(retry=False).mkdir(f"{url}/plain.txt")
+    assert exc_info.value.status_code == 400
 
 
 def test_a_400_from_mkcol_with_a_body_is_not_assumed_to_mean_already_exists() -> None:

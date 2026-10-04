@@ -34,7 +34,8 @@ if TYPE_CHECKING:
 #: everything else this library parses off the wire.
 _DAV_NAMESPACE = "DAV:"
 
-# Non-standard status used by Apache/cPanel-based shared hosting to signal
+# Non-standard status used by cPanel-based shared hosting (its bandwidth
+# limit module, not Apache's own - httpd has no name for 509) to signal
 # that a customer's bandwidth allotment was exceeded.
 BANDWIDTH_LIMIT_EXCEEDED = 509
 

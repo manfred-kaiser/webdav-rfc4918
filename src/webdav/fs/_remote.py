@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from webdav.dav.multistatus import multistatus_failure
 from webdav.dav.urls import URL, relative_url_to
-from webdav.exceptions import ClientError, raise_for_status
+from webdav.exceptions import ClientError, WebDAVError, raise_for_status
 from webdav.methods import Method
 from webdav.url_safety import display_url, is_url
 
@@ -135,3 +135,16 @@ class Remote:
         # custom Response.multistatus_class (see Session's response_class)
         # is honoured here too.
         return response.multistatus
+
+    def exists_quietly(self, path: str) -> bool:
+        """Whether a ``PROPFIND`` (depth 0) finds ``path`` - ``False`` for any failure, not only a 404.
+
+        For a caller that already holds an error of its own and only wants to
+        know whether the resource is there: a server error answering this
+        question must not replace the one it holds.
+        """
+        try:
+            self.propfind(path, headers={"Depth": "0"})
+        except WebDAVError:
+            return False
+        return True

@@ -1251,11 +1251,18 @@ class Session:
             data: The body.
             if_match: Only replace the resource if its current ETag is this
                 one (``If-Match``) - protection against a lost update. A
-                weak ETag is refused (RFC 9110 sec. 13.1.1).
+                weak ETag is refused (RFC 9110 sec. 13.1.1), as every server
+                has to refuse it - and Apache's ``mod_dav`` hands out a weak
+                ETag for a file changed less than a second ago, so the ETag
+                taken right after a write may not be usable yet.
             overwrite: ``False`` only creates the resource, and fails with
-                412 if it already exists (``If-None-Match: *``), atomically
-                on the server - unlike an ``exists()`` check followed by a
-                ``PUT``. Left unset, the ``PUT`` replaces what is there.
+                412 if it already exists (``If-None-Match: *``) - unlike an
+                ``exists()`` check followed by a ``PUT``, the check is the
+                server's, but only as atomic as the server makes it: Apache's
+                ``mod_dav`` checks first and replaces the file afterwards, so
+                two creators at once can both get 201. Hold a lock where
+                exactly one writer must win. Left unset, the ``PUT``
+                replaces what is there.
             **kwargs: Anything :meth:`requests.Session.request` takes.
 
         Raises:

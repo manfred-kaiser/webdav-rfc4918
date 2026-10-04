@@ -397,10 +397,11 @@ class FileSystem:
         Locking a ``path`` that does not exist yet creates an empty resource
         there (RFC 4918 sec. 9.10.4). The RFC only says it "SHOULD NOT
         disappear" once the lock is gone - a SHOULD, not a MUST - and real
-        servers differ: it outlives the lock on wsgidav, but Apache's
-        mod_dav deletes it again once the lock is released (confirmed
-        against a real instance, see tests/test_apache_compliance.py). The
-        lock times out (see ``lock_timeout`` and the granted
+        servers differ: it outlives the lock on wsgidav. Apache's mod_dav
+        makes a *lock-null* resource (RFC 2518 sec. 7.4) instead: ``exists()``
+        is true, a ``GET`` is 404, and it is gone once the lock is released
+        (see tests/test_apache_compliance.py). The lock times out (see
+        ``lock_timeout`` and the granted
         :attr:`~webdav.dav.locks.ActiveLock.timeout`) and is not refreshed for
         you - use :meth:`refresh_lock`; writes made after it timed out fail with
         ``412``.
@@ -570,13 +571,17 @@ class FileSystem:
         except HTTPStatusError as exc:
             if exc.status_code == HTTPStatus.METHOD_NOT_ALLOWED:
                 raise ResourceAlreadyExistsError(exc.response, path) from exc
-            # Apache's mod_dav answers 400, not 405, for this same conflict
-            # when the trailing slash this method always adds (RFC 4918 sec.
-            # 5.2) lands on an existing *plain* resource - confirmed against
-            # a real instance, see tests/test_apache_compliance.py. Only
-            # trusted bodyless (``data is None``): a 400 for a request that
-            # did carry a body is more likely a genuinely malformed one.
-            if exc.status_code == HTTPStatus.BAD_REQUEST and data is None:
+            # Apache's mod_dav 2.4 answers 400, not 405, when the trailing
+            # slash this method always adds (RFC 4918 sec. 5.2) lands on an
+            # existing *plain* resource - and the same 400 for a path *below*
+            # one, which does not exist (see tests/test_apache_compliance.py).
+            # So a 400 means "exists" only if the resource is there, and only
+            # for a bodyless request: with a body it is more likely malformed.
+            if (
+                exc.status_code == HTTPStatus.BAD_REQUEST
+                and data is None
+                and self._remote.exists_quietly(path.rstrip("/"))
+            ):
                 raise ResourceAlreadyExistsError(exc.response, path) from exc
             raise
 
@@ -790,7 +795,8 @@ class FileSystem:
         in memory up to a threshold, on disk beyond it - and ``PUT`` it,
         replacing the resource, when the ``with`` block ends *without* an
         exception; ``x``/``xb`` do the same but fail if the resource
-        already exists (``If-None-Match: *``, atomic on the server).
+        already exists (``If-None-Match: *``, as atomic as the server makes it -
+        not on Apache's mod_dav, see :meth:`upload_fileobj`).
         Add ``t`` (or nothing) for text, ``b`` for bytes.
         """
         if mode not in _OPEN_MODES:
@@ -1044,6 +1050,7 @@ class FileSystem:
             ClientError: The file object did not hold as many bytes as ``size``.
             ResourceAlreadyExistsError: ``overwrite`` is false and ``path`` exists.
             PreconditionFailedError: A precondition of the upload failed.
+            MultiStatusError: A ``207`` named another resource (Apache: the locked parent).
             requests.RequestException: The transport failed.
 
         """
@@ -1060,9 +1067,9 @@ class FileSystem:
         if not overwrite:
             # An `exists()` pre-check followed by a separate PUT would be a
             # TOCTOU race (another client could create the resource in
-            # between); `If-None-Match: *` (RFC 7232 §3.2) makes the
-            # not-already-there check atomic on the server, which maps a
-            # conflicting PUT to 412 Precondition Failed.
+            # between); `If-None-Match: *` (RFC 7232 §3.2) leaves the check to
+            # the server (412 Precondition Failed) - as atomic as it makes it:
+            # Apache's mod_dav checks, then renames a temp file over the target.
             headers.setdefault("If-None-Match", "*")
 
         problem: list[str] = []

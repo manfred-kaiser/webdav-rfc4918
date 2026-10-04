@@ -111,8 +111,8 @@ returns {class}`~webdav.resource.Resource` objects.
   file (`200`) is refused rather than believed, and a file that changes between two blocks (its
   `ETag`) is an error.
 - **Writing** (`open(path, "wb")`, `"xb"`) uploads when the file is closed cleanly; a block that
-  raises leaves the resource untouched. `"xb"` creates only if nothing is there (atomic on the
-  server). Append mode is not supported.
+  raises leaves the resource untouched. `"xb"` creates only if nothing is there (`If-None-Match: *`,
+  as atomic as the server makes it - Apache's `mod_dav` does not make it atomic). Append mode is not supported.
 - **`get`** replaces an existing local file, as fsspec's `get` means to, but through a temporary
   file: a failed download leaves the old file as it was, and a symlink is never followed. A
   remote collection becomes a local directory.
