@@ -11,26 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `webdav`/`webdavs` are now registered with fsspec via its `fsspec.specs` entry point.
 - Documentation is now hosted at https://webdav.readthedocs.io.
-- The Apache compliance suite now pins what Apache's `mod_dav` does, traced in its 2.4.69 source:
-  ETag weakness, lock-null resources, the `If-None-Match: *` race, `If` header tagging, `Timeout`
-  handling, `UNLOCK` errors, the `207` for a new member of a locked collection, and more (see
-  `docs/apache-compliance-check.md`) - and how it behaves over time (locks that run out, connections
-  the server closes, `Timeout`, `LimitRequestBody`), with large files and odd names, and with many
-  clients at once. `WEBDAV_TEST_APACHE_PREFIX` runs it against an Apache built from the release tarball.
+- The Apache test suite now covers what `mod_dav` does: ETags, locks, timeouts, large files, odd names, parallel clients.
+- `WEBDAV_TEST_APACHE_PREFIX` runs the Apache tests against an Apache built from source.
+- The Apache page documents what was found, among it an Apache bug that aborts a listing.
 
 ### Fixed
 
-- `FileSystem.mkdir()` took every bodyless `400` from `MKCOL` for "already exists". Apache answers the
-  same `400` for a path *below* a plain file, which does not exist: the `400` now only means
-  `ResourceAlreadyExistsError` if the resource is there, and is raised as it is otherwise.
-- The documentation promised an atomic `overwrite=False` / `"xb"` (`If-None-Match: *`) and a strong
-  ETag from Apache's `FileETag`. It is as atomic as the server makes it - Apache's `mod_dav` checks the
-  condition before it reads the body, so two creators at once can both succeed - and a fresh Apache ETag
-  is weak for one second whatever `FileETag` says. The docstrings and the Apache page now say so, as they
-  now do for lock-null resources (what a `LOCK` on an unmapped URL creates on Apache).
-- Leaving `locked()` after the lock had run out logged "could not release the lock" on Apache, which
-  answers `UNLOCK` for a token it no longer knows with `400`; it is now logged as a lock that is
-  already gone, like the `404`/`409` of other servers.
+- `mkdir()` reports "already exists" for a `400` from Apache only if the resource is there.
+- `overwrite=False` and `"xb"` are no longer documented as atomic. Apache's `mod_dav` is not.
+- A fresh Apache ETag is weak for one second, whatever `FileETag` says. The docs said otherwise.
+- Locking an unmapped URL gives a lock-null resource on Apache. The docs now say so.
+- Leaving `locked()` after the lock expired no longer logs a failure on Apache.
 
 ## [1.0.0] - 2026-10-01
 
