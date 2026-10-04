@@ -7,6 +7,7 @@ inspect a running instance, keep it up after a failure, point at a specific
 directory). One implementation, so the two can never drift apart.
 """
 
+import os
 import shutil
 import subprocess
 import time
@@ -55,6 +56,12 @@ class _Profile:
     #: LoadModule directive either - Apache refuses to load one already
     #: built in.
     built_in: "frozenset[str]" = frozenset()
+    #: Modules this packaging needs loaded on top of REQUIRED_MODULES - the
+    #: distro packages have them built in, a build from the release tarball
+    #: has ``mod_unixd`` as a loadable module.
+    extra_modules: "tuple[tuple[str, str], ...]" = ()
+    #: ``htpasswd`` of this packaging if it is not on ``PATH``.
+    htpasswd: "str | None" = None
 
     def missing(self) -> list[str]:
         """What is missing for this specific profile - empty if it is fully usable."""
@@ -63,11 +70,17 @@ class _Profile:
             missing.append(self.httpd)
         missing += [
             str(self.module_dir / filename)
-            for filename, _directive in REQUIRED_MODULES
+            for filename, _directive in (*REQUIRED_MODULES, *self.extra_modules)
             if filename not in self.built_in
             and not (self.module_dir / filename).exists()
         ]
         return missing
+
+    def htpasswd_binary(self) -> "str | None":
+        """This packaging's ``htpasswd``, else the one on ``PATH`` - ``None`` if there is none."""
+        if self.htpasswd is not None and Path(self.htpasswd).exists():
+            return self.htpasswd
+        return shutil.which("htpasswd")
 
 
 #: Tried in order; the first fully present one wins. Same ``httpd`` binary
@@ -90,9 +103,35 @@ _PROFILES = (
 )
 
 
+#: Names a directory that holds an Apache built from the release tarball
+#: (``bin/httpd``, ``bin/htpasswd``, ``modules/``) - e.g. a ``--prefix`` of
+#: ``./configure``. Tried before the distro layouts, so that the suite can run
+#: against exactly that build.
+PREFIX_ENV = "WEBDAV_TEST_APACHE_PREFIX"
+
+
+def _all_profiles() -> "tuple[_Profile, ...]":
+    """``_PROFILES``, preceded by the build ``WEBDAV_TEST_APACHE_PREFIX`` names (if any)."""
+    prefix = os.environ.get(PREFIX_ENV)
+    if not prefix:
+        return _PROFILES
+    root = Path(prefix)
+    return (
+        _Profile(
+            f"build in {root}",
+            str(root / "bin" / "httpd"),
+            root / "modules",
+            built_in=frozenset({"mod_mpm_prefork.so"}),
+            extra_modules=(("mod_unixd.so", "unixd_module"),),
+            htpasswd=str(root / "bin" / "htpasswd"),
+        ),
+        *_PROFILES,
+    )
+
+
 def _resolve_profile() -> "_Profile | None":
     """The first fully-usable profile, or ``None`` if every one is missing something."""
-    for profile in _PROFILES:
+    for profile in _all_profiles():
         if not profile.missing():
             return profile
     return None
@@ -116,7 +155,7 @@ LogLevel warn
 # both distros this project supports.
 TypesConfig /etc/mime.types
 
-DavLockDB "locks/davlock"
+{lock_db}
 
 # Must be an ABSOLUTE path in both directives, and they must match exactly -
 # a relative "dav-root" in <Directory> silently failed to match this
@@ -133,7 +172,12 @@ DocumentRoot "{instance_dir}/dav-root"
     AuthUserFile "{instance_dir}/htpasswd"
     Require valid-user
 </Directory>
+
+{extra_conf}
 """
+
+
+LOCK_DB_DIRECTIVE = 'DavLockDB "locks/davlock"'
 
 
 def missing_prerequisites() -> list[str]:
@@ -143,26 +187,42 @@ def missing_prerequisites() -> list[str]:
     one may be partially present (e.g. a stray ``httpd`` binary with no
     matching modules) without either being usable on its own.
     """
-    if _resolve_profile() is not None:
+    profile = _resolve_profile()
+    if profile is not None:
+        if profile.htpasswd_binary() is None:
+            return ["htpasswd (package: apache2-utils, or your distro's equivalent)"]
         return []
-    if shutil.which("htpasswd") is None:
-        return ["htpasswd (package: apache2-utils, or your distro's equivalent)"]
     return [
         f"[{profile.name}] {item}"
-        for profile in _PROFILES
+        for profile in _all_profiles()
         for item in profile.missing()
     ]
 
 
-def write_instance(instance_dir: Path, *, clean: bool = True) -> Path:
+def write_instance(
+    instance_dir: Path,
+    *,
+    clean: bool = True,
+    port: int = PORT,
+    lock_db: bool = True,
+    without_modules: "frozenset[str]" = frozenset(),
+    extra_conf: str = "",
+) -> Path:
     """Create/refresh the instance's config, auth file and directories; return the config path.
+
+    ``port``, ``lock_db``, ``without_modules`` (``.so`` filenames from
+    ``REQUIRED_MODULES`` to leave out) and ``extra_conf`` (more server-level
+    directives, appended as they are) exist for the tests that need a second
+    instance next to the shared one, configured differently: e.g. without a
+    ``DavLockDB`` Apache still advertises locking but cannot grant a lock.
 
     Raises:
         RuntimeError: no known profile (see :func:`missing_prerequisites`) is fully usable.
 
     """
     profile = _resolve_profile()
-    if profile is None or shutil.which("htpasswd") is None:
+    htpasswd_bin = profile.htpasswd_binary() if profile is not None else None
+    if profile is None or htpasswd_bin is None:
         msg = "missing: " + ", ".join(missing_prerequisites())
         raise RuntimeError(msg)
     dav_root = instance_dir / "dav-root"
@@ -172,24 +232,24 @@ def write_instance(instance_dir: Path, *, clean: bool = True) -> Path:
         (instance_dir / sub).mkdir(parents=True, exist_ok=True)
     htpasswd_file = instance_dir / "htpasswd"
     if not htpasswd_file.exists():
-        htpasswd_bin = shutil.which("htpasswd")
-        assert htpasswd_bin is not None  # checked above
         subprocess.run(
             [htpasswd_bin, "-bc", str(htpasswd_file), TEST_USER, TEST_PASSWORD],
             check=True,
         )
     load_modules = "\n".join(
         f"LoadModule {directive:<22} {profile.module_dir / filename}"
-        for filename, directive in REQUIRED_MODULES
-        if filename not in profile.built_in
+        for filename, directive in (*REQUIRED_MODULES, *profile.extra_modules)
+        if filename not in profile.built_in and filename not in without_modules
     )
     conf_file = instance_dir / "httpd.conf"
     conf_file.write_text(
         HTTPD_CONF_TEMPLATE.format(
             instance_dir=instance_dir,
             load_modules=load_modules,
+            lock_db=LOCK_DB_DIRECTIVE if lock_db else "# no DavLockDB on purpose",
+            extra_conf=extra_conf,
             host=HOST,
-            port=PORT,
+            port=port,
         )
     )
     return conf_file
@@ -217,7 +277,7 @@ def wait_until_up(url: str, timeout: float = 5.0) -> None:
     raise RuntimeError(msg)
 
 
-def start(conf_file: Path) -> None:
+def start(conf_file: Path, *, port: int = PORT) -> None:
     """Start Apache with ``conf_file``, and wait until it answers requests.
 
     Raises:
@@ -255,7 +315,7 @@ def start(conf_file: Path) -> None:
             f"{error_log}:\n{error_log_tail}"
         )
         raise RuntimeError(msg)
-    wait_until_up(f"http://{HOST}:{PORT}/")
+    wait_until_up(f"http://{HOST}:{port}/")
 
 
 def stop(conf_file: Path) -> None:
@@ -270,4 +330,4 @@ def httpd_binary() -> str:
     already confirmed a profile is usable; not itself a usability check.
     """
     profile = _resolve_profile()
-    return profile.httpd if profile is not None else _PROFILES[0].httpd
+    return profile.httpd if profile is not None else _all_profiles()[0].httpd

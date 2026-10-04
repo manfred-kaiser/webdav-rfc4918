@@ -68,8 +68,10 @@ def main() -> int:
         print(
             "\nOn openSUSE: sudo zypper install apache2 apache2-utils\n"
             "On Debian/Ubuntu: sudo apt-get install apache2 apache2-utils\n"
-            "On another distro not in tests/apache_instance.py's _PROFILES, "
-            "add one there - see docs/apache-compliance-check.md.",
+            "With an Apache built from the release tarball: set "
+            "WEBDAV_TEST_APACHE_PREFIX to its install directory. On another "
+            "distro not in tests/apache_instance.py's _PROFILES, add one "
+            "there - see docs/apache-compliance-check.md.",
             file=sys.stderr,
         )
         return 1
