@@ -262,13 +262,13 @@ the server this library talks to in production.
   `..._mkdir_on_a_file_is_already_exists_but_below_a_file_it_is_not`, and, with
   a scripted server, the `test_a_400_from_mkcol_...` tests in
   `tests/test_rfc_compliance.py`.
-- **Racing `MKCOL`s: one `201`, the others `405` or `403`.**
+- **Racing `MKCOL`s: one `201`, the others refused - mostly `405`, some `403`.**
   `dav_fs_create_collection` maps every `apr_dir_make` error except
   ENOSPC/ENOENT to `403`, so a loser that passed the "exists" check and then
   met EEXIST gets `403` ("Unable to create collection"), not the `405` of
   RFC 4918 sec. 9.3.1. `makedirs(exist_ok=True)` in the fsspec layer accepts
   that when the collection is there afterwards. Pinned by
-  `test_apache_losers_of_a_mkcol_race_get_403_or_405`.
+  `test_apache_a_mkcol_race_has_one_winner_and_the_rest_are_refused`.
 - **No RFC 5689 (Extended MKCOL):** `extended-mkcol` is absent from the `DAV`
   header, and *any* `MKCOL` body - whatever it says, with or without a
   `Content-Type` - gets `415` (`process_mkcol_body`) and creates nothing.
@@ -467,9 +467,10 @@ temporary files that are renamed into place.
 - **Simultaneous overwrites leave one whole file** - the temporary file is
   renamed over the target - and **a reader never sees a half-written file**.
 - **A source can be copied any number of times at once, but only moved or
-  deleted once.** The losers are told `404` (gone when they looked) or `500`
-  (gone between looking and renaming - `dav_fs_move_resource`: "Could not rename
-  resource" for the `ENOENT`): which one is timing.
+  deleted once.** The losers are told an error: `404` (gone when they looked),
+  `500` (gone between looking and renaming - `dav_fs_move_resource`: "Could not
+  rename resource" for the `ENOENT`) or `403` (a failed removal, seen on Ubuntu).
+  Which one is timing, so only "exactly one wins" is pinned.
 - **Many simultaneous `LOCK`s on one resource:** every answer is `200` or `423`,
   at least one is `200`. With sdbm exactly one is.
 - **Simultaneous `LOCK`s on different resources:** every one is told `200`, with a
