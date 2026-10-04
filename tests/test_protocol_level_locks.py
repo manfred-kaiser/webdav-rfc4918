@@ -130,7 +130,7 @@ def test_a_lock_the_server_would_not_release_is_reported_not_swallowed(
     )
 
 
-@pytest.mark.parametrize("status", [404, 409])
+@pytest.mark.parametrize("status", [404, 409, 400])  # 400: what Apache answers
 def test_a_lock_that_was_already_gone_is_reported_as_that(
     caplog: pytest.LogCaptureFixture, status: int
 ) -> None:

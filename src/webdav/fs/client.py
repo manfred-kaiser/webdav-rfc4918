@@ -487,10 +487,13 @@ class FileSystem:
         status = response.status_code
         if HTTPStatus.OK <= status < HTTPStatus.MULTIPLE_CHOICES:
             return
-        if status in (HTTPStatus.NOT_FOUND, HTTPStatus.CONFLICT):
-            # RFC 4918 sec. 9.11.1: 409 - the resource was not locked (the URL is
-            # the one that was locked, so: it may have timed out) - or it is gone.
-            # Nothing to release any more, but writes since may have lost the lock.
+        if status in (
+            HTTPStatus.NOT_FOUND,
+            HTTPStatus.CONFLICT,
+            HTTPStatus.BAD_REQUEST,
+        ):
+            # Not locked any more (409, RFC 4918 sec. 9.11.1; Apache: 400 for a token it
+            # forgot) or gone: nothing to release, but writes since may have lost the lock.
             message = "the lock on %s was already gone when it was released (the server answered %s %s) - it may have timed out"
         else:
             # 403: not permitted to remove it; anything else: the server did not release it.
@@ -795,8 +798,7 @@ class FileSystem:
         in memory up to a threshold, on disk beyond it - and ``PUT`` it,
         replacing the resource, when the ``with`` block ends *without* an
         exception; ``x``/``xb`` do the same but fail if the resource
-        already exists (``If-None-Match: *``, as atomic as the server makes it -
-        not on Apache's mod_dav, see :meth:`upload_fileobj`).
+        already exists (``If-None-Match: *``; not atomic everywhere: :meth:`upload_fileobj`).
         Add ``t`` (or nothing) for text, ``b`` for bytes.
         """
         if mode not in _OPEN_MODES:
