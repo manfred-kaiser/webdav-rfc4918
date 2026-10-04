@@ -93,3 +93,26 @@ not as a function of file size.
 | Is lock bookkeeping safe under heavy concurrent contention? | Yes - no corruption, no deadlocks, observed under 500 concurrent attempts |
 | Are LOCK/PUT/UNLOCK retried on a dropped connection? | No, deliberately - only GET/HEAD/OPTIONS/PROPFIND are |
 | Does memory blow up with many concurrent large transfers? | No - grows linearly with concurrency, not file size |
+
+## Against Apache `mod_dav`
+
+One local run against an Apache 2.4.69 (prefork, default settings, loopback, no
+TLS), to see what the WsgiDAV numbers above do on the deployment target. The
+figures are a local sanity check, not a benchmark; correctness under the same
+load is pinned by `tests/test_apache_compliance.py` (see
+[Apache `mod_dav` compliance check](../apache-compliance-check.md)).
+
+| | Result |
+|---|---|
+| 256 MiB upload / download, byte for byte (SHA-256) | ~690 MiB/s / ~1260 MiB/s |
+| Upload of unknown length (`Transfer-Encoding: chunked`), 32 MiB | complete |
+| 3000 members in one collection: `ls()` / `walk()` | 0.16 s each |
+| `DELETE` of that collection | 0.03 s |
+| 32 threads, 2 MiB upload each, one shared `FileSystem` | 32 of 32 intact |
+| 100 threads, one `LOCK` each on 100 different files | 100 of 100 granted, 2.9 s |
+| 32 threads, `LOCK` on one file | exactly 1 granted, 31 x `423` |
+
+Where Apache differs from WsgiDAV under load is not speed but what the losers of
+a race are told: see "Parallel" and "Over time" in the compliance check - in
+particular that `If-None-Match: *` is not atomic, and that an unreleased lock on
+a name nothing was written to breaks the next listing of its collection.

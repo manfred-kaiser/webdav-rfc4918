@@ -30,8 +30,10 @@ ordinary `pytest` suite (over 100 tests, reproducible like any other) - not
 
 A handful of tests need a *second*, differently configured instance next to
 the shared one (`FileETag`, `DavDepthInfinity`, `DavMinTimeout`, no
-`DavLockDB`, no `mod_dav_lock`: ports 8781-8785, see `_PORTS` in the test
-module). They start and stop it themselves, and are skipped when only a
+`DavLockDB`, no `mod_dav_lock`, `KeepAliveTimeout`, `MaxKeepAliveRequests`,
+`Timeout`, `LimitRequestBody`: ports 8781-8789, see `_PORTS` in the test
+module). The suite takes about forty seconds, most of it waiting for locks
+to run out and connections to be closed. They start and stop it themselves, and are skipped when only a
 remote instance (`WEBDAV_TEST_APACHE_URL`) is available.
 
 ## Automatic (plain `pytest`)
@@ -384,6 +386,102 @@ the server this library talks to in production.
   with a missing parent is `409`. Pinned by `test_apache_ranges_are_answered_by_the_core`,
   `test_apache_get_on_a_collection_is_the_cores_404` and the `COPY`/`MOVE` tests
   after them.
+
+### Over time
+
+- **A lock that runs out is dropped when the next request looks at it** (no
+  timer sweeps them). From then on the resource is free for everybody, and
+  the old token is worth nothing: a write with it is `412`, a refresh is
+  `412`, and `UNLOCK` of it is `400` (not `409`). Through the client, a write
+  under an expired lock is `PreconditionFailedError`, and leaving the
+  `locked()` block logs "already gone" - the `400` is treated like the `409`/`404`
+  of other servers. Pinned by `test_apache_an_expired_lock_is_gone_and_its_token_is_refused`
+  and `test_apache_the_client_meets_an_expired_lock_with_a_412_and_a_log_line`.
+- **A lock on an unmapped URL that nobody released leaves a ghost.** Once its
+  lock has run out, the lock-null entry (see "Locking") stays: `PROPFIND` on the
+  path still answers, so `exists()` and `isfile()` stay true, `GET` is `404`, and
+  `DELETE` cannot remove it (`404`). Another `LOCK` + `UNLOCK` of the path, or
+  a `PUT`/`MKCOL` on it, clears it. Pinned by
+  `test_apache_an_expired_lock_null_resource_stays_visible_until_it_is_locked_again`.
+- **...and it breaks the next listing of its collection - an Apache bug.**
+  `PROPFIND` with `Depth: 1` drops an expired lock-null entry while it has the
+  lock database open read-only, which `mod_dav`'s `DAV_DEBUG` check (compiled
+  in unconditionally - `#if 1` in `mod_dav.h` - not a setting) turns into
+  "INTERNAL DESIGN ERROR: the lockdb was opened readonly" in the error log, after
+  the answer has started: the client sees the connection closed with no
+  response (`requests.exceptions.ConnectionError`). The entry is dropped all the
+  same, so the next listing works: one failed listing per expired entry. A
+  `PROPFIND` of the collection itself (`Depth: 0`) is not affected. `ls()` is
+  retried (three attempts), which covers up to two entries; more raise
+  `ConnectionError` on the first call and work on the next. The only way to
+  avoid it is not to leave a lock on a name nothing is written to - release
+  what `locked()` took, and give such a lock a short `lock_timeout`. Pinned by
+  `test_apache_a_listing_that_meets_an_expired_lock_null_entry_is_aborted_once_per_entry`,
+  `..._ls_gets_through_an_expired_lock_null_entry_by_retrying` and
+  `..._ls_fails_once_past_the_retries_and_then_works_for_a_collection_with_many`.
+- **Connections the server closes are not errors.** With `MaxKeepAliveRequests 3`
+  (every third answer says `Connection: close`) and `KeepAliveTimeout 1` (the
+  pooled connection is gone when the next request goes out) the client reconnects
+  before it sends - writes included, which are never retried. Pinned by
+  `test_apache_a_connection_the_server_closes_after_a_few_requests_is_not_an_error`
+  and `..._that_idled_past_the_keepalive_timeout_is_not_an_error`.
+- **A stalled upload is a `408`.** With `Timeout 1` a body that stops for longer
+  than that is answered `408 Request Timeout` (`HTTPStatusError`, not retried:
+  a `PUT`), nothing is stored - not even a temporary file the next listing
+  could show - and a slow but moving upload is fine. Pinned by
+  `test_apache_gives_up_on_a_stalled_upload_with_408_and_creates_nothing`.
+- **`LimitRequestBody` is a `413` before anything is stored** - announced by its
+  length (even 40 MiB, refused before it is sent), or streamed without one - and
+  a file that was there stays as it was. Pinned by
+  `test_apache_limitrequestbody_refuses_with_413_before_anything_is_stored`.
+
+### Size and names
+
+- **Large files and streams:** a 48 MiB file round-trips byte for byte, a range
+  far into it (`bytes=40 MiB-`) is answered from the right place, an upload of
+  unknown length goes out `Transfer-Encoding: chunked` and arrives complete, an
+  empty file is stored empty. A collection of 1200 members is listed in full and
+  removed with one `DELETE`. Pinned by `test_apache_a_large_file_round_trips_byte_for_byte`,
+  `..._an_upload_of_unknown_length_is_streamed_chunked_and_complete`,
+  `..._an_empty_file_is_stored_and_read_back_empty` and
+  `..._a_collection_of_many_members_is_listed_in_full_and_removed_at_once`.
+  (Throughput and memory are in [Performance and concurrency](reference/performance.md).)
+- **Names survive being a URL.** Spaces, `#`, `?`, `%`, `%20` (stays six
+  characters), `%2F`, `+`, `&`, `;`, `=`, quotes, `<>`, `|`, `[]`, non-ASCII
+  (Japanese, emoji, a combining accent), leading and trailing spaces, dot names
+  and a 255-byte name are stored and listed under exactly that name. Names that
+  differ only in case are two resources. A name longer than 255 *bytes* (256
+  ASCII characters, or 128 two-byte ones) is a `403` - the file system's
+  limit, as `apr_file_open` fails - and `.DAV`, Apache's own state directory, is
+  a `403` at any level (`dav_fs_is_state_path`). Pinned by
+  `test_apache_a_name_survives_the_round_trip` (one case per name),
+  `..._a_name_longer_than_255_bytes_is_a_403` and
+  `..._the_lock_database_directory_cannot_be_written`.
+
+### Parallel
+
+Many clients at once, against Apache's prefork processes, one lock database and
+temporary files that are renamed into place. All of it holds up:
+
+- **Parallel uploads** through one shared `FileSystem` arrive intact.
+- **Of many simultaneous `LOCK`s on one resource exactly one is granted** (`423`
+  for the rest) - the database is shared by all processes - and locks on
+  different resources are all granted and none is lost from the database.
+  Through the client, a contended `locked()` is held by one and refused
+  (`ResourceLockedError`) for the others, and no lock or token bookkeeping is
+  left behind.
+- **Simultaneous overwrites leave one whole file** - the temporary file is
+  renamed over the target - and **a reader never sees a half-written file**.
+- **Simultaneous `PROPPATCH`es of different properties on one resource lose
+  none** (the property database is locked per update).
+- **A source can be copied any number of times at once, but only moved or
+  deleted once.** The losers are told `404` (gone when they looked) or `500`
+  (gone between looking and renaming - `dav_fs_move_resource`: "Could not rename
+  resource" for the `ENOENT`): which one is timing.
+
+Pinned by the `test_apache_parallel_...`, `..._simultaneous_...`,
+`..._of_many_simultaneous_locks_...`, `..._a_reader_never_sees_a_half_written_file`
+and `..._copy_move_and_delete_of_one_source_at_once_...` tests.
 
 ## Troubleshooting
 

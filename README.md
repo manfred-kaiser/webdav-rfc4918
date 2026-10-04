@@ -99,7 +99,7 @@ WsgiDAV runs the rest of the test suite.
 | nginx + `dav-ext` | [![nginx](https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/nginx-compliance.yml/badge.svg?branch=main)](https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/nginx-compliance.yml) | 25+ | [docs](https://webdav.readthedocs.io/en/latest/nginx-compliance-check.html) |
 | WsgiDAV | [![WsgiDAV](https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/manfred-kaiser/webdav-rfc4918/actions/workflows/ci.yml) | rest of the suite | - |
 
-The test suite runs on every commit: 1400+ tests with over 90% code coverage. It
+The test suite runs on every commit: 1500+ tests with over 90% code coverage. It
 includes:
 
 - fsspec's own conformance suite (130+ tests)
