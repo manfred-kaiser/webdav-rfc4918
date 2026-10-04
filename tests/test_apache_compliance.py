@@ -1071,25 +1071,15 @@ def test_apache_concurrent_if_none_match_star_creators_only_ever_get_201_or_412(
     file is one writer's whole body. (More than one 201 is possible - see the test above.)
     """
     path = f"{scratch}/many.txt"
-    statuses: list[int] = []
-    barrier = threading.Barrier(16)
-
-    def create(index: int) -> None:
-        barrier.wait()
-        statuses.append(
-            _http(
-                "PUT",
-                path,
-                data=f"writer-{index}".encode(),
-                headers={"If-None-Match": "*"},
-            ).status_code
-        )
-
-    threads = [threading.Thread(target=create, args=(i,)) for i in range(16)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    statuses = _in_parallel(
+        16,
+        lambda index: _http(
+            "PUT",
+            path,
+            data=f"writer-{index}".encode(),
+            headers={"If-None-Match": "*"},
+        ).status_code,
+    )
     assert set(statuses) <= {201, 412}
     assert 201 in statuses
     buf = io.BytesIO()
@@ -1169,19 +1159,8 @@ def test_apache_a_mkcol_race_has_one_winner_and_the_rest_are_refused(
     (``apr_dir_make`` failed with EEXIST after they had looked: ``dav_fs_create_collection`` maps every
     error but ENOSPC/ENOENT to 403). Which code a loser gets is timing, and not pinned.
     """
-    statuses: list[int] = []
-    barrier = threading.Barrier(24)
     path = f"{scratch}/race-{uuid.uuid4().hex}"
-
-    def create() -> None:
-        barrier.wait()
-        statuses.append(_http("MKCOL", path).status_code)
-
-    threads = [threading.Thread(target=create) for _ in range(24)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    statuses = _in_parallel(24, lambda _i: _http("MKCOL", path).status_code)
     assert statuses.count(201) == 1
     assert all(status >= 400 for status in statuses if status != 201)
 
@@ -1824,19 +1803,29 @@ def test_apache_ranges_are_answered_by_the_core(scratch: str) -> None:
 
 
 def _in_parallel(count: int, work: Any) -> list[Any]:
-    """Run ``work(index)`` in ``count`` threads that all start at once; their results, in no order."""
+    """Run ``work(index)`` in ``count`` threads that all start at once; their results, in no order.
+
+    A worker that raises fails the calling test (with its exception) instead of dying alone in its
+    thread, where pytest would only warn about it.
+    """
     barrier = threading.Barrier(count)
     results: list[Any] = []
+    errors: list[BaseException] = []
 
     def run(index: int) -> None:
         barrier.wait()
-        results.append(work(index))
+        try:
+            results.append(work(index))
+        except BaseException as exc:  # noqa: BLE001 - handed to the test thread below
+            errors.append(exc)
 
     threads = [threading.Thread(target=run, args=(i,)) for i in range(count)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
+    if errors:
+        raise errors[0]
     return results
 
 
@@ -2177,11 +2166,7 @@ def test_apache_a_collection_of_many_members_is_listed_in_full_and_removed_at_on
                     timeout=10,
                 )
 
-    threads = [threading.Thread(target=create, args=(offset,)) for offset in range(8)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    _in_parallel(8, create)
     names = [name.rsplit("/", 1)[-1] for name in apache_client.ls(f"{scratch}/many")]
     assert sorted(names) == [f"f{index:05d}.txt" for index in range(count)]
     apache_client.remove(f"{scratch}/many")
@@ -2342,9 +2327,11 @@ def test_apache_many_simultaneous_locks_on_different_resources_are_all_granted(
 def test_apache_through_the_client_a_contended_lock_is_held_by_one_and_leaks_none(
     tmp_path: Path,
 ) -> None:
-    """The client side holds everywhere: each outcome is "held" or "refused" (and with sdbm at least
-    one is held), the session keeps no token afterwards. That no lock is left on the server holds with
-    sdbm - with Berkeley DB a lost update can undo an ``UNLOCK``, and it can damage the database.
+    """The client side holds everywhere: each outcome is "held", "refused" or - the lock was granted and
+    the server then no longer knew it, a 412 on the write - "lost"; the session keeps no token afterwards.
+    With sdbm nothing is lost, at least one is held, and no lock is left on the server. With Berkeley DB
+    (Debian, Ubuntu) a lock can be lost, a lost update can undo an ``UNLOCK``, and the database can be
+    damaged.
     """
     with (
         _isolated_instance(tmp_path) as (base, instance_dir),
@@ -2361,11 +2348,16 @@ def test_apache_through_the_client_a_contended_lock_is_held_by_one_and_leaks_non
                     outcomes["held"] += 1
                 except ResourceLockedError:
                     outcomes["refused"] += 1
+                except PreconditionFailedError:
+                    outcomes[
+                        "lost"
+                    ] += 1  # granted, then not known to the server any more
 
         _in_parallel(12, cycle)
-        assert set(outcomes) <= {"held", "refused"}
+        assert set(outcomes) <= {"held", "refused", "lost"}
         assert fs.session.locks.token_for(f"{base}/cycle.txt") is None
         if _dbm_is_sdbm(instance_dir):
+            assert "lost" not in outcomes
             assert outcomes["held"] >= 1
             assert _http("PUT", "cycle.txt", base=base, data=b"free").status_code == 204
 
@@ -2393,18 +2385,16 @@ def test_apache_a_reader_never_sees_a_half_written_file(scratch: str) -> None:
         while not stop.is_set():
             seen.append(_http("GET", path).content)
 
-    readers = [threading.Thread(target=read) for _ in range(4)]
-    for reader in readers:
-        reader.start()
-    try:
-        for index in range(12):
-            _http(
-                "PUT", path, data=second if index % 2 == 0 else first
-            ).raise_for_status()
-    finally:
-        stop.set()
-        for reader in readers:
-            reader.join()
+    def write() -> None:
+        try:
+            for index in range(12):
+                _http(
+                    "PUT", path, data=second if index % 2 == 0 else first
+                ).raise_for_status()
+        finally:
+            stop.set()
+
+    _in_parallel(5, lambda index: write() if index == 0 else read())
     assert seen
     assert all(content in (first, second) for content in seen)
 

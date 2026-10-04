@@ -480,7 +480,9 @@ temporary files that are renamed into place.
   there afterwards.
 - **Through the client**, a contended `locked()` is held by one and refused
   (`ResourceLockedError`) for the others, and the session keeps no token. With
-  sdbm no lock is left on the server.
+  sdbm no lock is lost or left on the server. With Berkeley DB a lock that was
+  granted can be unknown to the server a moment later: the write under it is a
+  `412` (`PreconditionFailedError`).
 
 "With sdbm" is the catch, see the next section. Pinned by the
 `test_apache_parallel_...`, `..._simultaneous_...`, `..._of_many_simultaneous_locks_...`,
