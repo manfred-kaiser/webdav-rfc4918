@@ -22,5 +22,10 @@ exception escaping from server-controlled data.
 
 ## What the library promises
 
+Credentials do not leak into exception messages, warnings or logs: a URL's userinfo and
+the query of a signed URL are redacted before either is built, and an
+`InsecureTransportWarning` (credentials about to go out over plain `http`) names the host
+and port only.
+
 See "Security" in the README and the redirect/TLS/session reference pages, and the
 "Security" sections of the CHANGELOG for what has been fixed and how.

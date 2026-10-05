@@ -126,6 +126,13 @@ without thinking about it.
 
 Confirmed against a real instance, not assumed from documentation:
 
+```{warning}
+Two of the limitations below are silent rather than merely incomplete: no
+overwrite protection, and a shared lock request granted as exclusive without
+saying so. Both can lead a caller to believe it has a guarantee it does not
+have.
+```
+
 - **`DAV:` header lists only class `2`, never `1`.** Reproduced
   consistently (immediately after start, after a restart, repeatedly) -
   not a startup race. The server's actual *behavior* is still class 1

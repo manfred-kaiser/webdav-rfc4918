@@ -43,6 +43,17 @@ fsspec.open("webdavs://webdav.example.org/Documents/Readme.md", auth=("user", "p
 fsspec.open("webdavs:///Documents/Readme.md", base_url="http://localhost:8080", auth=...)
 ```
 
+All keywords `WebdavFileSystem`'s constructor accepts:
+
+| Key | Meaning |
+|---|---|
+| `base_url` | The server; every path is relative to it (`/` is its root) |
+| `auth` | Passed straight to `Session` - a `(user, password)` tuple or a `requests.auth.AuthBase` |
+| `session` | An existing `Session` to reuse instead of building one from `base_url`/`auth` |
+| `host`, `port` | The server a `webdav(s)://host[:port]/path` URL names - fsspec fills these in itself |
+| `transport` | `"https"` (default) or `"http"`, for a bare `host` with no `base_url` |
+| anything else (`cert`, `verify`, `tls`, `timeout`, `redirect_policy`, `trusted_redirect_origins`, `retry`, `chunk_size`, ...) | Forwarded to `Session` unchanged - see `session.md` |
+
 ## Paths
 
 A filesystem is bound to one server, through its `base_url`, and its paths are those of the
@@ -65,6 +76,16 @@ server: they start at `/`, the root of the `base_url` (fsspec's `root_marker`, a
 - pyarrow compares the names a filesystem returns with the directory it was asked for, so give
   it absolute paths (`/data/ds`, not `data/ds`) - as for `MemoryFileSystem`, which has a root too.
 
+```python
+import pandas as pd
+from webdav.fsspec import WebdavFileSystem
+
+fs = WebdavFileSystem("https://webdav.example.org", auth=("user", "password"))
+# "/Datasets/events" is a directory of many small Parquet part files - absolute,
+# because pyarrow compares it against what fs.ls() returns (see above).
+df = pd.read_parquet("/Datasets/events", filesystem=fs)
+```
+
 This differs from {class}`~webdav.fs.client.FileSystem`, whose names are relative to the
 `base_url` without the leading `/` (`Photos/Gorilla.jpg`) and which also takes `/Photos`: the
 fsspec name is always `"/" + name`.
@@ -72,12 +93,9 @@ fsspec name is always `"/" + name`.
 **Why both names:** this library claims `"webdav"` and `"webdavs"` outright through the
 officially-sanctioned `fsspec.specs` entry point (`clobber=True`, like every entry-point
 registration fsspec itself processes), having verified full conformance with fsspec's own
-test suite (`fsspec.tests.abstract`; see `tests/test_fsspec_abstract.py`) - including a
-fsspec bug it ran into and reported along the way
-([fsspec/filesystem_spec#2215](https://github.com/fsspec/filesystem_spec/issues/2215),
-partially fixed upstream since as
-[fsspec/filesystem_spec#2217](https://github.com/fsspec/filesystem_spec/pull/2217)). A plain
-`import webdav.fsspec` (without the package being installed with its entry-point metadata)
+test suite (`fsspec.tests.abstract`; see `tests/test_fsspec_abstract.py`) - see `CHANGELOG.md`
+for the history behind this registration, including an fsspec bug found and reported along the
+way. A plain `import webdav.fsspec` (without the package being installed with its entry-point metadata)
 only ever claims `"webdavs"`, never `"webdav"` - silently winning a name away from whatever
 already claimed it is a different, more surprising thing than the deliberate, opt-in
 entry-point registration above.
@@ -102,14 +120,28 @@ returns {class}`~webdav.resource.Resource` objects.
   403 and WsgiDAV 500. Such an answer is not an error for `makedirs(exist_ok=True)` if the
   directory is there afterwards - a tolerance of this filesystem, not something the client does
   (`FileSystem.mkdir` is strict).
+- **Synchronous**: this is a plain `AbstractFileSystem`, not an `AsyncFileSystem` - there is no
+  `async def` anywhere in this backend. Parallelism across Dask workers comes from each worker
+  (process or thread) holding its own `WebdavFileSystem` instance (and so its own
+  connection/session), not from one worker running many requests concurrently on an event loop.
 - **Reading** (`open(path, "rb")`, `cat_file(path, start, end)`) asks the server for blocks of
   the file - `Range: bytes=a-b`, through fsspec's block cache - and reads every answer to its
   end, so a reader that seeks (Parquet) does not cut off a stream with each seek and the
   connection is reused. `cat_file` with a range asks for exactly those bytes; a whole file is
   one request without a `Range`. The size comes from one `PROPFIND` when the file is opened, so a
-  resource that has none cannot be read this way. A server that answers a part with the whole
-  file (`200`) is refused rather than believed, and a file that changes between two blocks (its
-  `ETag`) is an error.
+  resource that has none cannot be read this way. Each `open()` therefore costs one extra
+  round-trip before the first byte arrives - for a dataset split across many small files or
+  partitions (a directory of many small Parquet part files, say), that per-file `PROPFIND` is
+  paid on top of the `GET`(s) for every one of them. No dedicated small-file-count benchmark
+  exists yet for this backend; `performance.md` so far only measures throughput and concurrency
+  on larger transfers. A server that answers a part with the whole file (`200`) is refused rather
+  than believed, and a file that changes between two blocks (its `ETag`) is an error.
+- **Caching** is fsspec's own: `cache_type`/`block_size`/`cache_options` are the same generic
+  `AbstractFileSystem.open()` parameters every fsspec backend accepts (`"readahead"`, `"mmap"`,
+  `"block"`, ...) - this filesystem adds no WebDAV-specific cache of its own, it only supplies
+  the block fetch (`_fetch_range`) fsspec's cache calls into. The default is fsspec's own
+  `"readahead"`; `cat_file()` (a single bounded read) asks for `cache_type="none"` instead, so a
+  few requested bytes do not pull in a whole cache block.
 - **Writing** (`open(path, "wb")`, `"xb"`) uploads when the file is closed cleanly; a block that
   raises leaves the resource untouched. `"xb"` creates only if nothing is there (`If-None-Match: *`,
   as atomic as the server makes it - Apache's `mod_dav` does not make it atomic). Append mode is not supported.
@@ -118,8 +150,12 @@ returns {class}`~webdav.resource.Resource` objects.
   remote collection becomes a local directory.
 - **`rm`** refuses a non-empty collection unless `recursive=True`, because `DELETE` on a
   collection removes everything below it.
-- **Credentials**: `to_json()` and pickling contain the password in clear text. Do not store or
-  send them anywhere untrusted.
+
+```{warning}
+This filesystem's `to_json()` output, or a pickled instance, contains its
+credentials in clear text. Never write it to disk or send it anywhere
+untrusted.
+```
 
 Checked against fsspec's own conformance test suite
 (`fsspec.tests.abstract` - the same one real backends like `s3fs`/`gcsfs`

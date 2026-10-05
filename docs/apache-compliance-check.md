@@ -36,6 +36,20 @@ module). The suite takes about forty seconds, most of it waiting for locks
 to run out and connections to be closed. They start and stop it themselves, and are skipped when only a
 remote instance (`WEBDAV_TEST_APACHE_URL`) is available.
 
+## Summary
+
+| Area | What matters in production |
+|---|---|
+| ETags | Weak for ~1s after a write; `If-Match` right after a `PUT` needs a different condition or a wait |
+| Creating things | `overwrite=False` is not atomic; a lock is the only way to guarantee exactly one writer |
+| Locking | Works once `DavLockDB` is set (`mod_dav_lock` is not required); shared locks coexist, exclusive ones don't |
+| The `If` header / locked neighbours | A new member of a locked collection answers `207`/`424`, never a plain `423` |
+| Properties and reading | `PROPFIND Depth: infinity` needs `DavDepthInfinity On`; a failed `PROPPATCH` is all-or-nothing |
+| Over time | An expired lock is dropped lazily, on the next request that looks at it - and can break the collection's next listing once |
+| Size and names | 255-byte name limit; `.DAV` is refused at any level |
+| Parallel | Exactly one writer wins a race - "with sdbm" is the catch |
+| The DBM type decides | Debian/Ubuntu's Berkeley-DB build can silently lose concurrent locks and properties |
+
 ## Automatic (plain `pytest`)
 
 ```console
@@ -238,19 +252,22 @@ the server this library talks to in production.
 
 ### Creating things
 
-- **`overwrite=False` (`If-None-Match: *`) is not atomic on Apache.**
-  `dav_method_put` checks the condition (`dav_validate_request`) when the
-  request arrives, then streams the body into a temporary file and renames it
-  over the target (`dav_fs_close_stream`, `apr_file_rename`). A creator that
-  arrives and finishes in between does not stop the one already let through:
-  its file is replaced, and both are told `201`. A sequential second creator
-  is refused with `412` as expected. Where exactly one writer must win, hold a
-  lock (which Apache does enforce). Pinned by
-  `test_apache_if_none_match_star_is_checked_before_the_body_is_read` (a
-  deterministic demonstration: the first request is held up halfway through its
-  body), `test_apache_concurrent_if_none_match_star_creators_only_ever_get_201_or_412`,
-  `test_apache_a_sequential_second_creator_is_refused` and
-  `test_apache_a_lock_makes_the_creator_exclusive`.
+```{warning}
+`overwrite=False` (`If-None-Match: *`) is not atomic on Apache.
+`dav_method_put` checks the condition (`dav_validate_request`) when the
+request arrives, then streams the body into a temporary file and renames it
+over the target (`dav_fs_close_stream`, `apr_file_rename`). A creator that
+arrives and finishes in between does not stop the one already let through:
+its file is replaced, and both are told `201`. A sequential second creator
+is refused with `412` as expected. Where exactly one writer must win, hold a
+lock (which Apache does enforce). Pinned by
+`test_apache_if_none_match_star_is_checked_before_the_body_is_read` (a
+deterministic demonstration: the first request is held up halfway through its
+body), `test_apache_concurrent_if_none_match_star_creators_only_ever_get_201_or_412`,
+`test_apache_a_sequential_second_creator_is_refused` and
+`test_apache_a_lock_makes_the_creator_exclusive`.
+```
+
 - **`MKCOL` on an existing plain resource: `405` without, `400` with the
   trailing slash.** `FileSystem.mkdir()` always sends the slash (RFC 4918 sec.
   5.2); `dav_fs_get_resource` then sees "extraneous path components" below a
@@ -460,34 +477,33 @@ the server this library talks to in production.
 
 ### Parallel
 
-Many clients at once, against Apache's prefork processes, one lock database and
-temporary files that are renamed into place.
+Many clients at once, against Apache's prefork processes, one lock database
+and temporary files that are renamed into place.
 
-- **Parallel uploads** through one shared `FileSystem` arrive intact.
-- **Simultaneous overwrites leave one whole file** - the temporary file is
-  renamed over the target - and **a reader never sees a half-written file**.
-- **A source can be copied any number of times at once, but only moved or
-  deleted once.** The losers are told an error: `404` (gone when they looked),
-  `500` (gone between looking and renaming - `dav_fs_move_resource`: "Could not
-  rename resource" for the `ENOENT`) or `403` (a failed removal, seen on Ubuntu).
-  Which one is timing, so only "exactly one wins" is pinned.
-- **Many simultaneous `LOCK`s on one resource:** every answer is `200` or `423`,
-  at least one is `200`. With sdbm exactly one is.
-- **Simultaneous `LOCK`s on different resources:** every one is told `200`, with a
-  token of its own. With sdbm every lock is there afterwards.
-- **Simultaneous `PROPPATCH`es of different properties on one resource** are all
-  told `207`, and no property ever has a wrong value. With sdbm all of them are
-  there afterwards.
-- **Through the client**, a contended `locked()` is held by one and refused
-  (`ResourceLockedError`) for the others, and the session keeps no token. With
-  sdbm no lock is lost or left on the server. With Berkeley DB a lock that was
-  granted can be unknown to the server a moment later: the write under it is a
-  `412` (`PreconditionFailedError`).
+| Scenario | Result |
+|---|---|
+| Parallel uploads through one shared `FileSystem` | All arrive intact |
+| Simultaneous overwrites of the same file | Exactly one whole file ends up written (the temp file is renamed over the target); a reader never sees a half-written file |
+| A source copied several times at once | Any number of copies succeed |
+| A source moved or deleted several times at once | Exactly one wins; the losers get `404` (gone when checked), `500` (gone between check and rename), or `403` (failed removal, seen on Ubuntu) - which one is timing, only "exactly one wins" is guaranteed |
+| Many simultaneous `LOCK`s on one resource | Every answer is `200` or `423`, at least one `200` |
+| Simultaneous `LOCK`s on different resources | Every one is `200`, each with its own token |
+| Simultaneous `PROPPATCH`es of different properties on one resource | All `207`, no property ever has a wrong value |
+| A contended `locked()`, through the client | One holds it; the rest get `ResourceLockedError` and keep no token |
 
-"With sdbm" is the catch, see the next section. Pinned by the
-`test_apache_parallel_...`, `..._simultaneous_...`, `..._of_many_simultaneous_locks_...`,
-`..._a_reader_never_sees_a_half_written_file` and
-`..._copy_move_and_delete_of_one_source_at_once_...` tests.
+```{warning}
+All of the above holds reliably **only with sdbm** as Apache's DBM (the
+release-tarball default). Debian's and Ubuntu's Berkeley-DB build can lose
+a lock or a property under exactly this kind of concurrent access, and the
+damage can outlast the request that caused it - see "The DBM type decides"
+below. With Berkeley DB, a `locked()` that was granted can also be unknown
+to the server a moment later: the write under it then gets `412`
+(`PreconditionFailedError`).
+```
+
+Pinned by the `test_apache_parallel_...`, `..._simultaneous_...`,
+`..._of_many_simultaneous_locks_...`, `..._a_reader_never_sees_a_half_written_file`
+and `..._copy_move_and_delete_of_one_source_at_once_...` tests.
 
 ### The DBM type decides: Berkeley DB loses concurrent writes
 
@@ -506,23 +522,27 @@ defaults to Berkeley DB**, which is not. Seen on GitHub Actions' `ubuntu-latest`
 | 40 x `LOCK` on 40 resources, all answered `200` | in 5 of 10 rounds 1 to 8 locks were not enforced a second later - the resource could be written without the token |
 | 16 x `PROPPATCH` of 16 different properties on one file | one or more properties missing in 6 of 10 rounds (in the full suite sometimes most of them) |
 
-Every request is answered as if it had worked. Worse, the damage can last: after
-such a burst the lock database of the Ubuntu instance was unusable for the rest of
-the run - no lock was enforced, valid tokens were refused with `412`, locks
-vanished from `PROPFIND` - and it stayed that way for the next run that reused
-the same directory. What this means in production:
+Every request is answered as if it had worked. Worse, the damage can last.
 
-- A lock taken *while other locks are being taken or released* is not reliable
-  on such a server. Locks that are taken one at a time are.
-- Properties set by several clients on the same resource at once can overwrite
-  each other.
+```{warning}
+After such a burst the lock database of the Ubuntu instance was unusable for
+the rest of the run - no lock was enforced, valid tokens were refused with
+`412`, locks vanished from `PROPFIND` - and it stayed that way for the next
+run that reused the same directory. What this means in production:
+
+- A lock taken *while other locks are being taken or released* is not
+  reliable on such a server. Locks that are taken one at a time are.
+- Properties set by several clients on the same resource at once can
+  overwrite each other.
 - The data files themselves are not affected (the temporary file is renamed
   into place), and sequential use is fine: the rest of the suite passes on
   Ubuntu.
-- There is nothing to configure. Where this matters, build Apache with sdbm as
-  the DBM default, or keep concurrent locking and `PROPPATCH` out of the picture
-  (one writer per collection, or a lock taken by a single process in front of
-  the server).
+
+There is nothing to configure. Where this matters, build Apache with sdbm as
+the DBM default, or keep concurrent locking and `PROPPATCH` out of the
+picture (one writer per collection, or a lock taken by a single process in
+front of the server).
+```
 
 The tests above therefore run on an instance of their own (a damaged database must
 not take the other tests down with it), ask for the strict result only where that
@@ -538,19 +558,19 @@ and the by-hand instructions above both default to `/tmp/apache-webdav-test`
 instead (a different, separate instance) - adjust the paths below to
 whichever one applies.
 
-- **"Apache did not come up within 5s"**: check that instance's
-  `logs/error.log` - usually a distro whose layout matches neither built-in
-  profile (see `_PROFILES` in `tests/apache_instance.py`), or a stale PID
-  file from a previous instance that was not shut down cleanly
+- **"Apache did not come up within 5s"** - check that instance's
+  `logs/error.log`. Usually a distro whose layout matches neither built-in
+  profile (see `_PROFILES` in `tests/apache_instance.py`), a stale PID file
+  from a previous instance that was not shut down cleanly
   (`rm <instance-dir>/logs/httpd.pid`), or something else already listening
-  on port 8765 (a manually-started instance you forgot about, most likely -
-  `pgrep -fa 'httpd.*apache-webdav-test\|apache2.*apache-webdav-test\|httpd.*webdav-rfc4918-apache-test\|apache2.*webdav-rfc4918-apache-test'`).
+  on port 8765
+  (`pgrep -fa 'httpd.*apache-webdav-test\|apache2.*apache-webdav-test\|httpd.*webdav-rfc4918-apache-test\|apache2.*webdav-rfc4918-apache-test'`).
 - **A test fails with "already exists" / 409 on the very first test in a
-  run**: `dav-root` has state left over from a previous, uncleaned run -
+  run** - `dav-root` has state left over from a previous, uncleaned run:
   `rm -rf <instance-dir>/dav-root/*` (the automatic fixture and the
-  automation script both do this for you by default; `--no-clean` opts out
-  for the script).
-- **Running a single test with `-k` fails with 404/409 that a full run
-  does not**: most tests share a `compliance/` directory that an earlier
-  test in the file creates - run the full file, or create `compliance/`
-  yourself first.
+  automation script both do this by default; `--no-clean` opts out for the
+  script).
+- **Running a single test with `-k` fails with 404/409 that a full run does
+  not** - most tests share a `compliance/` directory that an earlier test in
+  the file creates. Run the full file, or create `compliance/` yourself
+  first.

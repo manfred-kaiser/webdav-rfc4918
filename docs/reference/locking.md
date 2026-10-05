@@ -1,5 +1,10 @@
 # Locking (RFC 4918 Class 2)
 
+A lock reserves a resource for one client, server-side, so that writes from
+other clients are refused until it is released or times out.
+`FileSystem.locked()` acquires one, carries its token on every write made
+through the lock, and releases it again on exit.
+
 ```python
 with fs.locked("Documents/report.docx") as active_lock:
     # writes made through this FileSystem (or a Session sharing its

@@ -46,6 +46,12 @@ should scale further before hitting a client-side limit - this project's
 own Apache/nginx compliance suites run the same library against exactly
 those, just not at this concurrency.
 
+```{tip}
+Mounting a larger pool (`pool_maxsize=100`) made no measurable difference
+against a single WsgiDAV instance - tuning it up is not worth doing until a
+deployment is known to be bottlenecked on it.
+```
+
 ## Locking under contention: correct, not silently retried
 
 50 threads, each acquiring and releasing an exclusive lock on the same
@@ -57,21 +63,26 @@ finishes), and lock conflicts are reported correctly as
 Under this load, a small number of `LOCK`/`PUT`/`UNLOCK` calls got a
 transient `requests.exceptions.ConnectionError` (the server resetting an
 overloaded connection) that propagated to the caller instead of being
-retried. **This is deliberate**, not a gap: `retry=True` (the default)
-only retries safe, idempotent methods -
+retried. `retry=True` (the default) only retries safe, idempotent methods:
 
 ```python
 RETRYABLE_METHODS = frozenset({Method.GET, Method.HEAD, Method.OPTIONS, Method.PROPFIND})
 ```
 
 (`webdav.methods`) - `LOCK`, `UNLOCK`, `PUT`, `MKCOL`, `COPY`, `MOVE` and
-`PROPPATCH` are excluded on purpose. Blindly retrying a `LOCK` whose
-response was lost risks acquiring it twice (or masking a genuine
-conflict); blindly retrying an `UNLOCK` that actually succeeded risks a
-confusing `409` on the retry for a lock that is already gone. A caller
-doing heavy concurrent locking and wanting resilience against transient
-connection failures needs to catch `requests.exceptions.ConnectionError`
-around those specific calls itself - the library will not paper over it.
+`PROPPATCH` are excluded on purpose.
+
+```{warning}
+`LOCK`, `UNLOCK`, `PUT`, `MKCOL`, `COPY`, `MOVE` and `PROPPATCH` are never
+retried automatically, even on a transient connection failure - this is
+deliberate, not a gap. Blindly retrying a `LOCK` whose response was lost
+risks acquiring it twice (or masking a genuine conflict); blindly retrying
+an `UNLOCK` that actually succeeded risks a confusing `409` on the retry
+for a lock that is already gone. A caller doing heavy concurrent locking
+and wanting resilience against transient connection failures needs to
+catch `requests.exceptions.ConnectionError` around those specific calls
+itself - the library will not paper over it.
+```
 
 ## Many concurrent large transfers: memory scales with concurrency, predictably
 
@@ -80,9 +91,12 @@ own 100 MiB file concurrently (disk-based, not held in memory by the
 caller): all 8 checksums matched, ~219 MB/s aggregate throughput, and
 peak RSS grew by about 90 MB per concurrent transfer (not per megabyte
 transferred) - consistent with each connection's own chunk buffers and
-`requests`/`urllib3` overhead, not a leak. Plan memory for concurrent
-large transfers roughly as *(number of simultaneous transfers) x 90 MB*,
-not as a function of file size.
+`requests`/`urllib3` overhead, not a leak.
+
+```{tip}
+Plan memory for concurrent large transfers roughly as *(number of
+simultaneous transfers) x 90 MB*, not as a function of file size.
+```
 
 ## Summary
 

@@ -1,5 +1,9 @@
 # CLI
 
+`dav` is a command-line WebDAV client installed together with this package -
+useful for quick checks, scripting, or exploring a server without writing
+Python. Every subcommand maps to one file-system-style operation.
+
 ```console
 $ pip install webdav-rfc4918   # the `dav` command is part of the package
 ```
@@ -7,7 +11,11 @@ $ pip install webdav-rfc4918   # the `dav` command is part of the package
 Every command takes one or more WebDAV URLs
 (`webdav://host/path`/`webdavs://host/path`, or plain `http(s)://`).
 Authentication is `user:pass@host` in the URL, `--user`/`--password`, or
-the `WEBDAV_USER`/`WEBDAV_PASSWORD` environment variables.
+the `WEBDAV_USER`/`WEBDAV_PASSWORD` environment variables. A `user:pass@host`
+URL is parsed by the `dav` command itself and passed to the library as
+`auth=`, which otherwise refuses credentials embedded in a URL - see
+[Session: Limits on what a server can make the client
+do](session.md#limits-on-what-a-server-can-make-the-client-do).
 
 ```console
 $ dav ls webdav://user:pass@webdav.example.org/Photos

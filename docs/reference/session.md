@@ -112,6 +112,16 @@ its matching class attribute, and pass the `Response` subclass here - see
   a reason to refuse it.
 - Credentials in a URL (`https://user:pw@host/`) are refused - pass `auth=`.
 
+```{warning}
+`auth=` is only encrypted on the wire if `base_url` (or the URL you call) is
+`https://`. Over a plain `http://` URL the username and password go out in
+clear text on the very first request, not only across a redirect to such a
+URL - anyone on the network path can read them. The session warns once per
+host (`InsecureTransportWarning`, skipped only for localhost) when this
+happens, but still sends the request; use an `https://` URL instead of
+relying on the warning.
+```
+
 ## Paths and names
 
 A path is the plain name - `a%20b.txt` is a file called `a%20b.txt` - and is
@@ -162,8 +172,10 @@ serialises the options you configured.
 - A callable you passed (`trusted_redirect_origins=` or `retry=` as a
   function) has to be picklable too: a module-level function, not a lambda.
 
-**Credentials warning:** a pickled session contains its credentials in clear
-text - do not write it to disk or send it anywhere untrusted.
+```{warning}
+A pickled `Session`/`FileSystem` contains its credentials in clear text.
+Never write it to disk or send it anywhere untrusted.
+```
 
 ## A note on `requests.Session`
 

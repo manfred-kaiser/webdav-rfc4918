@@ -3,9 +3,15 @@
 An [RFC 4918](https://www.rfc-editor.org/rfc/rfc4918) compliant WebDAV
 client for Python, built on [`requests`](https://requests.readthedocs.io/),
 with an optional [`fsspec`](https://filesystem-spec.readthedocs.io)
-filesystem and a `dav` CLI. TLS verification is on by default and disabling it is
-never quiet, redirects never carry your credentials to another origin, and
-responses are bounded in size and time.
+filesystem and a `dav` CLI.
+
+The test suite runs 1500+ tests on every commit, with over 90% code
+coverage, against four real servers (Nextcloud, Apache `mod_dav`, nginx
+`dav-ext`, WsgiDAV). TLS verification is on by default, turning it off is
+never silent, and redirects never carry credentials to another origin. The
+full test and CI breakdown, and the complete list of security defaults, are
+in the
+[README](https://github.com/manfred-kaiser/webdav-rfc4918#readme).
 
 ## Installation
 
@@ -28,17 +34,63 @@ with webdav.FileSystem("https://webdav.example.org", auth=("username", "password
     fs.upload_file("Gorilla.jpg", "Photos/Gorilla.jpg")
 ```
 
+Any of the calls above can raise a `webdav.exceptions.WebDAVError` (or one
+of its subclasses) if the server rejects the request or the connection
+fails:
+
+```python
+try:
+    fs.upload_file("Gorilla.jpg", "Photos/Gorilla.jpg")
+except webdav.exceptions.WebDAVError as exc:
+    print(exc)
+```
+
+See [Exceptions](reference/exceptions.md) for the full hierarchy and which
+errors are safe to retry.
+
 ```{toctree}
 :maxdepth: 2
-:caption: Contents
+:caption: For switchers
+
+migration
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Core concepts
 
 reference/session
 reference/locking
-reference/redirects
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Error handling & troubleshooting
+
+reference/exceptions
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Security & transport
+
 reference/tls
-reference/cli
+reference/redirects
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Features in depth
+
 reference/fsspec
+reference/cli
 reference/performance
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Operations & compliance
+
 apache-compliance-check
 nginx-compliance-check
 nextcloud-compliance-check
