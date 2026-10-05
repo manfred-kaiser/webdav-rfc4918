@@ -49,6 +49,15 @@ session = Session(
 )
 ```
 
+One call can use another policy than its session:
+
+```python
+r = session.get("Documents/Readme.md", redirect_policy=RedirectPolicy.NEVER)
+```
+
+The policies and their exact rules are listed under
+[`RedirectPolicy`](api.md#redirects) in the API reference.
+
 ## What is and is not followed
 
 Whatever the policy:
@@ -90,10 +99,3 @@ that has to repeat others names them in
 A redirect the active policy doesn't allow raises
 {class}`~webdav.exceptions.RedirectNotFollowedError` - the server's
 requested target is on `exc.response.headers["Location"]`.
-
-```{eval-rst}
-.. autoclass:: webdav.transport.redirects.RedirectPolicy
-   :members:
-
-.. autoclass:: webdav.exceptions.RedirectNotFollowedError
-```

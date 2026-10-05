@@ -31,7 +31,9 @@ myst_heading_anchors = 3
 html_theme = "sphinx_rtd_theme"
 html_theme_options = {
     "logo_only": False,
-    "navigation_depth": 3,
+    # Sidebar: page titles only, never a page's own sub-headings - there are
+    # no real subpages here, so an expanding entry would be misleading.
+    "navigation_depth": 1,
 }
 
 html_context = {
@@ -43,6 +45,7 @@ html_context = {
 }
 
 html_static_path = ["_static"]
+html_css_files = ["custom.css"]
 templates_path = ["_templates"]
 
 intersphinx_mapping = {
@@ -54,6 +57,8 @@ intersphinx_mapping = {
 master_doc = "index"
 autosectionlabel_maxdepth = 1
 autoclass_content = "both"
+# Keep autodoc classes and functions out of the sidebar.
+toc_object_entries = False
 
 copybutton_prompt_text = r">>> |\.\.\. |\$ "
 copybutton_prompt_is_regexp = True

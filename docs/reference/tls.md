@@ -53,9 +53,4 @@ session = Session(
 )
 ```
 
-```{eval-rst}
-.. autoclass:: webdav.transport.tls.TLSOptions
-   :members:
-
-.. autofunction:: webdav.transport.tls.build_ssl_context
-```
+All fields of `TLSOptions` are listed in the [API reference](api.md#tls).

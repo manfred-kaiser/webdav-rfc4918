@@ -18,12 +18,9 @@ with fs.locked("Documents/report.docx") as active_lock:
 what the server actually granted (it may differ from what was requested -
 e.g. a shorter timeout).
 
-```{eval-rst}
-.. autofunction:: webdav.fs.client.FileSystem.locked
-
-.. autoclass:: webdav.dav.locks.ActiveLock
-   :members:
-```
+The API reference lists the arguments of `locked()` under
+[FileSystem](api.md#filesystem) and the attributes of `ActiveLock` under
+[Locking](api.md#locking).
 
 ## Refreshing a lock
 
@@ -39,9 +36,7 @@ with fs.locked("Documents/report.docx", lock_timeout=60) as active_lock:
     )
 ```
 
-```{eval-rst}
-.. autofunction:: webdav.fs.client.FileSystem.refresh_lock
-```
+`refresh_lock()` is a method of [`FileSystem`](api.md#filesystem).
 
 ## What a lock is, and is not
 
@@ -78,15 +73,12 @@ with fs.locked("Documents/report.docx", lock_timeout=60) as active_lock:
   cannot be read is released again and the error raised, rather than left to
   block everyone until it times out. `track=False` gives you the bare answer
   instead: nothing recorded, nothing read, the token yours to keep.
+  [Session: `lock` and `unlock`](session.md#lock-and-unlock) has an example.
 
 ## The `If` header
 
 Writes through a held lock automatically carry an `If` header asserting
 the lock token (RFC 4918 §10.4) - built by
 {mod}`webdav.dav.conditional`, which is also usable directly for a custom
-conditional request (e.g. an `ETag`-conditional write):
-
-```{eval-rst}
-.. automodule:: webdav.dav.conditional
-   :members:
-```
+conditional request (e.g. an `ETag`-conditional write). Its functions are
+documented in the [API reference](api.md#locking).

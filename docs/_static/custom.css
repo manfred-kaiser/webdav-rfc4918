@@ -1,0 +1,19 @@
+/* sphinx_rtd_theme wraps every table in a horizontally scrolling container
+ * and keeps inline code spans on one line by default. With the wide
+ * multi-column tables in this documentation (method listings, server
+ * matrix, ...) that forces sideways scrolling to read a single row.
+ * Let cells wrap instead, so a table grows downward, not sideways. */
+.wy-table-responsive {
+    overflow-x: visible;
+}
+
+.rst-content table.docutils td,
+.rst-content table.docutils th {
+    white-space: normal;
+}
+
+.rst-content table.docutils code,
+.rst-content table.docutils code.literal {
+    white-space: normal;
+    word-break: break-word;
+}

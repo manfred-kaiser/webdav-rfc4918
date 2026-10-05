@@ -52,7 +52,7 @@ All keywords `WebdavFileSystem`'s constructor accepts:
 | `session` | An existing `Session` to reuse instead of building one from `base_url`/`auth` |
 | `host`, `port` | The server a `webdav(s)://host[:port]/path` URL names - fsspec fills these in itself |
 | `transport` | `"https"` (default) or `"http"`, for a bare `host` with no `base_url` |
-| anything else (`cert`, `verify`, `tls`, `timeout`, `redirect_policy`, `trusted_redirect_origins`, `retry`, `chunk_size`, ...) | Forwarded to `Session` unchanged - see `session.md` |
+| anything else (`cert`, `verify`, `tls`, `timeout`, `redirect_policy`, `trusted_redirect_origins`, `retry`, `chunk_size`, ...) | Forwarded to `Session` unchanged - see [Session options](session.md#session-options) |
 
 ## Paths
 
@@ -161,7 +161,5 @@ Checked against fsspec's own conformance test suite
 (`fsspec.tests.abstract` - the same one real backends like `s3fs`/`gcsfs`
 use), not just this project's own tests - see `tests/test_fsspec_abstract.py`.
 
-```{eval-rst}
-.. autoclass:: webdav.fsspec.WebdavFileSystem
-   :members:
-```
+Every method and argument of `WebdavFileSystem` is listed in the
+[API reference](api.md#fsspec).
