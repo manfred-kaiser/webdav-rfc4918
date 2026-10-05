@@ -46,7 +46,7 @@ A single call, nothing to open or close:
 ```python
 import webdav
 
-auth = ("username", "password")  # HTTP Basic auth
+auth = ("user", "password")  # HTTP Basic auth
 
 webdav.mkdir("https://webdav.example.org/Photos/", auth=auth)
 webdav.upload_file("Gorilla.jpg", "https://webdav.example.org/Photos/Gorilla.jpg", auth=auth)
@@ -109,16 +109,38 @@ includes:
 
 ## Security
 
-A WebDAV server, or a redirect to one, can be hostile. The defaults:
+A WebDAV server, or a redirect to one, can be hostile. This is the complete
+list of defaults:
 
-- TLS verification is on. Turning it off logs a `TLSHardeningDisabledWarning`
-  that `urllib3.disable_warnings()` does not silence.
+- TLS verification is on. Turning it off (`verify=False`, or anything
+  `requests` reads as false) emits and logs a `TLSHardeningDisabledWarning`
+  that `urllib3.disable_warnings()` does not silence. So does a
+  `TLSOptions` with a TLS version below 1.2 or with strict chain checking off.
+- `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` are ignored, so the environment
+  cannot replace the CA you configured. `~/.netrc` is ignored too: without
+  `auth=`, no credentials are sent.
+- A URL with credentials in it (`https://user:pw@host/`) is refused. Pass
+  `auth=` instead.
+- Credentials sent over plain `http` to a host other than localhost trigger
+  an `InsecureTransportWarning`, once per host.
 - Only same-origin redirects are followed
   (`RedirectPolicy.SAME_ORIGIN`). Credentials and cookies are never sent to
   another origin, even a trusted one.
+- A redirect from `https` to `http` is never followed, under any policy.
 - Buffered responses, including multistatus XML, are size-capped, and so are
   redirect chains. Exact limits:
   [Session reference](https://webdav.readthedocs.io/en/latest/reference/session.html#limits-on-what-a-server-can-make-the-client-do).
+- A request that is not streamed has a deadline for the whole exchange
+  (`max_response_time`, default 300 s): connecting, every redirect hop,
+  headers and body. `timeout` only limits each single read.
+- A streamed download (`stream=True`, `download_file`) is bounded per read
+  only. Neither `max_response_size` nor `max_response_time` applies to it.
+- XML from the server is parsed with the standard library's expat parser.
+  External entities are never resolved, and expat 2.4.0 or newer rejects
+  entity expansion attacks such as "billion laughs". A multistatus or lock
+  response that tries either raises `MalformedResponseError`.
+- Credentials do not end up in exception messages, warnings or logs: the
+  userinfo of a URL and the query of a signed URL are redacted.
 - `download_file` writes only to the path you give, through a temporary
   file, and refuses a symlink at that path.
 
@@ -141,7 +163,7 @@ pip install webdav-rfc4918[fsspec]
 import fsspec
 import pandas as pd
 
-auth = ("username", "password")
+auth = ("user", "password")
 
 df = pd.read_csv("webdavs://webdav.example.org/data.csv", storage_options={"auth": auth})
 
@@ -163,7 +185,7 @@ locking, RFC 4918 §7). The `If` header is handled for you:
 ```python
 import webdav
 
-auth = ("username", "password")
+auth = ("user", "password")
 
 with webdav.FileSystem("https://webdav.example.org", auth=auth) as fs:
     with fs.locked("Documents/report.docx") as lock:
@@ -182,10 +204,12 @@ with `412`. See
 The `dav` command is part of the package:
 
 ```sh
-dav ls webdav://webdav.example.org/Photos
-dav get webdav://webdav.example.org/report.pdf ./report.pdf
-dav put ./report.pdf webdav://webdav.example.org/report.pdf
+dav ls webdavs://webdav.example.org/Photos
+dav get webdavs://webdav.example.org/report.pdf ./report.pdf
+dav put ./report.pdf webdavs://webdav.example.org/report.pdf --overwrite
 ```
+
+`webdavs://` is WebDAV over HTTPS, `webdav://` plain HTTP.
 
 Also `info`, `cat`, `mkdir`, `rm`, `mv` and `cp`. Credentials via `--user` and
 `--password`, or `$WEBDAV_USER` and `$WEBDAV_PASSWORD`. See the
@@ -194,11 +218,16 @@ Also `info`, `cat`, `mkdir`, `rm`, `mv` and `cp`. Credentials via `--user` and
 
 ## More
 
-The [documentation](https://webdav.readthedocs.io) has reference pages for
+The [documentation](https://webdav.readthedocs.io) has a
+[quickstart](https://webdav.readthedocs.io/en/latest/quickstart.html),
+reference pages for
 [sessions](https://webdav.readthedocs.io/en/latest/reference/session.html),
-[TLS](https://webdav.readthedocs.io/en/latest/reference/tls.html),
-[redirects](https://webdav.readthedocs.io/en/latest/reference/redirects.html) and
-[performance](https://webdav.readthedocs.io/en/latest/reference/performance.html).
+[TLS](https://webdav.readthedocs.io/en/latest/reference/tls.html) and
+[redirects](https://webdav.readthedocs.io/en/latest/reference/redirects.html),
+and migration guides from
+[webdav4](https://webdav.readthedocs.io/en/latest/migration-webdav4.html),
+[webdavclient3](https://webdav.readthedocs.io/en/latest/migration-webdavclient3.html)
+and [other WebDAV clients](https://webdav.readthedocs.io/en/latest/migration.html).
 Release history:
 [CHANGELOG.md](https://github.com/manfred-kaiser/webdav-rfc4918/blob/main/CHANGELOG.md).
 Licensed under the

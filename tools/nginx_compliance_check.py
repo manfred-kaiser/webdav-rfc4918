@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stand up a throwaway nginx + dav-ext instance and run tests/test_nginx_compliance.py against it.
 
-Everything docs/nginx-compliance-check.md describes by hand, in one
+Everything docs/contributing-nginx.md describes by hand, in one
 reproducible command - see that file for what each step does and why.
 
 Note: ``tests/test_nginx_compliance.py`` already starts and stops its own
@@ -66,7 +66,7 @@ def main() -> int:
         print(
             "\nOn Debian/Ubuntu: sudo apt-get install nginx libnginx-mod-http-dav-ext apache2-utils\n"
             "On another distro not in tests/nginx_instance.py's _PROFILES, "
-            "add one there - see docs/nginx-compliance-check.md.",
+            "add one there - see docs/contributing-nginx.md.",
             file=sys.stderr,
         )
         return 1

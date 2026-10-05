@@ -1,165 +1,278 @@
 # fsspec
 
-[`fsspec`](https://filesystem-spec.readthedocs.io) is the de-facto
-standard storage-backend interface in the Python data ecosystem - this
-wraps {class}`~webdav.fs.client.FileSystem` so other projects (pandas,
-dask, ...) can read/write a WebDAV server without knowing anything
-WebDAV-specific.
+[`fsspec`](https://filesystem-spec.readthedocs.io) is the storage
+interface most of the Python data ecosystem uses. This package adds a
+WebDAV backend to it. pandas, Dask and other fsspec users read and write a
+WebDAV server through a `webdavs://` or `webdav://` URL, without any WebDAV
+code. If you are not using one of those, use
+[`FileSystem`](filesystem.md) directly instead - this page is only about
+the fsspec integration.
 
 ```console
 $ pip install webdav-rfc4918[fsspec]
 ```
 
 ```python
-from webdav.fsspec import WebdavFileSystem
+import fsspec
+import pandas as pd
 
-fs = WebdavFileSystem("https://webdav.example.org", auth=("username", "password"))
-fs.exists("Documents/Readme.md")
-fs.ls("Photos", detail=False)         # ['/Photos/Gorilla.jpg', ...]
+auth = ("user", "password")
+
+df = pd.read_csv("webdavs://webdav.example.org/data.csv", storage_options={"auth": auth})
+
+with fsspec.open("webdavs://webdav.example.org/Photos/Gorilla.jpg", auth=auth) as f:
+    f.read()
 ```
 
-Installing `webdav-rfc4918[fsspec]` registers both `"webdav"` and `"webdavs"` with fsspec
-through the
-[`fsspec.specs` entry point](https://filesystem-spec.readthedocs.io/en/latest/developer.html#implementing-a-backend)
-(fsspec's own recommended way for a third-party backend to announce itself), so
-`fsspec.filesystem("webdav"/"webdavs", base_url=..., auth=...)` and
-`fsspec.open("webdav://..."/"webdavs://...", auth=...)` work right away - no import needed,
-explicit or otherwise (`clobber=True`, like every entry-point registration fsspec itself
-processes, claims both names outright).
+Your code imports nothing from this package. The install registers two protocol
+names with fsspec: `webdavs` for WebDAV over HTTPS and `webdav` for plain
+HTTP, like `ftps` and `ftp`. For a server without TLS only the scheme
+changes:
 
-The server is the `base_url`. A URL may also name it, as `sftp://host/path` does:
-`webdav(s)://host[:port]/path` gives fsspec the `host`/`port`/transport to make the
-filesystem with, and they are not part of the path. `webdavs` is WebDAV over TLS, `webdav`
-plain HTTP - like `ftps`/`ftp` - so without a `base_url` the server is `https://host[:port]`
-or `http://host[:port]` respectively; with one, the URL only has to name the same server
-(its own scheme need not match - `webdav://` against an `https://` `base_url` is fine) -
-another host or port is a `ValueError`, never a redirect. A user or password in the URL is
-refused (it would end up in logs and reprs): pass `auth=`.
+```python
+df = pd.read_csv("webdav://webdav.example.org/data.csv", storage_options={"auth": auth})
+```
+
+`webdav://` sends the credentials in clear text, see
+[Session: Limits](session.md#limits-on-what-a-server-can-make-the-client-do).
+
+This replaces any other backend registered under these names. If another
+package is also installed and only relies on fsspec's built-in fallback
+for `webdav` instead of registering itself, this one wins.
+
+## Connecting
+
+A filesystem is bound to one server, its `base_url`. A URL can also name
+the server, as `sftp://host/path` does. From `webdavs://host[:port]/path`
+fsspec takes the host and port, and they are not part of the path. Without
+a `base_url`, the server is `https://host[:port]` for `webdavs://` and
+`http://host[:port]` for `webdav://`.
+
+With a `base_url`, the URL may leave out the host (`webdavs:///path`) or
+name the same server. The scheme does not have to match: `webdav://`
+against an `https://` `base_url` still uses HTTPS. Another host or port
+raises `ValueError` and is never followed like a redirect.
 
 ```python
 import fsspec
 
-fsspec.open("webdavs://webdav.example.org/Documents/Readme.md", auth=("user", "password"))
-fsspec.open("webdavs:///Documents/Readme.md", base_url="http://localhost:8080", auth=...)
+auth = ("user", "password")
+
+with fsspec.open("webdavs:///Photos/Gorilla.jpg", base_url="https://webdav.example.org", auth=auth) as f:
+    f.read()
 ```
 
-All keywords `WebdavFileSystem`'s constructor accepts:
+A user or password in the URL is refused, because it would end up in logs
+and reprs. Pass `auth=` instead.
 
-| Key | Meaning |
-|---|---|
-| `base_url` | The server; every path is relative to it (`/` is its root) |
-| `auth` | Passed straight to `Session` - a `(user, password)` tuple or a `requests.auth.AuthBase` |
-| `session` | An existing `Session` to reuse instead of building one from `base_url`/`auth` |
-| `host`, `port` | The server a `webdav(s)://host[:port]/path` URL names - fsspec fills these in itself |
-| `transport` | `"https"` (default) or `"http"`, for a bare `host` with no `base_url` |
-| anything else (`cert`, `verify`, `tls`, `timeout`, `redirect_policy`, `trusted_redirect_origins`, `retry`, `chunk_size`, ...) | Forwarded to `Session` unchanged - see [Session options](session.md#session-options) |
+The entries of `storage_options`, and the keywords of `fsspec.open` that
+are not its own (`mode`, `encoding`, ...), go to the filesystem
+constructor - `timeout`, `verify`, `retry` and the rest are in the [API
+reference](api.md#fsspec).
 
-## Paths
+## pandas and Dask
 
-A filesystem is bound to one server, through its `base_url`, and its paths are those of the
-server: they start at `/`, the root of the `base_url` (fsspec's `root_marker`, as for
-`LocalFileSystem` or `MemoryFileSystem`). A `base_url` with a path - `https://host/dav/` - makes
-`/dav/` the root; nothing above it can be reached.
-
-- `a/b`, `/a/b` and `webdavs:///a/b` are one path (fsspec's `_strip_protocol` makes it absolute
-  and drops a trailing `/`); there is no working directory. Only what follows `webdav://`/
-  `webdavs://` can be a host: `webdavs://a/b` is the path `/b` on the server `a`, while `//a/b`
-  is the path `/a/b`.
-- `.`, `..` and `//` inside a path are resolved; a path that would leave the `base_url` is
-  refused with a `ClientError`.
-- The names `ls`, `info`, `find`, `glob` and `walk` return are exactly what `_strip_protocol`
-  returns for them, so every name can be handed back to any method.
-- Without a `base_url` (or a `session` that has one, or a `host`) the constructor raises
-  `ValueError`.
-- fsspec reads `[...]`, `*` and `?` in a path as a glob wherever it expands one (`rm`, `cp`, `get`,
-  `glob`): a file really named `[x]` is removed with `rm_file`.
-- pyarrow compares the names a filesystem returns with the directory it was asked for, so give
-  it absolute paths (`/data/ds`, not `data/ds`) - as for `MemoryFileSystem`, which has a root too.
+pandas and Dask take the same `storage_options` as above:
 
 ```python
 import pandas as pd
-from webdav.fsspec import WebdavFileSystem
 
-fs = WebdavFileSystem("https://webdav.example.org", auth=("user", "password"))
-# "/Datasets/events" is a directory of many small Parquet part files - absolute,
-# because pyarrow compares it against what fs.ls() returns (see above).
-df = pd.read_parquet("/Datasets/events", filesystem=fs)
+options = {"auth": ("user", "password")}
+df = pd.read_csv("webdavs://webdav.example.org/Data/events.csv", storage_options=options)
 ```
 
-This differs from {class}`~webdav.fs.client.FileSystem`, whose names are relative to the
-`base_url` without the leading `/` (`Photos/Gorilla.jpg`) and which also takes `/Photos`: the
-fsspec name is always `"/" + name`.
+pyarrow compares the names this filesystem returns with the directory it
+was asked for, so give it absolute paths (`/Data/events-pq`, not
+`Data/events-pq`).
 
-**Why both names:** this library claims `"webdav"` and `"webdavs"` outright through the
-officially-sanctioned `fsspec.specs` entry point (`clobber=True`, like every entry-point
-registration fsspec itself processes), having verified full conformance with fsspec's own
-test suite (`fsspec.tests.abstract`; see `tests/test_fsspec_abstract.py`) - see `CHANGELOG.md`
-for the history behind this registration, including an fsspec bug found and reported along the
-way. A plain `import webdav.fsspec` (without the package being installed with its entry-point metadata)
-only ever claims `"webdavs"`, never `"webdav"` - silently winning a name away from whatever
-already claimed it is a different, more surprising thing than the deliberate, opt-in
-entry-point registration above.
+`dask.dataframe.read_csv` works the same way. Tested with pandas 3.0.6,
+Dask 2026.8.0 and fsspec 2026.9.0.
 
-The filesystem follows fsspec's conventions (`ls(path, detail=...)`, `open`, `get`, `put`,
-`rm`, ...), which differ in places from {class}`~webdav.fs.client.FileSystem`, whose `ls` always
-returns {class}`~webdav.resource.Resource` objects.
+The filesystem is synchronous. Dask gets its parallelism from each worker,
+process or thread, holding its own `WebdavFileSystem` and so its own
+session. Several workers may create the same directory at once, see
+[Parallel writers](#parallel-writers).
 
-- **Errors** are the stdlib ones fsspec expects: `FileNotFoundError`, `FileExistsError`
-  (`"xb"` on a file that is there, a directory in the way of a copy), `IsADirectoryError`
-  (also for a write to a directory), `NotADirectoryError`, `PermissionError` (a 403, and a
-  directory copied or moved into itself).
-- **`cp` and `mv`** replace a file that is there, as `LocalFileSystem` does and as `open(path,
-  "wb")` does here - but never a directory: a COPY/MOVE with `Overwrite: T` deletes the
-  destination with everything in it, so a directory in the way is a `FileExistsError`. A
-  directory is moved with everything in it, `recursive` or not, and `cp(d, "e/")` goes *into*
-  `e` also when it does not exist yet, as in `cp -r d e/`. A directory is never copied or moved
-  into itself, nor the root anywhere; `mv` of a path onto itself - however it is spelled - does
-  nothing.
-- **Parallel writers** may create the same parent directory at once (dask, zarr). RFC 4918 (sec.
-  9.3.1) answers the MKCOL that loses the race with 405, "exists"; Apache answers some of them
-  403 and WsgiDAV 500. Such an answer is not an error for `makedirs(exist_ok=True)` if the
-  directory is there afterwards - a tolerance of this filesystem, not something the client does
-  (`FileSystem.mkdir` is strict).
-- **Synchronous**: this is a plain `AbstractFileSystem`, not an `AsyncFileSystem` - there is no
-  `async def` anywhere in this backend. Parallelism across Dask workers comes from each worker
-  (process or thread) holding its own `WebdavFileSystem` instance (and so its own
-  connection/session), not from one worker running many requests concurrently on an event loop.
-- **Reading** (`open(path, "rb")`, `cat_file(path, start, end)`) asks the server for blocks of
-  the file - `Range: bytes=a-b`, through fsspec's block cache - and reads every answer to its
-  end, so a reader that seeks (Parquet) does not cut off a stream with each seek and the
-  connection is reused. `cat_file` with a range asks for exactly those bytes; a whole file is
-  one request without a `Range`. The size comes from one `PROPFIND` when the file is opened, so a
-  resource that has none cannot be read this way. Each `open()` therefore costs one extra
-  round-trip before the first byte arrives - for a dataset split across many small files or
-  partitions (a directory of many small Parquet part files, say), that per-file `PROPFIND` is
-  paid on top of the `GET`(s) for every one of them. No dedicated small-file-count benchmark
-  exists yet for this backend; `performance.md` so far only measures throughput and concurrency
-  on larger transfers. A server that answers a part with the whole file (`200`) is refused rather
-  than believed, and a file that changes between two blocks (its `ETag`) is an error.
-- **Caching** is fsspec's own: `cache_type`/`block_size`/`cache_options` are the same generic
-  `AbstractFileSystem.open()` parameters every fsspec backend accepts (`"readahead"`, `"mmap"`,
-  `"block"`, ...) - this filesystem adds no WebDAV-specific cache of its own, it only supplies
-  the block fetch (`_fetch_range`) fsspec's cache calls into. The default is fsspec's own
-  `"readahead"`; `cat_file()` (a single bounded read) asks for `cache_type="none"` instead, so a
-  few requested bytes do not pull in a whole cache block.
-- **Writing** (`open(path, "wb")`, `"xb"`) uploads when the file is closed cleanly; a block that
-  raises leaves the resource untouched. `"xb"` creates only if nothing is there (`If-None-Match: *`,
-  as atomic as the server makes it - Apache's `mod_dav` does not make it atomic). Append mode is not supported.
-- **`get`** replaces an existing local file, as fsspec's `get` means to, but through a temporary
-  file: a failed download leaves the old file as it was, and a symlink is never followed. A
-  remote collection becomes a local directory.
-- **`rm`** refuses a non-empty collection unless `recursive=True`, because `DELETE` on a
-  collection removes everything below it.
+Dask distributed pickles the filesystem instance, credentials included, to
+send it to each worker, see [Credentials](#credentials).
+
+## Methods
+
+Most methods do what their [`FileSystem`](filesystem.md#all-methods)
+counterpart does, under fsspec's name. The rest of fsspec's
+`AbstractFileSystem` API works as fsspec documents it.
+
+| fsspec method | `FileSystem` counterpart |
+|---|---|
+| `ls(path, detail=True)`, `info(path)` | `ls`, `info`, with a `dict` instead of a `Resource` |
+| `exists`, `isdir`, `isfile`, `walk` | same name |
+| `find`, `glob`, `du` | none (all files below, pattern match, total size) |
+| `open(path, mode="rb")` | `open`, whose default mode is `"r"` |
+| `cat_file`, `cat`, `head`, `tail`, `read_bytes`, `read_text`, `pipe_file`, `pipe`, `write_text`, `touch` | none |
+| `get`, `get_file` | `download_file` |
+| `put`, `put_file` | `upload_file` |
+| `upload_fileobj`, alias `put_fileobj` | `upload_fileobj` |
+| `mkdir`, `makedirs` | `mkdir` |
+| `rm_file`, `rmdir`, `rm` | `remove` |
+| `cp`, `cp_file`, alias `copy` | `copy` |
+| `mv` | `move` |
+| `size`, `sizes`, `checksum` | `content_length`, `etag` |
+| `created`, `modified` | same name |
+| `unstrip_protocol` | none. Returns the `webdav(s)://` URL of a path |
+| `sign` | none. Raises `NotImplementedError` |
+
+The examples below call these methods on a filesystem made like this:
+
+```python
+import fsspec
+
+fs = fsspec.filesystem("webdavs", base_url="https://webdav.example.org", auth=("user", "password"))
+```
+
+The sections below cover only what differs from `FileSystem`, or what
+an fsspec user may not expect from a WebDAV server.
+
+## Paths
+
+Paths are those of the server. They start at `/`, the root of the
+`base_url`, as for `LocalFileSystem` or `MemoryFileSystem` (fsspec's
+`root_marker`). A `base_url` with a path, such as `https://host/dav/`,
+makes `/dav/` the root. Nothing above it can be reached.
+
+- `a/b`, `/a/b` and `webdavs:///a/b` are one path. There is no working
+  directory, and a trailing `/` is dropped.
+- Only what follows `webdav://` or `webdavs://` can be a host:
+  `webdavs://a/b` is the path `/b` on the server `a`, while `//a/b` is the
+  path `/a/b`.
+- `.`, `..` and `//` inside a path are resolved. A path that would leave
+  the `base_url` is refused with a `ClientError`.
+- The names `ls`, `info`, `find`, `glob` and `walk` return can be passed
+  back to any method as they are.
+- fsspec expands `[...]`, `*` and `?` as a glob wherever it accepts a path,
+  [as every fsspec backend does](https://filesystem-spec.readthedocs.io/en/latest/features.html#glob).
+  A file really named `[x]` is removed with `rm_file`, which does not glob.
+
+{class}`~webdav.fs.client.FileSystem` names the same file without the
+leading `/` (`Photos/Gorilla.jpg`). It also accepts `/Photos`. The fsspec
+name is always `"/" + name`.
+
+## Listing
+
+Beyond the keys fsspec requires (`name`, `size`, `type`), the info dict
+has `href`, `created`, `modified`, `etag`, `content_type`,
+`content_language` and `display_name`.
+
+## Reading
+
+- `open(path, "rb")` reads the file in blocks, one range request each.
+- `cat_file` with a range asks for exactly those bytes.
+- A whole file is one request.
+- A server that answers a range request with the whole file (`200`) is
+  refused, and so is a file whose `ETag` changes between two blocks. Both
+  raise a `ClientError`.
+
+`open()` asks for the size with one `PROPFIND` first, so a resource
+without a size cannot be read this way. For a dataset of many small files,
+such as a directory of Parquet part files, that is one extra round trip
+per file. If the sizes are known already, pass them as
+`open(path, "rb", size=n)` and the `PROPFIND` is skipped. `ls()` returns
+the sizes of a whole directory in one `PROPFIND`: for 3000 members that
+took 0.16 s against Apache, see
+[Apache: Size and names](../apache-compliance-check.md#size-and-names).
+
+## Caching
+
+This filesystem adds no cache of its own; fsspec's own `cache_type`,
+`block_size` and `cache_options` apply, [as for any fsspec
+backend](https://filesystem-spec.readthedocs.io/en/latest/features.html#caching-files-locally).
+Only `cat_file()` differs: it uses `cache_type="none"`, so a few
+requested bytes do not pull in a whole cache block.
+
+## Writing
+
+- `open(path, "wb")` and `"xb"` upload when the file is closed without an
+  error. A `with` block that raises leaves the resource unchanged.
+- `"xb"` creates the file only if nothing is there (`If-None-Match: *`).
+  That is as atomic as the server makes it, and Apache's `mod_dav` does
+  not make it atomic.
+- Appending is not possible, because a `PUT` always replaces the whole
+  resource. `open(..., "ab")` raises `ValueError`, and
+  `pipe_file(..., mode="append")` raises `NotImplementedError`.
+
+## Local files
+
+`get` and `put` copy one file, or with `recursive=True` a whole tree,
+for example `fs.get("/Photos", "photos", recursive=True)`.
+
+- `put` creates missing parent directories on the server, see
+  [Directories](#directories).
+- `get` replaces an existing local file. It writes to a temporary file
+  first, so a failed download leaves the old local file as it was, and a
+  symlink at the destination is never followed.
+
+## Directories
+
+- Uploads and copies create missing parent directories on the server,
+  unlike `FileSystem.upload_file`.
+- `rm(path, recursive=True)` is one `DELETE` for the whole tree: `DELETE`
+  on a collection removes everything below it on the server, there is no
+  way to ask for less.
+
+## Parallel writers
+
+Dask and zarr workers may create the same parent directory at once.
+`makedirs(exist_ok=True)` accepts the error the losers get if the
+directory is there afterwards. `FileSystem.mkdir` raises in that case.
+
+```{admonition} Server differences
+:class: note
+RFC 4918 answers the losing `MKCOL` with `405`. Apache answers some of
+them with `403`, WsgiDAV with `500`.
+```
+
+## Copying and moving
+
+`cp` and `mv` replace an existing file, like `LocalFileSystem` does and
+like `open(path, "wb")` here. They never replace a directory. A `COPY` or
+`MOVE` with `Overwrite: T` would delete the destination with everything in
+it, so a directory in the way raises `FileExistsError`.
+
+- `cp(..., recursive=True)` is one `COPY` into a new destination.
+- `cp(d, "e/")` copies into `e` even if `e` does not exist yet, as
+  `cp -r d e/` does.
+- A directory is moved with everything in it, with or without `recursive`.
+- Nothing is copied or moved into itself, and the root is never copied or
+  moved.
+- `mv` of a path onto itself does nothing, however it is spelled.
+
+## Errors
+
+The common errors are the stdlib exceptions fsspec expects. The rest
+are this library's own [exceptions](exceptions.md), unchanged:
+
+| Exception | When |
+|---|---|
+| `FileNotFoundError` | Nothing is there |
+| `FileExistsError` | `"xb"` or `mode="create"` on an existing file, a directory in the way of a copy or move |
+| `IsADirectoryError` | Reading or writing a directory |
+| `NotADirectoryError` | A file where a directory is needed |
+| `PermissionError` | A `403`, or a directory copied or moved into itself |
+| {class}`~webdav.exceptions.ClientError` | A path outside the `base_url`, a range request answered with `200`, an `ETag` that changed during a read |
+| other {class}`~webdav.exceptions.WebDAVError` subclasses | Any other error status, e.g. `401` for wrong credentials, `423` or `507`, see [Exceptions](exceptions.md) |
+
+## Credentials
 
 ```{warning}
 This filesystem's `to_json()` output, or a pickled instance, contains its
-credentials in clear text. Never write it to disk or send it anywhere
-untrusted.
+credentials in clear text. Dask (distributed) pickles it with its
+`storage_options` and sends it over the network to its workers, see
+[pandas and Dask](#pandas-and-dask). Never write it to disk or send it
+anywhere untrusted.
 ```
 
-Checked against fsspec's own conformance test suite
-(`fsspec.tests.abstract` - the same one real backends like `s3fs`/`gcsfs`
-use), not just this project's own tests - see `tests/test_fsspec_abstract.py`.
+## Conformance
 
+The backend passes fsspec's own conformance suite, `fsspec.tests.abstract`,
+which `s3fs` and `gcsfs` use as well (see `tests/test_fsspec_abstract.py`).
 Every method and argument of `WebdavFileSystem` is listed in the
 [API reference](api.md#fsspec).

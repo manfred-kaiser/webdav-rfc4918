@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stand up a throwaway Apache + mod_dav instance and run tests/test_apache_compliance.py against it.
 
-Everything docs/apache-compliance-check.md describes by hand, in one
+Everything docs/contributing-apache.md describes by hand, in one
 reproducible command - see that file for what each step does and why, and
 for troubleshooting if a step here fails on a distro other than openSUSE
 (the module paths in particular are openSUSE's, see
@@ -71,7 +71,7 @@ def main() -> int:
             "With an Apache built from the release tarball: set "
             "WEBDAV_TEST_APACHE_PREFIX to its install directory. On another "
             "distro not in tests/apache_instance.py's _PROFILES, add one "
-            "there - see docs/apache-compliance-check.md.",
+            "there - see docs/contributing-apache.md.",
             file=sys.stderr,
         )
         return 1

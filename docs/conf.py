@@ -29,6 +29,7 @@ myst_enable_extensions = ["colon_fence"]
 myst_heading_anchors = 3
 
 html_theme = "sphinx_rtd_theme"
+html_logo = "_static/icon.svg"
 html_theme_options = {
     "logo_only": False,
     # Sidebar: page titles only, never a page's own sub-headings - there are

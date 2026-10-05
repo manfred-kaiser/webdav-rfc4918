@@ -11,63 +11,76 @@ auth = ("user", "password")
 webdav.exists("https://webdav.example.org/Documents/Readme.md", auth=auth)
 ```
 
-## Which form to use
+Each function opens a [`FileSystem`](filesystem.md), makes one call and
+closes it again. [Which form to use](../quickstart.md#which-form-to-use)
+explains how the three forms build on each other.
 
-The library offers three ways to talk to a server:
+The functions have the same names, arguments and return values as the
+[`FileSystem`](filesystem.md) methods. The short form takes a full URL,
+a `FileSystem` a path relative to its base URL.
 
-| You want to | Use |
-|---|---|
-| Make one or two calls, for example in a script or a health check | The short form: `webdav.ls(url)`, `webdav.upload_file(...)` |
-| Make several calls against the same server | [`FileSystem`](filesystem.md) |
-| See status codes and headers, read the raw multistatus, or send a request the file operations do not cover | [`Session`](session.md) |
+## Limits of the short form
 
-The short form and `FileSystem` have the same names, arguments and return
-values. A test compares their signatures. The only difference is how a
-remote resource is named: the short form takes a full URL, a `FileSystem`
-a path relative to its base URL. `Session` has no short form.
+The short form is meant for one or two calls. Each call:
 
-Each short-form call opens its own connection. For many calls in a row,
-a `FileSystem` is faster because it keeps one connection open.
+- opens its own connection, with its own TLS handshake,
+- sends the credentials to the server again, without cookies or other
+  state from earlier calls,
+- holds no lock token beyond the call itself, see [Locks](#locks).
+
+For two or more calls against the same server, use a
+[`FileSystem`](filesystem.md).
 
 ## All functions
 
 Every function takes a full URL as its first argument (uploads: the local
 path first) and the [options](#options) as keyword arguments.
 
-| Function | What it does |
-|---|---|
-| `ls(url)` | List the members of a folder |
-| `info(url)` | Describe one file or folder |
-| `walk(url)` | Go through a folder tree, like `os.walk` |
-| `exists(url)` | `True` if something is there |
-| `isdir(url)` | `True` if it is a folder |
-| `isfile(url)` | `True` if it is a file |
-| `upload_file(local_path, url)` | Upload a local file |
-| `download_file(url, local_path)` | Download to a local file |
-| `upload_fileobj(fileobj, url)` | Upload from an open binary file object |
-| `download_fileobj(url, fileobj)` | Download into an open binary file object |
-| `open(url, mode)` | Read or write like the builtin `open` |
-| `mkdir(url)` | Create a folder |
-| `copy(url, destination)` | Copy on the server |
-| `move(url, destination)` | Move or rename on the server |
-| `remove(url)` | Delete a file, or a folder with everything in it |
-| `get_props(url)` | Read several properties in one request |
-| `set_props(url)` | Set or remove properties |
-| `content_length(url)` | Size in bytes |
-| `content_type(url)` | MIME type |
-| `content_language(url)` | Language tag |
-| `created(url)` | Creation time |
-| `modified(url)` | Last modification time |
-| `etag(url)` | ETag |
-| `dav_compliance(url)` | WebDAV compliance classes the server advertises |
-| `locked(url)` | Hold a lock for the duration of a `with` block |
-| `refresh_lock(url, token)` | Extend the timeout of a held lock |
+| Function | What it does | Returns |
+|---|---|---|
+| **[Listing and checking](#listing-and-checking)** | | |
+| `ls(url)` | List the members of a folder | list of {class}`~webdav.resource.Resource` |
+| `info(url)` | Describe one file or folder | {class}`~webdav.resource.Resource` |
+| `walk(url)` | Go through a folder tree, like `os.walk` | iterator of `(path, dirs, files)` |
+| `exists(url)` | Is something there? | `bool` |
+| `isdir(url)` | Is it a folder? | `bool` |
+| `isfile(url)` | Is it a file? | `bool` |
+| **[Reading and writing](#reading-and-writing)** | | |
+| `upload_file(local_path, url)` | Upload a local file | `None` |
+| `download_file(url, local_path)` | Download to a local file | `None` |
+| `upload_fileobj(fileobj, url)` | Upload from an open binary file object | `None` |
+| `download_fileobj(url, fileobj)` | Download into an open binary file object | `None` |
+| `open(url, mode="r")` | Read or write like the builtin `open` | file object, in a `with` block |
+| **[Folders, copies and moves](#folders-copies-and-moves)** | | |
+| `mkdir(url)` | Create a folder | `None` |
+| `copy(url, destination)` | Copy on the server | `None` |
+| `move(url, destination)` | Move or rename on the server | `None` |
+| `remove(url)` | Delete a file, or a folder with everything in it | `None` |
+| **[Properties](#properties)** | | |
+| `get_props(url, props=...)` | Several properties in one request | {class}`~webdav.dav.properties.DAVProperties` |
+| `set_props(url, set_props=...)` | Set or remove properties | `None` |
+| `content_length(url)` | Size in bytes (`getcontentlength`) | `int \| None` |
+| `content_type(url)` | MIME type (`getcontenttype`) | `str \| None` |
+| `content_language(url)` | Language tag (`getcontentlanguage`) | `str \| None` |
+| `created(url)` | Creation time (`creationdate`) | `datetime \| None` |
+| `modified(url)` | Last modification time (`getlastmodified`) | `datetime \| None` |
+| `etag(url)` | ETag as the server sends it (`getetag`) | `str \| None` |
+| `dav_compliance(url)` | WebDAV classes of the server, one `OPTIONS` per call | `set[str]` |
+| **[Locks](#locks)** | | |
+| `locked(url)` | Hold a lock for a `with` block, 600 s unless `lock_timeout=` | {class}`~webdav.dav.locks.ActiveLock`, in a `with` block |
+| `refresh_lock(url, token)` | Extend the timeout of a held lock | {class}`~webdav.dav.locks.ActiveLock` |
 
-Each of them has an example in the sections below.
+`None` from a property function means the server did not report that
+property. The first block of each section below is complete. The blocks
+after it in the same section reuse its `auth` and `url`.
 
 ## Listing and checking
 
 ```python
+import webdav
+
+auth = ("user", "password")
+
 for resource in webdav.ls("https://webdav.example.org/Photos", auth=auth):
     print(resource, resource.size, resource.is_dir)
 
@@ -80,8 +93,8 @@ webdav.isfile("https://webdav.example.org/Photos", auth=auth)  # False
 ```
 
 `ls` returns a list of {class}`~webdav.resource.Resource` objects, `info`
-returns one. [FileSystem](filesystem.md#listing-ls-info-and-walk) explains
-what a `Resource` holds.
+returns one. [FileSystem](filesystem.md#listing-and-checking) explains what
+a `Resource` holds.
 
 ```python
 for path, dirs, files in webdav.walk("https://webdav.example.org/Photos", auth=auth):
@@ -92,9 +105,13 @@ for path, dirs, files in webdav.walk("https://webdav.example.org/Photos", auth=a
 `walk` yields `(path, dirs, files)` for every folder below the URL.
 `max_depth=1` stops one level down.
 
-## Uploading and downloading
+## Reading and writing
 
 ```python
+import webdav
+
+auth = ("user", "password")
+
 webdav.upload_file("Gorilla.jpg", "https://webdav.example.org/Photos/Gorilla.jpg", auth=auth)
 webdav.download_file("https://webdav.example.org/Documents/Readme.md", "Readme.md", auth=auth)
 ```
@@ -139,6 +156,10 @@ with webdav.open("https://webdav.example.org/Documents/New.txt", "x", auth=auth)
 ## Folders, copies and moves
 
 ```python
+import webdav
+
+auth = ("user", "password")
+
 webdav.mkdir("https://webdav.example.org/Archive", auth=auth)
 webdav.copy(
     "https://webdav.example.org/Documents/Notes.txt",
@@ -161,6 +182,10 @@ to replace an existing destination unless you pass `overwrite=True`.
 One function per common property:
 
 ```python
+import webdav
+
+auth = ("user", "password")
+
 url = "https://webdav.example.org/Documents/Readme.md"
 
 webdav.content_length(url, auth=auth)    # 1234
@@ -195,6 +220,10 @@ webdav.dav_compliance("https://webdav.example.org/", auth=auth)  # {"1", "2"}
 ## Locks
 
 ```python
+import webdav
+
+auth = ("user", "password")
+
 url = "https://webdav.example.org/Documents/report.docx"
 
 with webdav.locked(url, lock_timeout=60, auth=auth) as lock:
@@ -215,6 +244,8 @@ Every function takes the same keyword arguments as `FileSystem(...)` and
 `Session(...)`:
 
 ```python
+import webdav
+
 webdav.exists(
     "https://webdav.example.org/Documents/Readme.md",
     auth=("user", "password"),
@@ -227,8 +258,7 @@ webdav.exists(
 What these options do, and the limits that protect the client from a
 misbehaving server, is described on the [Session](session.md) page:
 [Limits](session.md#limits-on-what-a-server-can-make-the-client-do),
-[Retries](session.md#retries). For certificates, see
-[TLS and mTLS](tls.md).
+[Retries](session.md#retries). For certificates, see [TLS and mTLS](tls.md).
 
 A refused request raises a {class}`~webdav.exceptions.WebDAVError`
 subclass, see [Exceptions](exceptions.md).

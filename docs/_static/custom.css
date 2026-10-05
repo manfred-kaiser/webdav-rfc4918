@@ -1,10 +1,11 @@
-/* sphinx_rtd_theme wraps every table in a horizontally scrolling container
- * and keeps inline code spans on one line by default. With the wide
- * multi-column tables in this documentation (method listings, server
- * matrix, ...) that forces sideways scrolling to read a single row.
- * Let cells wrap instead, so a table grows downward, not sideways. */
+/* sphinx_rtd_theme keeps table cells and inline code spans on one line by
+ * default. With the wide multi-column tables in this documentation (method
+ * listings, server matrix, ...) that forces sideways scrolling to read a
+ * single row. Let cells wrap instead, so a table grows downward.
+ * The wrapper keeps overflow-x: auto as a fallback: on a phone a table that
+ * still does not fit scrolls instead of being cut off. */
 .wy-table-responsive {
-    overflow-x: visible;
+    overflow-x: auto;
 }
 
 .rst-content table.docutils td,
@@ -12,8 +13,69 @@
     white-space: normal;
 }
 
+/* Wrap at spaces first and split a word only if it fits on no line at all.
+ * word-break: break-word (and the theme's overflow-wrap: anywhere on links)
+ * let the browser shrink columns until "PROPFIND" became "PROPFIN D". */
 .rst-content table.docutils code,
 .rst-content table.docutils code.literal {
     white-space: normal;
-    word-break: break-word;
+    word-break: normal;
+    overflow-wrap: break-word;
+}
+
+.rst-content table.docutils a {
+    overflow-wrap: break-word;
+}
+
+/* Long unbreakable words in prose, e.g. "(PROPFIND/PROPPATCH/OPTIONS/...)",
+ * must not push the page wider than a phone screen. */
+.wy-nav-content {
+    overflow-wrap: break-word;
+}
+
+/* Group rows in the method tables: a row whose second cell is empty holds
+ * only a bold group name, e.g. "| **[Locks](#locks)** | | |". Markdown
+ * tables have no colspan, so the row is shaded as one band instead. */
+.rst-content table.docutils:not(.field-list) tbody tr:has(> td:nth-child(2) > p:empty) td {
+    background-color: #e7f2fa;
+    border-top: 2px solid #c9e0f0;
+    padding-top: 10px;
+}
+
+.rst-content table.docutils tbody tr:has(> td:nth-child(2) > p:empty) td + td {
+    border-left-color: transparent;
+}
+
+.rst-content table.docutils tbody tr:has(> td:nth-child(2) > p:empty) strong a {
+    color: #2c3e50;
+}
+
+/* On a phone, three columns of code do not fit side by side. In the method
+ * tables (those with group rows) each row becomes two lines: the name on
+ * the full width, the other two cells below it. */
+@media screen and (max-width: 768px) {
+    .rst-content table.docutils:has(tbody tr > td:nth-child(2) > p:empty) {
+        width: 100%;
+    }
+
+    .rst-content table.docutils:has(tbody tr > td:nth-child(2) > p:empty) tr {
+        display: grid;
+        grid-template-columns: 3fr 2fr;
+    }
+
+    .rst-content table.docutils:has(tbody tr > td:nth-child(2) > p:empty) tr > :first-child {
+        grid-column: 1 / -1;
+        border-bottom: none;
+    }
+
+    .rst-content table.docutils tbody tr:has(> td:nth-child(2) > p:empty) td + td {
+        display: none;
+    }
+}
+
+@media screen and (max-width: 768px) {
+    .rst-content table.docutils td,
+    .rst-content table.docutils th {
+        padding: 6px 8px;
+    }
 }

@@ -14,47 +14,57 @@ with webdav.FileSystem("https://webdav.example.org", auth=("user", "password")) 
 ```
 
 The methods have the same names, arguments and return values as the
-[short form](short-form.md). For when to use which, see
-[Which form to use](short-form.md#which-form-to-use).
+[short form](short-form.md). A `FileSystem` sends its requests through a
+[`Session`](session.md), and the short form opens a `FileSystem` for each
+call. [Which form to use](../quickstart.md#which-form-to-use) explains the
+three layers and when to use which.
 
 ## All methods
 
 Paths are relative to the base URL. Uploads take the local path first.
 
-| Method | What it does |
-|---|---|
-| `FileSystem(base_url, ...)` | Open a connection, takes the [Session options](session.md#session-options) |
-| `FileSystem.from_session(session)` | Wrap an existing `Session` |
-| `close()` | Close the connection (also done by `with`) |
-| `session` | The `Session` underneath, an attribute |
-| `ls(path)` | List the members of a folder |
-| `info(path)` | Describe one file or folder |
-| `walk(path)` | Go through a folder tree, like `os.walk` |
-| `exists(path)` | `True` if something is there |
-| `isdir(path)` | `True` if it is a folder |
-| `isfile(path)` | `True` if it is a file |
-| `upload_file(local_path, path)` | Upload a local file |
-| `download_file(path, local_path)` | Download to a local file |
-| `upload_fileobj(fileobj, path)` | Upload from an open binary file object |
-| `download_fileobj(path, fileobj)` | Download into an open binary file object |
-| `open(path, mode)` | Read or write like the builtin `open` |
-| `mkdir(path)` | Create a folder |
-| `copy(path, destination)` | Copy on the server |
-| `move(path, destination)` | Move or rename on the server |
-| `remove(path)` | Delete a file, or a folder with everything in it |
-| `get_props(path)` | Read several properties in one request |
-| `set_props(path)` | Set or remove properties |
-| `content_length(path)` | Size in bytes |
-| `content_type(path)` | MIME type |
-| `content_language(path)` | Language tag |
-| `created(path)` | Creation time |
-| `modified(path)` | Last modification time |
-| `etag(path)` | ETag |
-| `dav_compliance(path)` | WebDAV compliance classes the server advertises |
-| `locked(path)` | Hold a lock for the duration of a `with` block |
-| `refresh_lock(path, token)` | Extend the timeout of a held lock |
+| Method | What it does | Returns |
+|---|---|---|
+| **[Opening and closing](#opening-and-closing)** | | |
+| `FileSystem(base_url, ...)` | Open a connection, takes the [Session options](session.md#session-options) | `FileSystem` |
+| `FileSystem.from_session(session)` | Wrap an existing `Session` and share its connection | `FileSystem` |
+| `close()` | Close the connection (also done by `with`) | `None` |
+| `session` | Attribute: the `Session` underneath | {class}`~webdav.session.Session` |
+| **[Listing and checking](#listing-and-checking)** | | |
+| `ls(path)` | List the members of a folder | list of {class}`~webdav.resource.Resource` |
+| `info(path)` | Describe one file or folder | {class}`~webdav.resource.Resource` |
+| `walk(path)` | Go through a folder tree, like `os.walk` | iterator of `(path, dirs, files)` |
+| `exists(path)` | Is something there? | `bool` |
+| `isdir(path)` | Is it a folder? | `bool` |
+| `isfile(path)` | Is it a file? | `bool` |
+| **[Reading and writing](#reading-and-writing)** | | |
+| `upload_file(local_path, path)` | Upload a local file | `None` |
+| `download_file(path, local_path)` | Download to a local file | `None` |
+| `upload_fileobj(fileobj, path)` | Upload from an open binary file object | `None` |
+| `download_fileobj(path, fileobj)` | Download into an open binary file object | `None` |
+| `open(path, mode="r")` | Read or write like the builtin `open` | file object, in a `with` block |
+| **[Folders, copies and moves](#folders-copies-and-moves)** | | |
+| `mkdir(path)` | Create a folder | `None` |
+| `copy(path, destination)` | Copy on the server | `None` |
+| `move(path, destination)` | Move or rename on the server | `None` |
+| `remove(path)` | Delete a file, or a folder with everything in it | `None` |
+| **[Properties](#properties)** | | |
+| `get_props(path, props=...)` | Several properties in one request | {class}`~webdav.dav.properties.DAVProperties` |
+| `set_props(path, set_props=...)` | Set or remove properties | `None` |
+| `content_length(path)` | Size in bytes (`getcontentlength`) | `int \| None` |
+| `content_type(path)` | MIME type (`getcontenttype`) | `str \| None` |
+| `content_language(path)` | Language tag (`getcontentlanguage`) | `str \| None` |
+| `created(path)` | Creation time (`creationdate`) | `datetime \| None` |
+| `modified(path)` | Last modification time (`getlastmodified`) | `datetime \| None` |
+| `etag(path)` | ETag as the server sends it (`getetag`) | `str \| None` |
+| `dav_compliance(path="")` | WebDAV classes of the server, one `OPTIONS` per call | `set[str]` |
+| **[Locks](#locks)** | | |
+| `locked(path)` | Hold a lock for a `with` block, 600 s unless `lock_timeout=` | {class}`~webdav.dav.locks.ActiveLock`, in a `with` block |
+| `refresh_lock(path, token)` | Extend the timeout of a held lock | {class}`~webdav.dav.locks.ActiveLock` |
 
-The examples below assume an open `fs`, as in the first example on this page.
+`None` from a property method means the server did not report that
+property. The first block of each section below is complete. The blocks
+after it in the same section reuse its `fs`.
 
 ## Opening and closing
 
@@ -64,6 +74,8 @@ and so on. The `with` block closes the connection at the end. Without
 `with`, call `fs.close()` yourself.
 
 ```python
+import webdav
+
 fs = webdav.FileSystem("https://webdav.example.org", auth=("user", "password"))
 fs.exists("Documents/Readme.md")
 fs.close()
@@ -83,18 +95,21 @@ Both then share one connection, the cookies and the locks. Closing `fs`
 does not close `session`. `fs.session` gives you the session of any
 `FileSystem`, for the occasional raw request.
 
-## Listing: `ls`, `info` and `walk`
+## Listing and checking
 
 ```python
-for resource in fs.ls("Photos"):
-    print(resource, resource.is_dir, resource.size, resource.modified)
+import webdav
 
-readme = fs.info("Documents/Readme.md")
-fs.download_file(readme, "Readme.md")
+with webdav.FileSystem("https://webdav.example.org", auth=("user", "password")) as fs:
+    for resource in fs.ls("Photos"):
+        print(resource, resource.is_dir, resource.size, resource.modified)
 
-fs.exists("Documents/Readme.md")  # True
-fs.isdir("Photos")                # True
-fs.isfile("Photos")               # False
+    readme = fs.info("Documents/Readme.md")
+    fs.download_file(readme, "Readme.md", overwrite=True)
+
+    fs.exists("Documents/Readme.md")  # True
+    fs.isdir("Photos")                # True
+    fs.isfile("Photos")               # False
 ```
 
 {meth}`~webdav.fs.client.FileSystem.ls` returns a list of
@@ -110,7 +125,8 @@ resource.
 
 ```python
 for path, dirs, files in fs.walk("Photos"):
-    dirs[:] = [d for d in dirs if d != "Photos/tmp"]  # skip this subtree
+    if "Photos/tmp" in dirs:
+        dirs.remove("Photos/tmp")  # skip this subtree
     for f in files:
         print(f, f.size)
 ```
@@ -123,20 +139,23 @@ goes. Each folder costs one request.
 ## Reading and writing
 
 ```python
-fs.upload_file("Gorilla.jpg", "Photos/Gorilla.jpg", overwrite=True)
-fs.download_file("Documents/Readme.md", "Readme.md", overwrite=True)
+import webdav
 
-with fs.open("Documents/Notes.txt", "w") as f:
-    f.write("Buy bananas\n")
+with webdav.FileSystem("https://webdav.example.org", auth=("user", "password")) as fs:
+    fs.upload_file("Gorilla.jpg", "Photos/Gorilla.jpg", overwrite=True)
+    fs.download_file("Documents/Readme.md", "Readme.md", overwrite=True)
 
-with fs.open("Documents/Notes.txt") as f:
-    print(f.read())
+    with fs.open("Documents/Notes.txt", "w") as f:
+        f.write("Buy bananas\n")
 
-with fs.open("Photos/Gorilla.jpg", "rb") as f:
-    header = f.read(16)
+    with fs.open("Documents/Notes.txt") as f:
+        print(f.read())
 
-with fs.open("Documents/New.txt", "x") as f:
-    f.write("created only if nothing is there\n")
+    with fs.open("Photos/Gorilla.jpg", "rb") as f:
+        header = f.read(16)
+
+    with fs.open("Documents/New.txt", "x") as f:
+        f.write("created only if nothing is there\n")
 ```
 
 Uploads take `(local_path, path)`, downloads `(path, local_path)`. Without
@@ -170,13 +189,21 @@ called with the number of bytes of each chunk, for a progress bar:
 fs.upload_file("Gorilla.jpg", "Photos/Gorilla.jpg", overwrite=True, callback=print)
 ```
 
+Transfers stream in `chunk_size` pieces (4 MiB by default), so memory use
+does not grow with the file size. Several transfers at once need
+proportionally more: each connection keeps its own chunk buffer and
+`requests` overhead.
+
 ## Folders, copies and moves
 
 ```python
-fs.mkdir("Archive")
-fs.copy("Documents/Notes.txt", "Archive/Notes.txt")
-fs.move("Archive/Notes.txt", "Archive/Notes-2026.txt")
-fs.remove("Archive")
+import webdav
+
+with webdav.FileSystem("https://webdav.example.org", auth=("user", "password")) as fs:
+    fs.mkdir("Archive")
+    fs.copy("Documents/Notes.txt", "Archive/Notes.txt")
+    fs.move("Archive/Notes.txt", "Archive/Notes-2026.txt")
+    fs.remove("Archive")
 ```
 
 `mkdir` raises `ResourceAlreadyExistsError` if the folder exists. `copy`
@@ -190,12 +217,15 @@ server, nothing is downloaded.
 One method per common property:
 
 ```python
-fs.content_length("Documents/Readme.md")    # 1234
-fs.content_type("Documents/Readme.md")      # "text/markdown; charset=utf-8"
-fs.content_language("Documents/Readme.md")  # None if the server has none
-fs.created("Documents/Readme.md")           # datetime
-fs.modified("Documents/Readme.md")          # datetime
-fs.etag("Documents/Readme.md")              # as the server sends it
+import webdav
+
+with webdav.FileSystem("https://webdav.example.org", auth=("user", "password")) as fs:
+    fs.content_length("Documents/Readme.md")    # 1234
+    fs.content_type("Documents/Readme.md")      # "text/markdown; charset=utf-8"
+    fs.content_language("Documents/Readme.md")  # None if the server has none
+    fs.created("Documents/Readme.md")           # datetime
+    fs.modified("Documents/Readme.md")          # datetime
+    fs.etag("Documents/Readme.md")              # as the server sends it
 ```
 
 Several at once, in one request:
@@ -225,17 +255,20 @@ fs.dav_compliance()  # {"1", "2"}
 ## Locks
 
 ```python
-with fs.locked("Documents/report.docx") as lock:
-    fs.upload_file("report.docx", "Documents/report.docx", overwrite=True)
+import webdav
+
+with webdav.FileSystem("https://webdav.example.org", auth=("user", "password")) as fs:
+    with fs.locked("Documents/report.docx") as lock:
+        fs.upload_file("report.docx", "Documents/report.docx", overwrite=True)
 ```
 
 Inside the block, writes through this `FileSystem` (or a `Session` it
-shares) carry the lock's token in an `If` header. The lock is released at
-the end, also if the block raised.
+shares) carry the lock's token. The lock is released at the end, also if
+the block raised.
 
-- A lock on a collection (`Depth: 0` or `infinity`) also covers adding and
-  removing its members (RFC 4918 §7.4); such a write gets a tagged list
-  naming the collection.
+- A lock on a folder also covers adding and removing members in it, with
+  `depth="0"` as well as with the default `depth="infinity"`. The token is
+  sent automatically. See [Locks on a collection](locking.md#locks-on-a-collection).
 - Reads never carry a token.
 - A lock is requested for 600 s unless you say `lock_timeout=` (`None`:
   infinite).
@@ -250,8 +283,8 @@ with fs.locked("Documents/report.docx", lock_timeout=60) as lock:
 At the `Session` level, `session.lock(...)` records the lock it gets, and
 `session.locks.add(url, token, depth)` records a token you already hold.
 Later writes then carry it the same way, see
-[Session: Locks](session.md#lock-and-unlock). Refreshing, timeouts and what a
-lock does on the server are explained in [Locking](locking.md).
+[Session: Locks](session.md#lock-and-unlock). Refreshing, timeouts and
+what a lock does on the server are explained in [Locking](locking.md).
 
 ## Paths and names
 

@@ -27,5 +27,14 @@ the query of a signed URL are redacted before either is built, and an
 `InsecureTransportWarning` (credentials about to go out over plain `http`) names the host
 and port only.
 
-See "Security" in the README and the redirect/TLS/session reference pages, and the
-"Security" sections of the CHANGELOG for what has been fixed and how.
+XML from the server (multistatus, lock and error bodies) is parsed with the standard
+library's expat parser. External entities are never resolved, so a response cannot make
+the client read a local file or send a request. Expat 2.4.0 and newer rejects entity
+expansion attacks ("billion laughs"). A multistatus or lock response that tries either
+raises `MalformedResponseError`. If your Python links an older system expat, check
+`pyexpat.EXPAT_VERSION`.
+
+The complete list of security defaults is in the
+[README](https://github.com/manfred-kaiser/webdav-rfc4918#security). The redirect, TLS
+and session reference pages have the details, and the "Security" sections of the
+CHANGELOG list what has been fixed and how.

@@ -143,12 +143,12 @@ class HTTPStatusError(WebDAVError, requests.exceptions.HTTPError):
     """
 
     #: Class-level default used only to populate ``STATUS_CODE_EXCEPTIONS``
-    #: (see :func:`_register`) - not read after that. The actual status of
+    #: (see ``_register``) - not read after that. The actual status of
     #: a raised instance is always ``self.status_code``, set in
     #: ``__init__`` from the real response, since a base ``HTTPStatusError``
     #: (an unregistered status code) has no fixed status of its own.
     default_status_code: ClassVar[int | None] = None
-    #: Whether :mod:`webdav.transport.retry` should retry a request that failed with
+    #: Whether ``webdav.transport.retry`` should retry a request that failed with
     #: this status - i.e. the failure is plausibly transient.
     retryable: ClassVar[bool] = False
 
@@ -173,7 +173,8 @@ class HTTPStatusError(WebDAVError, requests.exceptions.HTTPError):
     def error_codes(self) -> "frozenset[str]":
         """RFC 4918 §16 precondition/postcondition codes from the response body.
 
-        E.g. ``{"no-conflicting-lock"}`` for a 423 from :meth:`Session.locked`,
+        E.g. ``{"no-conflicting-lock"}`` for a 423 from
+        :meth:`~webdav.fs.client.FileSystem.locked`,
         or ``{"lock-token-submitted"}`` for a write through a stale token -
         lets a caller distinguish *why* without re-parsing the response
         body itself. Lazily parsed and cached: most callers never need

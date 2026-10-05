@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stand up a throwaway Nextcloud container and run tests/test_nextcloud_compliance.py against it.
 
-Everything docs/nextcloud-compliance-check.md describes by hand, in one
+Everything docs/contributing-nextcloud.md describes by hand, in one
 reproducible command.
 
 Note: ``tests/test_nextcloud_compliance.py`` already starts and stops its

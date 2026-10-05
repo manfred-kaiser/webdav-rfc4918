@@ -106,7 +106,7 @@ def _context(
 def ls(path: str, **kwargs: Unpack[_Options]) -> list[Resource]:
     """List the members of a collection.
 
-    See :meth:`FileSystem.ls`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.ls`; ``path`` is a full URL.
     """
     return _run(FileSystem.ls, kwargs, path)
 
@@ -114,7 +114,7 @@ def ls(path: str, **kwargs: Unpack[_Options]) -> list[Resource]:
 def info(path: str, **kwargs: Unpack[_Options]) -> Resource:
     """Describe one resource (a file or a collection - not its members).
 
-    See :meth:`FileSystem.info`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.info`; ``path`` is a full URL.
     """
     return _run(FileSystem.info, kwargs, path)
 
@@ -122,7 +122,7 @@ def info(path: str, **kwargs: Unpack[_Options]) -> Resource:
 def exists(path: str, **kwargs: Unpack[_Options]) -> bool:
     """Check whether a resource exists.
 
-    See :meth:`FileSystem.exists`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.exists`; ``path`` is a full URL.
     """
     return _run(FileSystem.exists, kwargs, path)
 
@@ -130,7 +130,7 @@ def exists(path: str, **kwargs: Unpack[_Options]) -> bool:
 def isdir(path: str, **kwargs: Unpack[_Options]) -> bool:
     """Check whether a resource is a collection (``False`` if it does not exist).
 
-    See :meth:`FileSystem.isdir`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.isdir`; ``path`` is a full URL.
     """
     return _run(FileSystem.isdir, kwargs, path)
 
@@ -138,7 +138,7 @@ def isdir(path: str, **kwargs: Unpack[_Options]) -> bool:
 def isfile(path: str, **kwargs: Unpack[_Options]) -> bool:
     """Check whether a resource exists and is not a collection.
 
-    See :meth:`FileSystem.isfile`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.isfile`; ``path`` is a full URL.
     """
     return _run(FileSystem.isfile, kwargs, path)
 
@@ -152,7 +152,7 @@ def mkdir(
 ) -> None:
     """Create a collection.
 
-    See :meth:`FileSystem.mkdir`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.mkdir`; ``path`` is a full URL.
     """
     _run(FileSystem.mkdir, kwargs, path, data=data, set_props=set_props)
 
@@ -160,7 +160,7 @@ def mkdir(
 def remove(path: str, **kwargs: Unpack[_Options]) -> None:
     """Remove a resource (or a collection, with everything in it).
 
-    See :meth:`FileSystem.remove`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.remove`; ``path`` is a full URL.
     """
     _run(FileSystem.remove, kwargs, path)
 
@@ -175,7 +175,7 @@ def copy(
 ) -> None:
     """Copy a resource (or a collection, with everything in it) server-side.
 
-    See :meth:`FileSystem.copy`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.copy`; ``path`` is a full URL.
     """
     _run(FileSystem.copy, kwargs, path, destination, overwrite=overwrite, depth=depth)
 
@@ -189,7 +189,7 @@ def move(
 ) -> None:
     """Move (rename) a resource server-side.
 
-    See :meth:`FileSystem.move`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.move`; ``path`` is a full URL.
     """
     _run(FileSystem.move, kwargs, path, destination, overwrite=overwrite)
 
@@ -204,7 +204,7 @@ def get_props(
 ) -> "DAVProperties":
     """Return properties of a resource via PROPFIND.
 
-    See :meth:`FileSystem.get_props`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.get_props`; ``path`` is a full URL.
     """
     return _run(
         FileSystem.get_props,
@@ -225,7 +225,7 @@ def set_props(
 ) -> None:
     """Set and/or remove properties via PROPPATCH (RFC 4918 sec. 9.2).
 
-    See :meth:`FileSystem.set_props`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.set_props`; ``path`` is a full URL.
     """
     _run(
         FileSystem.set_props,
@@ -245,7 +245,7 @@ def refresh_lock(
 ) -> ActiveLock:
     """Refresh a held lock's timeout (RFC 4918 sec. 9.10.2).
 
-    See :meth:`FileSystem.refresh_lock`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.refresh_lock`; ``path`` is a full URL.
     """
     return _run(FileSystem.refresh_lock, kwargs, path, token, lock_timeout=lock_timeout)
 
@@ -253,7 +253,7 @@ def refresh_lock(
 def content_length(path: str, **kwargs: Unpack[_Options]) -> "int | None":
     """Return the ``getcontentlength`` property.
 
-    See :meth:`FileSystem.content_length`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.content_length`; ``path`` is a full URL.
     """
     return _run(FileSystem.content_length, kwargs, path)
 
@@ -261,7 +261,7 @@ def content_length(path: str, **kwargs: Unpack[_Options]) -> "int | None":
 def created(path: str, **kwargs: Unpack[_Options]) -> "datetime | None":
     """Return the ``creationdate`` property.
 
-    See :meth:`FileSystem.created`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.created`; ``path`` is a full URL.
     """
     return _run(FileSystem.created, kwargs, path)
 
@@ -269,7 +269,7 @@ def created(path: str, **kwargs: Unpack[_Options]) -> "datetime | None":
 def modified(path: str, **kwargs: Unpack[_Options]) -> "datetime | None":
     """Return the ``getlastmodified`` property.
 
-    See :meth:`FileSystem.modified`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.modified`; ``path`` is a full URL.
     """
     return _run(FileSystem.modified, kwargs, path)
 
@@ -277,7 +277,7 @@ def modified(path: str, **kwargs: Unpack[_Options]) -> "datetime | None":
 def etag(path: str, **kwargs: Unpack[_Options]) -> "str | None":
     """Return the ``getetag`` property.
 
-    See :meth:`FileSystem.etag`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.etag`; ``path`` is a full URL.
     """
     return _run(FileSystem.etag, kwargs, path)
 
@@ -285,7 +285,7 @@ def etag(path: str, **kwargs: Unpack[_Options]) -> "str | None":
 def content_type(path: str, **kwargs: Unpack[_Options]) -> "str | None":
     """Return the ``getcontenttype`` property.
 
-    See :meth:`FileSystem.content_type`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.content_type`; ``path`` is a full URL.
     """
     return _run(FileSystem.content_type, kwargs, path)
 
@@ -293,7 +293,7 @@ def content_type(path: str, **kwargs: Unpack[_Options]) -> "str | None":
 def content_language(path: str, **kwargs: Unpack[_Options]) -> "str | None":
     """Return the ``getcontentlanguage`` property.
 
-    See :meth:`FileSystem.content_language`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.content_language`; ``path`` is a full URL.
     """
     return _run(FileSystem.content_language, kwargs, path)
 
@@ -301,7 +301,7 @@ def content_language(path: str, **kwargs: Unpack[_Options]) -> "str | None":
 def dav_compliance(path: str = "", **kwargs: Unpack[_Options]) -> set[str]:
     """Return the ``DAV:`` compliance classes the server advertises.
 
-    See :meth:`FileSystem.dav_compliance`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.dav_compliance`; ``path`` is a full URL.
     """
     return _run(FileSystem.dav_compliance, kwargs, path)
 
@@ -311,7 +311,7 @@ def walk(
 ) -> "Iterator[tuple[str, list[Resource], list[Resource]]]":
     """Walk a collection tree top-down, like :func:`os.walk`.
 
-    See :meth:`FileSystem.walk`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.walk`; ``path`` is a full URL.
     """
     return _walk(FileSystem.walk, kwargs, path, max_depth=max_depth)
 
@@ -327,7 +327,7 @@ def download_file(
 ) -> None:
     """Download a resource to a local file.
 
-    See :meth:`FileSystem.download_file`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.download_file`; ``path`` is a full URL.
     """
     _run(
         FileSystem.download_file,
@@ -352,7 +352,7 @@ def upload_file(
 ) -> None:
     """Upload a local file to a remote path.
 
-    See :meth:`FileSystem.upload_file`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.upload_file`; ``path`` is a full URL.
     """
     _run(
         FileSystem.upload_file,
@@ -376,7 +376,7 @@ def download_fileobj(
 ) -> None:
     """Write a resource's contents to an open, writable file object.
 
-    See :meth:`FileSystem.download_fileobj`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.download_fileobj`; ``path`` is a full URL.
     """
     _run(
         FileSystem.download_fileobj,
@@ -401,7 +401,7 @@ def upload_fileobj(
 ) -> None:
     """Upload an open, readable file object to a remote path.
 
-    See :meth:`FileSystem.upload_fileobj`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.upload_fileobj`; ``path`` is a full URL.
     """
     _run(
         FileSystem.upload_fileobj,
@@ -451,7 +451,7 @@ def open(  # noqa: A001
 ) -> "Iterator[TextIO | BinaryIO]":
     """Open a resource for reading or writing, like the builtin ``open``.
 
-    See :meth:`FileSystem.open`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.open`; ``path`` is a full URL.
     """
     with _context(
         "open", kwargs, path, mode, encoding=encoding, chunk_size=chunk_size
@@ -471,7 +471,7 @@ def locked(
 ) -> "Iterator[ActiveLock]":
     """Hold a WebDAV lock on ``path`` for the duration of the ``with`` block.
 
-    See :meth:`FileSystem.locked`; ``path`` is a full URL.
+    See :meth:`~webdav.fs.client.FileSystem.locked`; ``path`` is a full URL.
     """
     with _context(
         "locked",

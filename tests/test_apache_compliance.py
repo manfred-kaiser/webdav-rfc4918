@@ -11,9 +11,10 @@ tests run against that (possibly remote, possibly specially-configured)
 instance; otherwise, if a local Apache + ``mod_dav`` install is found
 (see ``tests/apache_instance.py``), a throwaway instance is started and
 stopped automatically - no manual step needed either way. See
-``docs/apache-compliance-check.md`` for the full setup story and the
-Apache-specific behavior these tests pin down (so a future Apache upgrade
-that changes one is caught here, not discovered in production).
+``docs/contributing-apache.md`` for the full setup story and
+``docs/apache-compliance-check.md`` for the Apache-specific behavior these
+tests pin down (so a future Apache upgrade that changes one is caught
+here, not discovered in production).
 """
 
 import base64
@@ -72,7 +73,7 @@ pytestmark = [
     # the default -nauto, each xdist *worker* is its own pytest "session",
     # so without this, two workers could each try to bind the same port, or
     # race each other on the shared dav-root exactly like running this file
-    # by hand without -n0 does (see docs/apache-compliance-check.md). This
+    # by hand without -n0 does (see docs/contributing-apache.md). This
     # pins every test in this module to one worker, deterministically.
     pytest.mark.xdist_group(name="apache"),
 ]

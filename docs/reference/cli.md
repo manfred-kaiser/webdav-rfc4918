@@ -1,60 +1,93 @@
 # CLI
 
-`dav` is a command-line WebDAV client installed together with this package -
-useful for quick checks, scripting, or exploring a server without writing
-Python. Every subcommand maps to one file-system-style operation.
+`dav` is a command-line WebDAV client that comes with this package. It is
+meant for quick checks, scripts, or looking around a server without
+writing Python. Each subcommand is one file operation.
 
 ```console
 $ pip install webdav-rfc4918   # the `dav` command is part of the package
 ```
 
-Every command takes one or more WebDAV URLs
-(`webdav://host/path`/`webdavs://host/path`, or plain `http(s)://`).
-Authentication is `user:pass@host` in the URL, `--user`/`--password`, or
-the `WEBDAV_USER`/`WEBDAV_PASSWORD` environment variables. A `user:pass@host`
-URL is parsed by the `dav` command itself and passed to the library as
-`auth=`, which otherwise refuses credentials embedded in a URL - see
-[Session: Limits on what a server can make the client
-do](session.md#limits-on-what-a-server-can-make-the-client-do).
+Every command takes one or more WebDAV URLs: `webdavs://host/path`,
+`webdav://host/path`, or plain `http(s)://`. `webdavs://` is HTTPS,
+`webdav://` is plain HTTP.
 
-```console
-$ dav ls webdav://user:pass@webdav.example.org/Photos
-$ dav get webdav://webdav.example.org/report.pdf ./report.pdf
-$ dav put ./report.pdf webdav://webdav.example.org/report.pdf
-$ dav mkdir webdav://webdav.example.org/NewFolder
-$ dav rm webdav://webdav.example.org/old.txt
-$ dav mv webdav://webdav.example.org/a.txt webdav://webdav.example.org/b.txt
-$ dav cp webdav://webdav.example.org/a.txt webdav://webdav.example.org/copy.txt
-$ dav cat webdav://webdav.example.org/notes.txt
-$ dav info webdav://webdav.example.org/notes.txt
+Authentication is `--user`/`--password`, `user:pass@host` in the URL, or
+the `WEBDAV_USER`/`WEBDAV_PASSWORD` environment variables, in that order of
+precedence. The `dav` command takes `user:pass@host` out of the URL itself
+and passes it on as `auth=` before it creates a `Session`. The library
+itself still refuses credentials in a URL, see
+[Session: Limits](session.md#limits-on-what-a-server-can-make-the-client-do).
+
+```{warning}
+A `webdav://` or `http://` URL sends the username and password in clear
+text. Anyone on the network path can read them. Use `webdavs://` or
+`https://`.
+
+`--password` is visible to other local users via the process list. A
+password in the URL (`user:pass@host`) is part of the command line as
+well and is visible in the same way. Set the password in
+`$WEBDAV_PASSWORD` instead. For an encrypted client key, use
+`$WEBDAV_KEY_PASSWORD` instead of `--key-password`.
 ```
 
-`mv`/`cp` are server-side operations (COPY/MOVE) and therefore require
-both URLs to point at the same server.
+```console
+$ export WEBDAV_USER=user WEBDAV_PASSWORD=password
+$ dav ls webdavs://webdav.example.org/Photos
+$ dav get webdavs://webdav.example.org/report.pdf ./report.pdf
+$ dav mkdir webdavs://webdav.example.org/NewFolder
+$ dav put ./report.pdf webdavs://webdav.example.org/NewFolder/report.pdf
+$ dav rm webdavs://webdav.example.org/old.txt
+$ dav cp webdavs://webdav.example.org/a.txt webdavs://webdav.example.org/copy.txt
+$ dav mv webdavs://webdav.example.org/a.txt webdavs://webdav.example.org/b.txt
+$ dav cat webdavs://webdav.example.org/notes.txt
+$ dav info webdavs://webdav.example.org/notes.txt
+```
+
+`mv` and `cp` run on the server (`MOVE` and `COPY`). Both URLs must
+therefore point at the same server.
 
 ## Connection options
 
-The commonly needed {class}`~webdav.session.Session` options are available as a
-flag on every subcommand, grouped in `--help`:
+The commonly needed {class}`~webdav.session.Session` options are
+available as flags on every subcommand. `--help` lists them in groups:
 
 ```console
 $ dav ls --help
 ```
 
-**mTLS / TLS**
-: `--cert`/`--key` (client certificate), `--key-password` (default:
-  `$WEBDAV_KEY_PASSWORD`), `--ca-cert` (custom CA bundle; server
-  verification itself can never be disabled), `--crl-cert` (repeatable),
-  `--ciphers`, `--tls-min-version`/`--tls-max-version` (`1.2`/`1.3`).
+### mTLS and TLS
 
-**Redirects** (see {doc}`redirects`)
-: `--redirect-policy {never,same-origin,whitelist,all}` (default:
-  `same-origin`), `--trusted-redirect-origin` (repeatable; requires
-  `--redirect-policy whitelist`), `--max-redirects` (redirects in a row
-  before a request is refused as a loop; default: 5).
+| Flag | Meaning |
+|---|---|
+| `--cert`, `--key` | Client certificate |
+| `--key-password` | Default: `$WEBDAV_KEY_PASSWORD` |
+| `--ca-cert` | Custom CA bundle. Server verification itself can never be disabled |
+| `--crl-cert` | Repeatable |
+| `--ciphers` | |
+| `--tls-min-version`, `--tls-max-version` | `1.2` or `1.3` |
 
-**Connection tuning**
-: `--max-response-size` (bytes, or `none` to disable the cap; default:
-  64 MiB), `--max-response-time` (seconds for the whole request, or `none`;
-  default: 300), `--chunk-size` (bytes; default: 4 MiB), `--no-retry` (don't
-  automatically retry a transient failure).
+### Redirects
+
+[Redirects](redirects.md) explains the policies.
+
+| Flag | Meaning |
+|---|---|
+| `--redirect-policy {never,same-origin,whitelist,all}` | Default: `same-origin` |
+| `--trusted-redirect-origin` | Repeatable. Requires `--redirect-policy whitelist` |
+| `--max-redirects` | Redirects in a row before a request is refused as a loop. Default: 5 |
+
+### Connection tuning
+
+| Flag | Meaning |
+|---|---|
+| `--max-response-size` | Bytes, or `none` to disable the cap. Default: 64 MiB |
+| `--max-response-time` | Seconds for the whole request, or `none`. Default: 300 |
+| `--chunk-size` | Bytes. Default: 4 MiB |
+| `--no-retry` | Do not retry a transient failure automatically |
+
+`none` (or `unlimited`) removes the limit completely. A faulty or hostile
+server can then send a response of any size, or keep a request open
+without end. `0` is rejected, so a typo cannot remove a limit by accident.
+`dav get` streams the download, so neither limit applies to it, see
+[Session: Limits](session.md#limits-on-what-a-server-can-make-the-client-do).

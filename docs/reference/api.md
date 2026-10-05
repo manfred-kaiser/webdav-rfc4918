@@ -82,6 +82,60 @@ return `Resource` objects.
    :members:
 ```
 
+## Multi-Status bodies and properties
+
+`Response.multistatus` parses a `207 Multi-Status` body into a
+`MultiStatusResponse`. It holds one `ResourceResponse` per `<response>`
+element, and each of those holds the resource's `DAVProperties`.
+`FileSystem.get_props` returns a `DAVProperties` directly. To change how
+any of them parse, subclass them and set `response_class` on the
+`Session`, see [Session options](session.md#session-options).
+
+```{eval-rst}
+.. autoclass:: webdav.dav.multistatus.MultiStatusResponse
+   :members:
+
+.. autoclass:: webdav.dav.multistatus.ResourceResponse
+   :members:
+
+.. autoclass:: webdav.dav.properties.DAVProperties
+   :members:
+
+.. autoclass:: webdav.dav.properties.PropStat
+   :members:
+
+.. autoclass:: webdav.dav.locks.LockEntry
+   :members:
+```
+
+## Server features
+
+`Session.features_for` returns a `FeatureDetection`, one per server,
+cached.
+
+```{eval-rst}
+.. autoclass:: webdav.dav.features.FeatureDetection
+   :members:
+```
+
+## HTTP methods
+
+```{eval-rst}
+.. autoclass:: webdav.methods.Method
+   :members:
+   :undoc-members:
+```
+
+## Transport adapter
+
+Every adapter the library mounts is a `DeadlineAdapter`. Use one for
+`Session.mount`, so `max_response_time` still applies.
+
+```{eval-rst}
+.. autoclass:: webdav.transport.deadline.DeadlineAdapter
+   :members: build_response
+```
+
 ## Locking
 
 ```{eval-rst}

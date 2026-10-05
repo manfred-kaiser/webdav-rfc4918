@@ -7,9 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-05
+
 ### Added
 
 - `webdav`/`webdavs` are now registered with fsspec via its `fsspec.specs` entry point.
+- `webdav://` URLs use plain HTTP, `webdavs://` HTTPS.
 - Documentation is now hosted at https://webdav.readthedocs.io.
 - The Apache test suite now covers what `mod_dav` does: ETags, locks, timeouts, large files, odd names, parallel clients.
 - `WEBDAV_TEST_APACHE_PREFIX` runs the Apache tests against an Apache built from source.
