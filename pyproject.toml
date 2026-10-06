@@ -219,7 +219,7 @@ load-plugins = "pylint.extensions.docparams"
 # Session is for the HTTP/WebDAV verbs (see max-public-methods above) -
 # splitting it purely to satisfy this metric would work against that. A
 # little headroom over its current size.
-max-module-lines = 1100
+max-module-lines = 1200
 
 [tool.bandit]
 # B101 (assert): every use in src/ is an internal type-narrowing check,
