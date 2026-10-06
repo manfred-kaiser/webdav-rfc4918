@@ -8,12 +8,13 @@ version = "1.1.0"
 description = "RFC 4918 compliant WebDAV client, built on requests, with an optional fsspec filesystem and a CLI"
 readme = "README.md"
 keywords = [ "fsspec", "mtls", "rfc4918", "webdav", "webdav-cli", "webdav-client" ]
-license = { text = "MIT" }
+license = "MIT"
 authors = [ { name = "Manfred Kaiser", email = "manfred.kaiser@ssh-mitm.at" } ]
 maintainers = [ { name = "Manfred Kaiser", email = "manfred.kaiser@ssh-mitm.at" } ]
 requires-python = ">=3.11"
 classifiers = [
   "Development Status :: 5 - Production/Stable",
+  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
