@@ -131,6 +131,7 @@ reference/cli
 
 reference/tls
 reference/redirects
+reference/url-credentials
 ```
 
 ```{toctree}

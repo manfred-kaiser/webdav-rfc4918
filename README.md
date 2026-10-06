@@ -120,7 +120,7 @@ list of defaults:
   cannot replace the CA you configured. `~/.netrc` is ignored too: without
   `auth=`, no credentials are sent.
 - A URL with credentials in it (`https://user:pw@host/`) is refused. Pass
-  `auth=` instead.
+  `auth=` instead. [Why](https://webdav.readthedocs.io/en/latest/reference/url-credentials.html).
 - Credentials sent over plain `http` to a host other than localhost trigger
   an `InsecureTransportWarning`, once per host.
 - Only same-origin redirects are followed
