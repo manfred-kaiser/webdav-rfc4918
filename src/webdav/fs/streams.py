@@ -19,11 +19,12 @@ import requests.exceptions
 
 from webdav.exceptions import ClientError, raise_for_status
 from webdav.methods import Method
+from webdav.transport.body import iter_body
 from webdav.transport.parse_utils import parse_uint
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-    from typing import Self
+    from collections.abc import Callable, Iterator
+    from typing import Any, Self
 
     from requests import Response as HTTPResponse
     from typing_extensions import Buffer
@@ -206,6 +207,7 @@ def iter_url(
     pos: int = 0,
 ) -> "Iterator[tuple[HTTPResponse, Iterator[bytes]]]":
     """Iterate over chunks requested from ``url``, reopening on network failure."""
+    read_size = chunk_size or session.chunk_size
 
     def gen(response: "HTTPResponse") -> Generator[bytes, None, None]:
         nonlocal pos
@@ -227,7 +229,7 @@ def iter_url(
                     _validate_resumed_response(response, pos, etag, last_modified)
 
                 try:
-                    for chunk in response.iter_content(chunk_size=chunk_size):
+                    for chunk in iter_body(response, read_size):
                         pos += len(chunk)
                         yield chunk
                     if expected is not None and pos != expected:
@@ -262,15 +264,25 @@ class IterStream(RawIOBase):
     """A read-only, seekable, streaming file-like object over a GET response."""
 
     def __init__(
-        self, session: "Session", url: str, chunk_size: int | None = None
+        self,
+        session: "Session",
+        url: str,
+        chunk_size: int | None = None,
+        on_chunk: "Callable[[int], Any] | None" = None,
     ) -> None:
-        """Set up the stream; the actual request is sent on ``__enter__``."""
+        """Set up the stream; the actual request is sent on ``__enter__``.
+
+        ``on_chunk``, if given, is called with the size of each piece as it
+        actually arrives over the network - not once per ``chunk_size``
+        worth of it, which a slow or stalling server might never deliver.
+        """
         super().__init__()
         self.buffer = b""
         self.chunk_size = chunk_size or session.chunk_size
         self.session = session
         self.url = url
         self._loc: int = 0
+        self._on_chunk = on_chunk
         self._cm = iter_url(session, self.url, chunk_size=chunk_size)
         self._iterator: Iterator[bytes] | None = None
         self._initial_response: HTTPResponse | None = None
@@ -394,10 +406,15 @@ class IterStream(RawIOBase):
     def read1(self, num: int = -1) -> bytes:
         """Read at most once from the underlying iterator."""
         assert self._iterator
-        try:
-            chunk = self.buffer or next(self._iterator)
-        except StopIteration:
-            return b""
+        if self.buffer:
+            chunk = self.buffer
+        else:
+            try:
+                chunk = next(self._iterator)
+            except StopIteration:
+                return b""
+            if self._on_chunk:
+                self._on_chunk(len(chunk))
 
         if num <= 0:
             output, self.buffer = chunk, b""

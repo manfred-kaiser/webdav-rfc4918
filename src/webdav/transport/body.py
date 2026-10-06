@@ -24,22 +24,25 @@ if TYPE_CHECKING:
 _READ_CHUNK = 64 * 1024
 
 
-def _iter_body(response: requests.Response) -> "Iterator[bytes]":
-    """Yield a streamed body in whatever pieces arrive, without waiting to fill a buffer.
+def iter_body(response: requests.Response, chunk_size: int) -> "Iterator[bytes]":
+    """Yield a streamed body in whatever pieces arrive, without waiting to fill ``chunk_size``.
 
     ``iter_content(n)`` blocks until ``n`` bytes have arrived, so a server
     sending one byte just inside the read timeout keeps it waiting for days;
-    ``read1`` hands back what is there, and gives the caller a chance to look
-    at the clock after every read.
+    ``read1`` hands back what is there, up to ``chunk_size``, and gives the
+    caller a chance to look at the clock - or run a callback - after every
+    read. Used here for :func:`read_bounded`'s own deadline, and by
+    :func:`webdav.fs.streams.iter_url` so a caller's progress ``callback``
+    fires as data actually arrives rather than once per full chunk.
     """
     raw = response.raw
     read1 = getattr(raw, "read1", None)
     if not isinstance(raw, urllib3.response.BaseHTTPResponse) or read1 is None:
         # A body that is not urllib3's (a custom adapter's, a test double).
-        yield from response.iter_content(chunk_size=_READ_CHUNK)
+        yield from response.iter_content(chunk_size=chunk_size)
         return
     try:
-        while chunk := read1(_READ_CHUNK, decode_content=True):
+        while chunk := read1(chunk_size, decode_content=True):
             yield chunk
     except urllib3.exceptions.ProtocolError as exc:
         raise requests.exceptions.ChunkedEncodingError(exc, response=response) from exc
@@ -97,7 +100,7 @@ def read_bounded(
     deadline = None if max_time is None else time.monotonic() + max_time
     chunks: list[bytes] = []
     total = 0
-    for chunk in _iter_body(response):
+    for chunk in iter_body(response, _READ_CHUNK):
         total += len(chunk)
         if max_size is not None and total > max_size:
             response.close()
@@ -141,4 +144,4 @@ def read_response(
     read_bounded(response, max_size=max_size, max_time=max_time)
 
 
-__all__ = ["read_bounded", "read_response"]
+__all__ = ["iter_body", "read_bounded", "read_response"]

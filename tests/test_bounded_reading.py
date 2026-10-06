@@ -20,7 +20,7 @@ from tests.scripted_server import (
 from webdav import Session
 from webdav.exceptions import ClientError
 from webdav.session import DEFAULT_MAX_RESPONSE_SIZE
-from webdav.transport.body import _iter_body, read_bounded
+from webdav.transport.body import iter_body, read_bounded
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -76,14 +76,14 @@ def test_a_body_error_surfaces_as_the_matching_requests_error(
     response = requests.Response()
     response.raw = _FailingRaw(raised)
     with pytest.raises(requests.exceptions.RequestException) as excinfo:
-        list(_iter_body(response))
+        list(iter_body(response, 65536))
     assert type(excinfo.value) is expected
 
 
 def test_a_body_that_is_not_urllib3s_is_still_read() -> None:
     response = requests.Response()
     response.raw = io.BytesIO(b"abcdef")
-    assert b"".join(_iter_body(response)) == b"abcdef"
+    assert b"".join(iter_body(response, 65536)) == b"abcdef"
 
 
 # ---------------------------------------------------------------------------

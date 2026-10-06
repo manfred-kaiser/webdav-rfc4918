@@ -927,16 +927,29 @@ class FileSystem:
 
         Raises if the transfer does not complete - whatever was written to
         ``fileobj`` before then is a partial file, not a download.
+
+        ``callback``, if given, is called with the number of bytes in each
+        piece as it actually arrives over the network, not once per
+        ``chunk_size`` worth of it - a server that answers slower than
+        ``chunk_size`` fills would otherwise leave it uncalled for as long
+        as the server keeps the connection open at all. Writing a callback
+        that tracks elapsed time (or rate) and raises is the way to bound
+        that, since neither `max_response_size` nor `max_response_time`
+        applies to a streamed download (see the Session reference).
         """
         if chunk_size is not None:
             check_chunk_size(chunk_size)
-        with self.open(path, mode="rb", chunk_size=chunk_size) as remote_obj:
+        if self.isdir(path):
+            raise IsACollectionError(path, "cannot open a collection")
+        with IterStream(
+            self._session,
+            self._remote.locate(path).url,
+            chunk_size=chunk_size or self._session.chunk_size,
+            on_chunk=callback,
+        ) as remote_obj:
             size = chunk_size or self._session.chunk_size
-            # (pylint takes the @contextmanager result for a generator)
             while data := remote_obj.read(size):
                 fileobj.write(data)
-                if callback:
-                    callback(len(data))
 
     def download_file(
         self,
