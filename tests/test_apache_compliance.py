@@ -800,6 +800,25 @@ def _granted_timeout(lock_response: requests.Response) -> str:
     return match.group(1)
 
 
+def _assert_granted_timeout(lock_response: requests.Response, expected: str) -> None:
+    """Assert the granted ``<timeout>`` is ``expected`` - within 1s for a ``Second-N`` value.
+
+    Apache recomputes the remaining seconds from the lock's absolute expiry
+    each time it reports one, not from the originally requested number -
+    so a request that straddles a wall-clock second boundary between
+    granting the lock and writing the response legitimately reports one
+    second less than what was asked for.
+    """
+    actual = _granted_timeout(lock_response)
+    actual_seconds = re.fullmatch(r"Second-(\d+)", actual)
+    expected_seconds = re.fullmatch(r"Second-(\d+)", expected)
+    if actual_seconds and expected_seconds:
+        delta = int(expected_seconds.group(1)) - int(actual_seconds.group(1))
+        assert delta in (0, 1), (actual, expected)
+    else:
+        assert actual == expected
+
+
 def _etag(path: str, *, base: "str | None" = None) -> str:
     response = _http("PROPFIND", path, base=base, headers={"Depth": "0"})
     match = re.search(r"getetag>([^<]*)<", response.text)
@@ -1524,7 +1543,7 @@ def test_apache_lock_timeout_header(
     response = _lock(path, timeout=header)
     token = _token(response)
     try:
-        assert _granted_timeout(response) == granted
+        _assert_granted_timeout(response, granted)
     finally:
         _unlock(path, token)
 
@@ -1564,7 +1583,7 @@ def test_apache_a_refresh_answers_the_new_timeout_and_no_lock_token(
             "LOCK", path, headers={"If": f"(<{token}>)", "Timeout": "Second-90"}
         )
         assert refreshed.status_code == 200
-        assert _granted_timeout(refreshed) == "Second-90"
+        _assert_granted_timeout(refreshed, "Second-90")
         assert "Lock-Token" not in refreshed.headers
         assert token in refreshed.text
     finally:
@@ -1579,8 +1598,8 @@ def test_apache_davmintimeout_raises_a_short_timeout_but_not_infinite(
         short = _lock("a.txt", timeout="Second-5", base=base)
         forever = _lock("b.txt", timeout="Infinite", base=base)
         try:
-            assert _granted_timeout(short) == "Second-120"
-            assert _granted_timeout(forever) == "Infinite"
+            _assert_granted_timeout(short, "Second-120")
+            _assert_granted_timeout(forever, "Infinite")
         finally:
             _unlock("a.txt", _token(short), base=base)
             _unlock("b.txt", _token(forever), base=base)
