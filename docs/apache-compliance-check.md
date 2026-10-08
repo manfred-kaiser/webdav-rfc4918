@@ -235,7 +235,12 @@ Limits, each on an instance of its own:
   though - they report "2.4.62" but carry their own backport of this exact
   CVE (`httpd-2.4.62-CVE-2026-42535.patch` in CentOS Stream 9's spec) and so
   are expected to refuse the write like 2.4.68, not like the unpatched
-  upstream 2.4.62 tarball.
+  upstream 2.4.62 tarball. Debian and Ubuntu package this differently
+  (a "new upstream version" per release, not a frozen base plus patches),
+  but backport the same way in effect: their changelogs show the fix
+  landing by shipping the 2.4.68 source itself, and Ubuntu's own security
+  tracker confirms every supported release (back through ESM) is fixed -
+  current `ubuntu-latest` CI runners are not exposed to this one either.
 
   Fixing the write is not the whole story: 2.4.68 still answers `200` with
   the real database bytes to a plain **`GET`** of a property database file
@@ -244,7 +249,13 @@ Limits, each on an instance of its own:
   go through; GET never reaches it; mod_dav_fs declines it and the default
   handler serves the file straight off disk. Only 2.4.69's added
   `dav_fs_fixups` hook (`modules/dav/fs/mod_dav_fs.c`) runs ahead of `mod_dav`
-  for every method and closes this too. \
+  for every method and closes this too - and, unlike the write issue, this
+  one has no CVE and no CHANGES entry of its own, so there is no public
+  advisory for a distro's security team to backport against. Practically:
+  every long-term-support Apache package checked here (openSUSE, Ubuntu,
+  RHEL/CentOS Stream) tracks a pre-2.4.69 base, so a client that must not
+  trust `.DAV` to stay unreadable has to assume this gap is open unless
+  the server is confirmed to run upstream 2.4.69 or later from source. \
   *Test: `test_apache_a_name_survives_the_round_trip` (one case per name),
   `test_apache_the_lock_database_directory_cannot_be_written` and
   `test_apache_the_lock_database_directory_cannot_be_read` (each probes for
