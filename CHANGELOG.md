@@ -14,8 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `HTTPStatusError.error_codes` and the multistatus-failure check no longer read a response body without a size bound.
 - `max_response_time` now also bounds a new connection's TCP connect and TLS handshake, not just its headers/body.
 - `HTTPStatusError` no longer keeps the real `Authorization`/`Cookie`/`Proxy-Authorization` header value on its `response.request`.
-- The `.DAV` write-protection compliance test (CVE-2026-42535, fixed in httpd 2.4.68) now tells a fixed server apart from an unpatched one (2.4.67 and earlier, including vanilla upstream 2.4.62 - not RHEL 9.8/CentOS Stream 9's own 2.4.62, which backports this CVE) instead of failing on the latter.
-- A new compliance test covers a GET of `.DAV`'s property database: still readable on 2.4.68 even after the write was blocked, closed only by 2.4.69's added `dav_fs_fixups` hook.
 
 ## [1.1.0] - 2026-10-05
 
