@@ -2242,20 +2242,31 @@ def test_apache_a_name_longer_than_255_bytes_is_a_403(
 
 
 def _dav_state_dir_is_protected(apache_client: FileSystem) -> bool:
-    """Whether this server refuses a direct write to ``.DAV`` (``dav_fs_is_state_path``).
+    """Whether this server refuses a direct write to ``.DAV`` (``dav_fs_get_resource``).
 
-    httpd added this check to ``dav_fs_get_resource`` in commit ``7e871be``
-    ("dav_fs_get_resource: disallow DAV_FS_STATE_DIR"), first shipped in the
-    2.4.69 release - confirmed absent in the 2.4.62, 2.4.67 and 2.4.68
-    release tarballs by reading ``modules/dav/fs/repos.c`` of each tag.
-    2.4.62 is what RHEL 9.8/CentOS Stream 9 ships (no backport: there is no
-    CVE tied to this commit, and Red Hat's spec carries no patch for it);
-    2.4.67 is what openSUSE Tumbleweed packaged as of 2026-10. A server
-    built before the fix silently allows the write this module's other
-    test exercises.
+    This is **CVE-2026-42535** ("mod_dav_fs protected directory access"),
+    fixed in the **2.4.68** release (confirmed by diffing the actual
+    ``modules/dav/fs/repos.c`` of the 2.4.67 and 2.4.68 release tarballs:
+    2.4.67 has no such check at all; 2.4.68 adds it inline in
+    ``dav_fs_get_resource``, later extracted into its own
+    ``dav_fs_is_state_path`` function in 2.4.69, a pure refactor with no
+    behavior change). 2.4.67 is what openSUSE Tumbleweed packaged as of
+    2026-10 and silently allows the write. 2.4.62 (vanilla upstream) does
+    too, but that is *not* evidence for RHEL 9.8/CentOS Stream 9, which
+    report "2.4.62" but carry their own backport of this exact CVE
+    (``httpd-2.4.62-CVE-2026-42535.patch`` in CentOS Stream 9's spec,
+    identical in substance to upstream's 2.4.68 fix) - a real RHEL/CentOS
+    Stream install is therefore expected to behave like 2.4.68, not like
+    the unpatched upstream 2.4.62 tarball this suite also builds and
+    tests against for comparison.
 
-    Probed directly (not by parsing the ``Server`` header) so this stays
-    correct for a server this comment's version list does not name.
+    Fixing the write is not the whole story - see
+    :func:`test_apache_the_lock_database_directory_cannot_be_read` for a
+    read-side gap CVE-2026-42535's fix does not close.
+
+    Probed directly (not by parsing the ``Server`` header, which cannot
+    tell an upstream-versioned build from a patched vendor one apart
+    anyway) so this stays correct for any server, backported or not.
     """
     probe = f"dav-state-probe-{uuid.uuid4().hex[:10]}"
     apache_client.mkdir(probe)
@@ -2289,6 +2300,57 @@ def test_apache_the_lock_database_directory_cannot_be_written(
     else:
         with pytest.raises(ResourceConflictError):
             apache_client.upload_fileobj(io.BytesIO(b"x"), f"{scratch}/{path}")
+
+
+def _dav_fixup_hook_blocks_every_method(scratch: str) -> bool:
+    """Whether a GET of a made-up, never-created name under ``.DAV`` is refused anyway.
+
+    httpd 2.4.69 added ``dav_fs_fixups`` (``modules/dav/fs/mod_dav_fs.c``), a
+    fixups hook that runs ahead of ``mod_dav`` for *every* method and checks
+    ``dav_fs_is_state_path()`` by path alone - no filesystem stat, so it
+    refuses a GET of a name that was never created just as surely as a real
+    one. Earlier httpd - including 2.4.68, whose CVE-2026-42535 fix only
+    touches ``dav_fs_get_resource``, the repository-provider path
+    PUT/PROPFIND/LOCK/... go through and GET never reaches - has no such
+    hook: a GET under ``.DAV`` is left to the plain static-file handler,
+    which answers 404 for a name that does not exist.
+    """
+    response = _http("GET", f"{scratch}/.DAV/{uuid.uuid4().hex}")
+    return response.status_code == 403
+
+
+def test_apache_the_lock_database_directory_cannot_be_read(scratch: str) -> None:
+    """A GET of the property database a real PROPPATCH just wrote under ``.DAV`` - on sdbm (the
+    release-tarball default; see ``_dbm_is_sdbm``), a per-resource ``<name>.pag``/``.dir`` pair.
+
+    httpd 2.4.68's CVE-2026-42535 fix blocks the write
+    (:func:`_dav_state_dir_is_protected`) but not this: confirmed live, 2.4.68 still answers `200`
+    with the database's real bytes to a plain GET - writes were blocked, reads were not. Only
+    2.4.69's added ``dav_fs_fixups`` hook (see :func:`_dav_fixup_hook_blocks_every_method`) also
+    refuses this, for every method, before mod_dav or mod_dav_fs's own resource handling ever
+    sees the request."""
+    protected = _dav_fixup_hook_blocks_every_method(scratch)
+    _http("PUT", f"{scratch}/probe.txt", data=b"x").raise_for_status()
+    _http(
+        "PROPPATCH",
+        f"{scratch}/probe.txt",
+        headers={"Content-Type": "text/xml"},
+        data=(
+            b'<?xml version="1.0"?><D:propertyupdate xmlns:D="DAV:" '
+            b'xmlns:x="urn:webdav-rfc4918-test:">'
+            b"<D:set><D:prop><x:p>v</x:p></D:prop></D:set></D:propertyupdate>"
+        ),
+    ).raise_for_status()
+    response = _http("GET", f"{scratch}/.DAV/probe.txt.pag")
+    if protected:
+        assert response.status_code == 403
+        return
+    if response.status_code == 404:
+        pytest.skip(
+            "this server's DBM backend does not name the property database after the resource"
+        )
+    assert response.status_code == 200
+    assert response.content  # the real database bytes this gap exposes
 
 
 # ===========================================================================
