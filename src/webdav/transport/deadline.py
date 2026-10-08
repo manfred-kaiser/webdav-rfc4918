@@ -10,12 +10,16 @@ That is what this module does. The connections of the adapters in this package
 (:class:`DeadlineAdapter`) report themselves to the :func:`watch` that is
 active in the calling context when they start an exchange; when the time is up
 the watchdog shuts their sockets down, which wakes whatever read is blocked
-on them - wherever inside ``http.client`` it is.
+on them - wherever inside ``http.client`` it is. The TCP connect and (on
+``https://``) the TLS handshake of a brand-new connection are bounded the
+same way but by a different mechanism - see
+:meth:`_Watch.bound_connect_timeout`.
 """
 
 import contextvars
 import socket
 import threading
+import time
 from contextlib import contextmanager, suppress
 from typing import TYPE_CHECKING, Any, cast
 
@@ -43,6 +47,7 @@ class _Watch:
         self.expired = threading.Event()
         self._sockets: list[socket.socket] = []
         self._mutex = threading.Lock()
+        self._deadline = time.monotonic() + seconds
         self._timer = threading.Timer(seconds, self._expire)
         self._timer.daemon = True
 
@@ -64,12 +69,39 @@ class _Watch:
         sock = getattr(connection, "sock", None)
         if sock is None:
             return  # not connected yet; tracked again when it is (getresponse)
+        self.track_socket(sock)
+
+    def track_socket(self, sock: socket.socket) -> None:
+        """Watch ``sock`` from now on (cut it at once if the time is up)."""
         with self._mutex:
             if all(s is not sock for s in self._sockets):
                 self._sockets.append(sock)
             expired = self.expired.is_set()
         if expired:
             _cut_off(sock)
+
+    def bound_connect_timeout(self, sock: socket.socket) -> None:
+        """Cap ``sock``'s own blocking timeout to whatever is left of this deadline.
+
+        Called on a freshly-created, not yet connected socket, right before
+        the TCP connect and (for ``https://``) the TLS handshake that
+        ``urllib3`` performs on it - :meth:`track_socket`'s shutdown-based
+        cutoff cannot reach either of those: a server that accepts the
+        connection and then stalls the handshake (never sending a
+        ``ServerHello``) blocks inside a single library call that does not
+        hand control back until it is done, and TLS-wrapping a socket
+        detaches its file descriptor onto a new socket object - a shutdown
+        aimed at the one tracked here would, by then, hit a socket that no
+        longer owns the fd. Capping its timeout instead works for both: a
+        stalled connect raises on its own, and :class:`ssl.SSLSocket`
+        copies the wrapped socket's timeout when it is created, so a stalled
+        handshake does too - each within what is left of the deadline, not
+        some unrelated, independently-configured (or absent) socket timeout.
+        """
+        remaining = max(0.0, self._deadline - time.monotonic())
+        current = sock.gettimeout()
+        if current is None or current > remaining:
+            sock.settimeout(remaining)
 
     def _expire(self) -> None:
         self.expired.set()
@@ -142,24 +174,41 @@ def _register(connection: Any) -> None:
         watcher.track(connection)
 
 
-class _TrackedHTTPConnection(HTTPConnection):
+class _TrackedConnectionMixin:
+    """Reports a connection's socket to the active :func:`watch`, as early as possible.
+
+    ``request()``/``getresponse()`` only ever see ``connection.sock`` once it
+    already exists - for a brand-new connection that is *after* the TCP
+    connect and (on https) the TLS handshake have both already run inside
+    ``super().request()``. Overriding ``_new_conn`` closes that gap: it is
+    called to get the raw socket before either of those runs, so
+    :meth:`_Watch.bound_connect_timeout` can cap how long they are allowed
+    to take - see its docstring for why that, not the shutdown-based
+    tracking the rest of this module uses, is what closing this gap needs.
+    """
+
     def request(self, *args: Any, **kwargs: Any) -> None:
         _register(self)  # also a connection reused from the pool
-        super().request(*args, **kwargs)
+        super().request(*args, **kwargs)  # type: ignore[misc]
 
     def getresponse(self, *args: Any, **kwargs: Any) -> Any:
         _register(self)
-        return super().getresponse(*args, **kwargs)
+        return super().getresponse(*args, **kwargs)  # type: ignore[misc]
+
+    def _new_conn(self) -> socket.socket:
+        sock = super()._new_conn()  # type: ignore[misc]
+        watcher = _ACTIVE.get()
+        if watcher is not None:
+            watcher.bound_connect_timeout(sock)
+        return cast("socket.socket", sock)
 
 
-class _TrackedHTTPSConnection(HTTPSConnection):
-    def request(self, *args: Any, **kwargs: Any) -> None:
-        _register(self)
-        super().request(*args, **kwargs)
+class _TrackedHTTPConnection(_TrackedConnectionMixin, HTTPConnection):
+    pass
 
-    def getresponse(self, *args: Any, **kwargs: Any) -> Any:
-        _register(self)
-        return super().getresponse(*args, **kwargs)
+
+class _TrackedHTTPSConnection(_TrackedConnectionMixin, HTTPSConnection):
+    pass
 
 
 class _HTTPPool(HTTPConnectionPool):

@@ -135,6 +135,24 @@ class MultiStatusError(WebDAVError):
         super().__init__(msg)
 
 
+#: Request headers redacted on every raised :class:`HTTPStatusError` (see
+#: ``_redact_request_headers``) - a calling application logging or
+#: serializing the exception's ``.response`` (an APM/error tracker that
+#: captures it by default, a bare ``logger.error("%r", exc.response)``)
+#: must not put real credentials into storage it does not control.
+_SENSITIVE_REQUEST_HEADERS = frozenset({"authorization", "cookie", "proxy-authorization"})
+
+
+def _redact_request_headers(response: "Response") -> None:
+    request = getattr(response, "request", None)
+    headers = getattr(request, "headers", None)
+    if not headers:
+        return
+    for name in list(headers):
+        if name.lower() in _SENSITIVE_REQUEST_HEADERS:
+            headers[name] = "[redacted]"
+
+
 class HTTPStatusError(WebDAVError, requests.exceptions.HTTPError):
     """Raised when the server returned an unexpected/error HTTP status.
 
@@ -159,6 +177,7 @@ class HTTPStatusError(WebDAVError, requests.exceptions.HTTPError):
         msg: str | None = None,
     ) -> None:
         """Instantiate with the failed response and the request path."""
+        _redact_request_headers(response)
         self.response: Response = response
         self.path = path
         self.status_code: int = response.status_code
@@ -186,8 +205,19 @@ class HTTPStatusError(WebDAVError, requests.exceptions.HTTPError):
         return self._error_codes
 
 
+#: Cap for the lazy read in :func:`_bounded_error_body`. A real RFC 4918
+#: ``<d:error>`` body is a handful of empty precondition/postcondition
+#: elements - this is generous while still refusing to buffer an attacker's
+#: multi-gigabyte error body in memory just because a caller checked
+#: ``error_codes`` on a streamed response.
+_MAX_ERROR_BODY_SIZE = 1 * 1024 * 1024
+
+
 def _parse_error_codes(response: "Response") -> "frozenset[str]":
-    content = response.content
+    # Local import, not at top-level: webdav.transport.body imports this module.
+    from webdav.transport.body import content_within  # noqa: PLC0415
+
+    content = content_within(response, max_size=_MAX_ERROR_BODY_SIZE)
     if not content:
         return frozenset()
     try:

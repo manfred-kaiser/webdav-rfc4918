@@ -123,6 +123,36 @@ def _set_body(response: requests.Response, body: bytes) -> None:
     response._content_consumed = True  # type: ignore[attr-defined]  # noqa: SLF001
 
 
+def content_within(
+    response: requests.Response, *, max_size: int, max_time: "float | None" = None
+) -> bytes:
+    """``response.content``, bounded if the body hasn't been read yet.
+
+    A response whose body :class:`~webdav.session.Session` already read (and
+    size-capped, via :func:`read_response`) returns its cached content for
+    free. One still streamed (``stream=True``) is read now, under the given
+    bound - for a caller that only wants to peek at a small amount of RFC
+    4918 detail (an ``<d:error>``/``<d:multistatus>`` body alongside a
+    non-207 failure status) without becoming the one place that reads an
+    unbounded amount of a hostile server's data into memory. Too large,
+    already released (a caller that gave up on a streamed response without
+    reading it closes it to free the connection, same as any other closed
+    body), or otherwise unreadable (a dropped connection, a decoding error)
+    is treated the same as "nothing useful here" - an empty body, never a
+    raised exception: the caller already has the real HTTP status to
+    report, this is only ever extra detail.
+    """
+    if getattr(response, "_content_consumed", False):
+        return response.content
+    if getattr(response.raw, "closed", False):
+        return b""
+    try:
+        read_bounded(response, max_size=max_size, max_time=max_time)
+    except (ClientError, requests.exceptions.RequestException):
+        return b""
+    return response.content
+
+
 def read_response(
     response: requests.Response,
     method: str,
@@ -144,4 +174,4 @@ def read_response(
     read_bounded(response, max_size=max_size, max_time=max_time)
 
 
-__all__ = ["iter_body", "read_bounded", "read_response"]
+__all__ = ["content_within", "iter_body", "read_bounded", "read_response"]

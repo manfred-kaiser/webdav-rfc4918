@@ -24,6 +24,7 @@ from webdav.dav.urls import (
 )
 from webdav.dav.xml_utils import dav, parse_xml, split_clark
 from webdav.exceptions import MalformedResponseError, MultiStatusError
+from webdav.transport.body import content_within
 
 if TYPE_CHECKING:
     from requests import Response as HTTPResponse
@@ -38,6 +39,12 @@ MAX_RESPONSES = 200_000
 
 #: Longest ``<d:href>`` accepted, in characters.
 MAX_HREF_LENGTH = 8192
+
+#: Cap for the lazy peek :func:`multistatus_failure` takes at a non-207
+#: failure's body: a real RFC 4918 multistatus is small, so this is generous
+#: while still refusing to read an unbounded amount of a hostile server's
+#: still-streamed response into memory just to look for one.
+MAX_FAILURE_BODY_SIZE = 1 * 1024 * 1024
 
 #: An encoded ``/`` in an href would turn into a path separator once decoded -
 #: the client would then request a different resource than the one the server
@@ -211,7 +218,13 @@ class MultiStatusResponse:
         #: of one name) share a key there, so anything that has to see them
         #: all (a failure hiding behind a later success, a listing) uses this.
         self.entries: list[ResourceResponse] = []
-        for count, resp_el in enumerate(tree.findall(f".//{dav('response')}"), start=1):
+        # §14.24: multistatus = response* - direct children only. <d:response>
+        # has an open content model (it can carry extension elements), so a
+        # ``.//`` search would also match a <d:response> a malicious/compromised
+        # server nested inside some other resource's property value - which
+        # would then overwrite (if later in document order) the real entry
+        # for that href in ``self.responses`` with a forged status.
+        for count, resp_el in enumerate(tree.findall(dav("response")), start=1):
             if count > MAX_RESPONSES:
                 msg = f"multistatus has too many <d:response> elements (over {MAX_RESPONSES})"
                 raise MalformedResponseError(msg)
@@ -352,7 +365,7 @@ def multistatus_failure(http_response: "HTTPResponse") -> "MultiStatusResponse |
     must never silently swallow the real error that was already on its
     way by returning something that turns out not to raise.
     """
-    content = http_response.content
+    content = content_within(http_response, max_size=MAX_FAILURE_BODY_SIZE)
     if not content:
         return None
     try:
