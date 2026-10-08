@@ -29,6 +29,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import requests
+import requests.adapters
 
 from webdav.exceptions import (
     TLSConfigError,
@@ -304,6 +305,8 @@ def mount_mtls_adapter(
     options: TLSOptions | None = None,
     verify: bool = True,
     response_class: type[Response] = Response,
+    pool_connections: int = requests.adapters.DEFAULT_POOLSIZE,
+    pool_maxsize: int = requests.adapters.DEFAULT_POOLSIZE,
 ) -> None:
     """Build an mTLS :class:`SSLContextAdapter` and mount it for ``https://``.
 
@@ -316,6 +319,8 @@ def mount_mtls_adapter(
         ),
         verify=verify,
         response_class=response_class,
+        pool_connections=pool_connections,
+        pool_maxsize=pool_maxsize,
     )
     session.mount("https://", adapter)
 
@@ -334,12 +339,19 @@ def configure_tls(
     verify: "bool | str",
     tls: "TLSOptions | None",
     response_class: type[Response] = Response,
+    pool_connections: int = requests.adapters.DEFAULT_POOLSIZE,
+    pool_maxsize: int = requests.adapters.DEFAULT_POOLSIZE,
 ) -> None:
     """Wire up ``cert``/``verify`` on ``transport`` - plain ``requests`` attrs, or a hardened adapter.
 
     The hardened :mod:`webdav.transport.tls` adapter is only needed for what plain
     ``requests`` cannot express (``tls=...``); everything else uses
-    ``requests``' own, well-known ``cert=``/``verify=`` attributes.
+    ``requests``' own, well-known ``cert=``/``verify=`` attributes - and,
+    with them, whatever pool size the plain ``DeadlineAdapter`` mounts
+    already set up before this function ever runs (see
+    ``Session._init_derived``). ``pool_connections``/``pool_maxsize`` here
+    only matter for the ``tls=...`` branch below, which replaces that
+    adapter with a new one of its own.
     """
     verify_certificates = verification_on(verify)
     if tls is None:
@@ -370,4 +382,6 @@ def configure_tls(
         options=tls,
         verify=verify_certificates,
         response_class=response_class,
+        pool_connections=pool_connections,
+        pool_maxsize=pool_maxsize,
     )

@@ -215,6 +215,7 @@ _MAX_ERROR_BODY_SIZE = 1 * 1024 * 1024
 
 def _parse_error_codes(response: "Response") -> "frozenset[str]":
     # Local import, not at top-level: webdav.transport.body imports this module.
+    # pylint: disable-next=import-outside-toplevel
     from webdav.transport.body import content_within  # noqa: PLC0415
 
     content = content_within(response, max_size=_MAX_ERROR_BODY_SIZE)
@@ -518,6 +519,23 @@ class TLSHardeningDisabledWarning(UserWarning):
 # would quietly undersell what every other call to it does: the log line
 # still fires each time either way, but the Python warning should too.
 warnings.filterwarnings("always", category=TLSHardeningDisabledWarning)
+
+
+class DeadlineDisabledWarning(UserWarning):
+    """``max_response_time`` was set to ``None`` for this session.
+
+    Without it, a server that answers one byte at a time - a trickle of
+    header lines, an endless run of ``100 Continue``, chunked-body trailers
+    that never end - can keep a request alive for as long as it likes (see
+    :mod:`webdav.transport.deadline`); nothing else here stops it (a
+    ``timeout=`` of ``requests``' own only bounds a single socket read).
+    Deliberately a one-off warning at the point ``max_response_time`` is
+    set, not repeated on every request the way
+    :class:`TLSHardeningDisabledWarning` is: unlike disabling certificate
+    verification, this does not hand anything to a network attacker on
+    each individual exchange - it is one standing choice about how long a
+    stuck request may run, worth seeing once, not on every call.
+    """
 
 
 def _in_this_package(frame: "types.FrameType") -> bool:

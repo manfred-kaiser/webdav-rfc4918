@@ -28,6 +28,7 @@ failures, and a cap on how large a response body may be declared.
 """
 
 import difflib
+import logging
 import threading
 import time
 from contextlib import suppress
@@ -69,7 +70,9 @@ from webdav.dav.urls import URL, join_url
 from webdav.exceptions import (
     STATUS_CODE_EXCEPTIONS,
     ClientError,
+    DeadlineDisabledWarning,
     HTTPStatusError,
+    warn_at_caller,
 )
 from webdav.methods import RETRYABLE_METHODS, Method
 from webdav.response import Response
@@ -89,6 +92,7 @@ from webdav.transport.limits import (
     check_max_redirects,
     check_max_size,
     check_max_time,
+    check_pool_size,
     check_timeout,
 )
 from webdav.transport.redirects import (
@@ -131,6 +135,8 @@ if TYPE_CHECKING:
 #: ``requests`` itself defaults to *no* timeout, which lets a stalled
 #: connection hang a program forever. (connect, read) seconds.
 DEFAULT_TIMEOUT = (10, 60)
+
+_LOGGER = logging.getLogger("webdav")
 
 #: Default cap on a single response body this session will accept when it
 #: is not streamed (PROPFIND/PROPPATCH/LOCK responses, ... - not
@@ -188,6 +194,8 @@ _PICKLED = (
     "_verify_arg",
     "_tls_arg",
     "_response_class_arg",
+    "_pool_connections_arg",
+    "_pool_maxsize_arg",
 )
 
 #: The plain ``requests.Session`` attributes this class forwards to
@@ -259,6 +267,8 @@ class ConnectionOptions(TypedDict, total=False):
     max_response_size: "int | None"
     max_response_time: "float | None"
     max_redirects: int
+    pool_connections: int
+    pool_maxsize: int
     retry: "RetryFunc | bool"
     raise_on_error: bool
     response_class: "type[Response]"
@@ -304,6 +314,8 @@ class Session:
         max_response_size: "int | None" = DEFAULT_MAX_RESPONSE_SIZE,
         max_response_time: "float | None" = DEFAULT_MAX_RESPONSE_TIME,
         max_redirects: int = MAX_REDIRECTS,
+        pool_connections: int = requests.adapters.DEFAULT_POOLSIZE,
+        pool_maxsize: int = requests.adapters.DEFAULT_POOLSIZE,
         retry: "RetryFunc | bool" = True,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         raise_on_error: bool = False,
@@ -369,6 +381,19 @@ class Session:
                 ``None`` disables the deadline.
             max_redirects: How many redirects in a row one request follows
                 before it is refused as a loop.
+            pool_connections: How many distinct hosts' connection pools to
+                keep. ``requests``' own default (currently 10) - raising it
+                only matters for a session that talks to many hosts (e.g.
+                a trusted-redirect target per call), which a WebDAV client
+                bound to one ``base_url`` rarely does.
+            pool_maxsize: How many connections to keep open per host.
+                ``requests``' own default (currently 10) - a request beyond
+                that many concurrent ones to the same host does not fail,
+                but its connection is not reused afterwards: it is opened
+                and torn down fresh every time, paying a new TCP/TLS
+                handshake each time instead of reusing one from the pool.
+                Raise this to match real concurrent request volume to one
+                host (e.g. many worker threads sharing one session).
             retry: Retry transient failures (429, 5xx,
                 timeouts, dropped connections) of the safe and idempotent
                 methods - or pass a callable implementing
@@ -396,8 +421,8 @@ class Session:
             ValueError: ``trusted_redirect_origins`` and ``redirect_policy``
                 disagree - see :func:`~webdav.transport.redirects.validate_policy` -
                 or ``base_url``, ``timeout``, ``max_response_size``,
-                ``max_response_time``, ``max_redirects`` or ``chunk_size`` is
-                not a usable value.
+                ``max_response_time``, ``max_redirects``, ``pool_connections``,
+                ``pool_maxsize`` or ``chunk_size`` is not a usable value.
 
         """
         validate_policy(redirect_policy, trusted_redirect_origins)
@@ -420,11 +445,14 @@ class Session:
         self.timeout = timeout
         self._redirect_policy = redirect_policy
         self.max_redirects = max_redirects
+        self._pool_connections_arg = check_pool_size("pool_connections", pool_connections)
+        self._pool_maxsize_arg = check_pool_size("pool_maxsize", pool_maxsize)
         self.max_response_size = max_response_size
         self.raise_on_error = raise_on_error
         self.chunk_size = chunk_size
-        #: Deadline, in seconds, for the whole body of a response that is not
-        #: streamed (``None``: none). ``timeout`` only limits each single read.
+        #: Deadline, in seconds, for a whole, non-streamed exchange - see the
+        #: ``max_response_time`` property. ``None`` disables it; setting it
+        #: to ``None`` warns (:class:`~webdav.exceptions.DeadlineDisabledWarning`).
         self.max_response_time = max_response_time
         #: Names (lower case) of extra per-call headers a redirect to a
         #: trusted *other* origin may carry, beyond the representation and
@@ -453,14 +481,30 @@ class Session:
         # configure_tls() below replaces the https one with the mTLS
         # adapter (also DeadlineAdapter-derived) - a deliberately cheap
         # throwaway mount in that case, not an oversight.
-        self.mount("https://", DeadlineAdapter(response_class=self._response_class_arg))
-        self.mount("http://", DeadlineAdapter(response_class=self._response_class_arg))
+        self.mount(
+            "https://",
+            DeadlineAdapter(
+                response_class=self._response_class_arg,
+                pool_connections=self._pool_connections_arg,
+                pool_maxsize=self._pool_maxsize_arg,
+            ),
+        )
+        self.mount(
+            "http://",
+            DeadlineAdapter(
+                response_class=self._response_class_arg,
+                pool_connections=self._pool_connections_arg,
+                pool_maxsize=self._pool_maxsize_arg,
+            ),
+        )
         configure_tls(
             self._transport,
             cert=self._cert_arg,
             verify=self._verify_arg,
             tls=self._tls_arg,
             response_class=self._response_class_arg,
+            pool_connections=self._pool_connections_arg,
+            pool_maxsize=self._pool_maxsize_arg,
         )
         self.retry = self._retry_arg
         self.locks = LockRegistry()
@@ -727,18 +771,29 @@ class Session:
 
     @property
     def max_response_time(self) -> "float | None":
-        """Deadline in seconds for the whole body of a non-streamed response (``None``: none).
+        """Deadline in seconds for a whole, non-streamed exchange (``None``: none).
 
-        Covers the *body*: the time to receive headers is limited only by
-        ``timeout`` for each single read, as with any ``requests`` client - a
-        server that drips header bytes just inside it can hold a request
-        open. Keep the read timeout short where that matters.
+        Covers the connect and (``https://``) TLS handshake of a new
+        connection, every redirect hop, the headers, and the body and its
+        trailers - see :mod:`webdav.transport.deadline`. ``timeout`` only
+        bounds each single socket read/write; without this, a server that
+        drips bytes just inside it can hold a request open indefinitely.
         """
         return self._max_response_time
 
     @max_response_time.setter
     def max_response_time(self, seconds: "float | None") -> None:
         self._max_response_time = check_max_time(seconds)
+        if seconds is None:
+            _LOGGER.warning(
+                "max_response_time disabled: a stuck connection/response "
+                "will hang this session's requests indefinitely"
+            )
+            warn_at_caller(
+                "max_response_time disabled: a stuck connection/response "
+                "will hang this session's requests indefinitely",
+                DeadlineDisabledWarning,
+            )
 
     @property
     def redirect_forward_headers(self) -> "frozenset[str]":

@@ -116,6 +116,19 @@ def check_max_redirects(value: int) -> int:
     return value
 
 
+def check_pool_size(name: str, value: int) -> int:
+    """Return ``value`` if it is a usable connection-pool size.
+
+    Raises:
+        ValueError: It is not a positive integer.
+
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        msg = f"{name} must be a positive integer, got {value!r}"
+        raise ValueError(msg)
+    return value
+
+
 __all__ = [
     "DEFAULT_CHUNK_SIZE",
     "check_chunk_size",
@@ -123,5 +136,6 @@ __all__ = [
     "check_max_redirects",
     "check_max_size",
     "check_max_time",
+    "check_pool_size",
     "check_timeout",
 ]

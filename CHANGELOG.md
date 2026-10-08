@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Session`/`FileSystem` take `pool_connections`/`pool_maxsize` to size the underlying connection pool.
+
+### Changed
+
+- Setting `max_response_time=None` now warns (`DeadlineDisabledWarning`) and logs, like disabling TLS verification already did.
+
 ### Fixed
 
 - `download_file`/`download_fileobj`'s `callback` now runs per socket read, not per `chunk_size` buffer.
