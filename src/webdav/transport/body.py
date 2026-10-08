@@ -13,7 +13,7 @@ import requests
 import urllib3.exceptions
 import urllib3.response
 
-from webdav.exceptions import ClientError
+from webdav._base_exceptions import ClientError
 from webdav.methods import Method
 from webdav.transport.parse_utils import parse_uint
 

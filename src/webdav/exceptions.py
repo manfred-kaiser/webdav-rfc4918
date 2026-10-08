@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, ClassVar
 
 import requests.exceptions
 
+from webdav._base_exceptions import ClientError, WebDAVError
+from webdav.transport.body import content_within
 from webdav.url_safety import redact_url
 
 if TYPE_CHECKING:
@@ -38,23 +40,6 @@ _DAV_NAMESPACE = "DAV:"
 # limit module, not Apache's own - httpd has no name for 509) to signal
 # that a customer's bandwidth allotment was exceeded.
 BANDWIDTH_LIMIT_EXCEEDED = 509
-
-
-class WebDAVError(requests.exceptions.RequestException):
-    """Base class for every exception raised by this library."""
-
-
-class ClientError(WebDAVError):
-    """Raised for client-side errors that are not a failed HTTP response."""
-
-    def __init__(self, msg: str) -> None:
-        """Instantiate with a human-readable message."""
-        self.msg = msg
-        super().__init__(msg)
-
-    def __str__(self) -> str:
-        """Return the message."""
-        return self.msg
 
 
 class IsACollectionError(ClientError):
@@ -214,10 +199,6 @@ _MAX_ERROR_BODY_SIZE = 1 * 1024 * 1024
 
 
 def _parse_error_codes(response: "Response") -> "frozenset[str]":
-    # Local import, not at top-level: webdav.transport.body imports this module.
-    # pylint: disable-next=import-outside-toplevel
-    from webdav.transport.body import content_within  # noqa: PLC0415
-
     content = content_within(response, max_size=_MAX_ERROR_BODY_SIZE)
     if not content:
         return frozenset()
