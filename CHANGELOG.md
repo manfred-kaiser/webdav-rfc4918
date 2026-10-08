@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `HTTPStatusError.error_codes` and the multistatus-failure check no longer read a response body without a size bound.
 - `max_response_time` now also bounds a new connection's TCP connect and TLS handshake, not just its headers/body.
 - `HTTPStatusError` no longer keeps the real `Authorization`/`Cookie`/`Proxy-Authorization` header value on its `response.request`.
+- The `.DAV` write-protection compliance test now tells httpd 2.4.69+ (which added the check) apart from 2.4.62-2.4.68 (RHEL 9.8/CentOS Stream 9, openSUSE Tumbleweed as of 2026-10), instead of failing on the older ones.
 
 ## [1.1.0] - 2026-10-05
 

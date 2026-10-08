@@ -2241,14 +2241,54 @@ def test_apache_a_name_longer_than_255_bytes_is_a_403(
         apache_client.upload_fileobj(io.BytesIO(b"x"), f"{scratch}/{name}")
 
 
+def _dav_state_dir_is_protected(apache_client: FileSystem) -> bool:
+    """Whether this server refuses a direct write to ``.DAV`` (``dav_fs_is_state_path``).
+
+    httpd added this check to ``dav_fs_get_resource`` in commit ``7e871be``
+    ("dav_fs_get_resource: disallow DAV_FS_STATE_DIR"), first shipped in the
+    2.4.69 release - confirmed absent in the 2.4.62, 2.4.67 and 2.4.68
+    release tarballs by reading ``modules/dav/fs/repos.c`` of each tag.
+    2.4.62 is what RHEL 9.8/CentOS Stream 9 ships (no backport: there is no
+    CVE tied to this commit, and Red Hat's spec carries no patch for it);
+    2.4.67 is what openSUSE Tumbleweed packaged as of 2026-10. A server
+    built before the fix silently allows the write this module's other
+    test exercises.
+
+    Probed directly (not by parsing the ``Server`` header) so this stays
+    correct for a server this comment's version list does not name.
+    """
+    probe = f"dav-state-probe-{uuid.uuid4().hex[:10]}"
+    apache_client.mkdir(probe)
+    try:
+        apache_client.upload_fileobj(io.BytesIO(b"x"), f"{probe}/.DAV")
+    except ForbiddenError:
+        return True
+    else:
+        return False
+    finally:
+        with contextlib.suppress(Exception):
+            apache_client.remove(probe)
+
+
 @pytest.mark.parametrize("path", [".DAV", ".DAV/inside"])
 def test_apache_the_lock_database_directory_cannot_be_written(
     apache_client: FileSystem, scratch: str, path: str
 ) -> None:
-    """``dav_fs_is_state_path``: ``.DAV`` holds Apache's own state (locks, properties) - a client does not
-    get to name it, at any level of the tree."""
-    with pytest.raises(ForbiddenError):
+    """``dav_fs_is_state_path``: ``.DAV`` holds Apache's own state (locks, properties) - a client does
+    not get to name it, at any level of the tree, on a server new enough to check for it - see
+    :func:`_dav_state_dir_is_protected`. On an older one, a plain write naming ``.DAV`` just succeeds
+    (nothing stops it), and the ``.DAV/inside`` case fails for an unrelated, mundane reason: ``.DAV``
+    was never materialized as a real directory here, so it is the same "parent collection missing" 409
+    any other nonexistent two-level path gets."""
+    if _dav_state_dir_is_protected(apache_client):
+        with pytest.raises(ForbiddenError):
+            apache_client.upload_fileobj(io.BytesIO(b"x"), f"{scratch}/{path}")
+    elif path == ".DAV":
         apache_client.upload_fileobj(io.BytesIO(b"x"), f"{scratch}/{path}")
+        apache_client.remove(f"{scratch}/{path}")
+    else:
+        with pytest.raises(ResourceConflictError):
+            apache_client.upload_fileobj(io.BytesIO(b"x"), f"{scratch}/{path}")
 
 
 # ===========================================================================

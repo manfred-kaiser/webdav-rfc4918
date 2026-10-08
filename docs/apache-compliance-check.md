@@ -17,7 +17,7 @@ locking and properties, so most findings are about those.
 | The `If` header / locked neighbours | A new member of a locked collection answers `207`/`424`, never a plain `423` |
 | Properties and reading | `PROPFIND Depth: infinity` needs `DavDepthInfinity On`; a failed `PROPPATCH` is all-or-nothing |
 | Over time | An expired lock is dropped lazily, on the next request that looks at it - and can break the collection's next listing once |
-| Size and names | 255-byte name limit; `.DAV` is refused at any level |
+| Size and names | 255-byte name limit; `.DAV` is refused at any level - on a server new enough to check |
 | Parallel | Exactly one writer wins a race, reliably only with sdbm |
 | The DBM type decides | Debian/Ubuntu's Berkeley-DB build can silently lose concurrent locks and properties |
 
@@ -224,8 +224,19 @@ Limits, each on an instance of its own:
   bytes. Names
   that differ only in case are two resources. Over 255 *bytes* (256 ASCII or
   128 two-byte characters) is a `403` from the file system (`apr_file_open`).
-  `.DAV` is a `403` at any level (`dav_fs_is_state_path`). \
-  *Test: `test_apache_a_name_survives_the_round_trip` (one case per name).*
+  `.DAV` is a `403` at any level (`dav_fs_is_state_path`) - **only on httpd
+  2.4.69 and later**. That check (commit `7e871be`, "dav_fs_get_resource:
+  disallow DAV_FS_STATE_DIR") was added to `dav_fs_get_resource` between
+  the 2.4.68 and 2.4.69 release tarballs; it carries no CVE, so distros
+  that pin an older version have no reason to backport it on their own.
+  Confirmed by building and testing against the release tarball directly:
+  2.4.62 (what RHEL 9.8/CentOS Stream 9 ship; its spec has no patch for
+  this) and 2.4.67 (openSUSE Tumbleweed as of 2026-10) both silently let
+  the write through; only 2.4.69 refuses it. \
+  *Test: `test_apache_a_name_survives_the_round_trip` (one case per name),
+  `test_apache_the_lock_database_directory_cannot_be_written` (probes for
+  the check itself via `_dav_state_dir_is_protected` and asserts whichever
+  behavior that server actually has).*
 
 ### Parallel
 
