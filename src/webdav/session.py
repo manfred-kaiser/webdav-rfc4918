@@ -445,7 +445,9 @@ class Session:
         self.timeout = timeout
         self._redirect_policy = redirect_policy
         self.max_redirects = max_redirects
-        self._pool_connections_arg = check_pool_size("pool_connections", pool_connections)
+        self._pool_connections_arg = check_pool_size(
+            "pool_connections", pool_connections
+        )
         self._pool_maxsize_arg = check_pool_size("pool_maxsize", pool_maxsize)
         self.max_response_size = max_response_size
         self.raise_on_error = raise_on_error

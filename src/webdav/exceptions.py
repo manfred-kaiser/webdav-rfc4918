@@ -125,7 +125,9 @@ class MultiStatusError(WebDAVError):
 #: serializing the exception's ``.response`` (an APM/error tracker that
 #: captures it by default, a bare ``logger.error("%r", exc.response)``)
 #: must not put real credentials into storage it does not control.
-_SENSITIVE_REQUEST_HEADERS = frozenset({"authorization", "cookie", "proxy-authorization"})
+_SENSITIVE_REQUEST_HEADERS = frozenset(
+    {"authorization", "cookie", "proxy-authorization"}
+)
 
 
 def _redact_request_headers(response: "Response") -> None:
