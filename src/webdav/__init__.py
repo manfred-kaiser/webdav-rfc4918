@@ -63,7 +63,7 @@ from webdav.session import Session
 from webdav.transport.redirects import RedirectPolicy
 from webdav.transport.tls import TLSOptions
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 
 __all__ = [
