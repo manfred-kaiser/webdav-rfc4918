@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `max_response_time` no longer starts a thread per request; it caps each socket wait to the time left instead.
+- The package metadata states its license as an SPDX expression (PEP 639).
 - Setting `max_response_time=None` now warns (`DeadlineDisabledWarning`) and logs, like disabling TLS verification already did.
 
 ### Fixed
@@ -20,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `download_file`/`download_fileobj`'s `callback` now runs per socket read, not per `chunk_size` buffer.
 - A `<d:response>` nested inside another resource's property value is no longer mistaken for a top-level multistatus entry.
 - `HTTPStatusError.error_codes` and the multistatus-failure check no longer read a response body without a size bound.
-- `max_response_time` now also bounds a new connection's TCP connect and TLS handshake, not just its headers/body.
+- `max_response_time` now also bounds the TCP connect and TLS handshake of a new connection, a proxy's answer to `CONNECT`, and TLS through an `https://` proxy.
 - `HTTPStatusError` no longer keeps the real `Authorization`/`Cookie`/`Proxy-Authorization` header value on its `response.request`.
 
 ## [1.1.0] - 2026-10-05
@@ -153,5 +155,6 @@ they were fixed):
   CVE-2025-66418, CVE-2026-21441, CVE-2026-44431, CVE-2026-44432), release job checks the tag against the
   version, workflows pinned by commit, no long-lived publishing token.
 
-[Unreleased]: https://github.com/manfred-kaiser/webdav-rfc4918/compare/1.0.0...main
+[Unreleased]: https://github.com/manfred-kaiser/webdav-rfc4918/compare/1.1.0...main
+[1.1.0]: https://github.com/manfred-kaiser/webdav-rfc4918/releases/tag/1.1.0
 [1.0.0]: https://github.com/manfred-kaiser/webdav-rfc4918/releases/tag/1.0.0

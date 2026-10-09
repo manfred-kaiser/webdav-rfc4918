@@ -3,24 +3,34 @@
 ``timeout=`` in ``requests`` limits each single socket operation, so a server
 that sends one byte just inside it - a trickle of header lines, an endless
 run of ``100 Continue`` interim responses, chunked-body trailers that never
-end - keeps a request alive for as long as it likes. The only thing that
-stops that is somebody else looking at the clock and pulling the plug.
+end - keeps a request alive for as long as it likes.
 
-That is what this module does. The connections of the adapters in this package
-(:class:`DeadlineAdapter`) report themselves to the :func:`watch` that is
-active in the calling context when they start an exchange; when the time is up
-the watchdog shuts their sockets down, which wakes whatever read is blocked
-on them - wherever inside ``http.client`` it is. The TCP connect and (on
-``https://``) the TLS handshake of a brand-new connection are bounded the
-same way but by a different mechanism - see
-:meth:`_Watch.bound_connect_timeout`.
+This module closes that gap without a thread of its own. The connections of
+the adapters in this package (:class:`DeadlineAdapter`) look at the
+:func:`watch` that is active in the calling context before every blocking
+socket operation, and cap that socket's timeout to what is left of the
+deadline. Every single wait then ends at the deadline at the latest, so the
+sum of them does too. Three places cover every byte of an exchange:
+
+- the TCP connect and (on ``https://``) the TLS handshake of a new
+  connection (:meth:`_TrackedConnectionMixin._new_conn`),
+- every piece of the request that is sent (:meth:`_TrackedConnectionMixin.send`),
+- every read of the response - status line, headers, interim responses,
+  body and trailers, and the answer of a proxy to ``CONNECT`` - through
+  the file object ``http.client`` reads them from (:class:`_DeadlineReader`).
+
+Through an ``https://`` proxy to an ``https://`` origin, ``urllib3`` runs
+the inner TLS connection in Python (``SSLTransport``), looping over many
+``recv()``/``sendall()`` calls for one read or write; :class:`_HeldSocket`
+holds each of those to the deadline as well.
 """
 
 import contextvars
+import http.client
+import io
 import socket
-import threading
 import time
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, cast
 
 from requests.adapters import HTTPAdapter
@@ -41,113 +51,74 @@ _ACTIVE: "contextvars.ContextVar[_Watch | None]" = contextvars.ContextVar(
 
 
 class _Watch:
-    """A timer that shuts down every socket registered with it when it expires."""
+    """A point in time by which every socket operation in its block must be done."""
 
     def __init__(self, seconds: float) -> None:
-        self.expired = threading.Event()
-        self._sockets: list[socket.socket] = []
-        self._mutex = threading.Lock()
         self._deadline = time.monotonic() + seconds
-        self._timer = threading.Timer(seconds, self._expire)
-        self._timer.daemon = True
 
-    def start(self) -> None:
-        """Start the clock."""
-        self._timer.start()
+    @property
+    def expired(self) -> bool:
+        """Whether the time is up."""
+        return time.monotonic() >= self._deadline
 
-    def cancel(self) -> None:
-        """Stop the clock; the request finished in time."""
-        self._timer.cancel()
+    def capped(self, timeout: object) -> float:
+        """``timeout`` (``None``: no limit), but never past the deadline.
 
-    def track(self, connection: Any) -> None:
-        """Watch the socket of ``connection`` from now on (cut it at once if the time is up).
-
-        The *socket* is what is kept, not the connection: once a response
-        that closes the connection has been read, ``http.client`` lets go of
-        ``connection.sock`` while the response still reads from it.
+        Raises :class:`TimeoutError` - what a socket that timed out raises -
+        when nothing is left: a timeout of ``0`` would not wait, it would
+        switch the socket to non-blocking mode, and a read from that would
+        report "no data yet" instead of failing.
         """
-        sock = getattr(connection, "sock", None)
-        if sock is None:
-            return  # not connected yet; tracked again when it is (getresponse)
-        self.track_socket(sock)
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            msg = "the deadline for this request has passed"
+            raise TimeoutError(msg)
+        if isinstance(timeout, int | float):
+            return min(timeout, remaining)
+        return remaining
 
-    def track_socket(self, sock: socket.socket) -> None:
-        """Watch ``sock`` from now on (cut it at once if the time is up)."""
-        with self._mutex:
-            if all(s is not sock for s in self._sockets):
-                self._sockets.append(sock)
-            expired = self.expired.is_set()
-        if expired:
-            _cut_off(sock)
-
-    def bound_connect_timeout(self, sock: socket.socket) -> None:
-        """Cap ``sock``'s own blocking timeout to whatever is left of this deadline.
-
-        Called on a freshly-created, not yet connected socket, right before
-        the TCP connect and (for ``https://``) the TLS handshake that
-        ``urllib3`` performs on it - :meth:`track_socket`'s shutdown-based
-        cutoff cannot reach either of those: a server that accepts the
-        connection and then stalls the handshake (never sending a
-        ``ServerHello``) blocks inside a single library call that does not
-        hand control back until it is done, and TLS-wrapping a socket
-        detaches its file descriptor onto a new socket object - a shutdown
-        aimed at the one tracked here would, by then, hit a socket that no
-        longer owns the fd. Capping its timeout instead works for both: a
-        stalled connect raises on its own, and :class:`ssl.SSLSocket`
-        copies the wrapped socket's timeout when it is created, so a stalled
-        handshake does too - each within what is left of the deadline, not
-        some unrelated, independently-configured (or absent) socket timeout.
-        """
-        remaining = max(0.0, self._deadline - time.monotonic())
-        current = sock.gettimeout()
-        if current is None or current > remaining:
-            sock.settimeout(remaining)
-
-    def _expire(self) -> None:
-        self.expired.set()
-        with self._mutex:
-            sockets = list(self._sockets)
-        for sock in sockets:
-            _cut_off(sock)
+    def bound(self, sock: Any, timeout: object) -> None:
+        """Set ``sock``'s timeout to ``timeout``, but no later than the deadline."""
+        sock.settimeout(self.capped(timeout))
 
 
-def _cut_off(sock: socket.socket) -> None:
-    """Shut ``sock`` down, waking any thread blocked reading it."""
-    with suppress(OSError):  # already closed: nothing left to wake
-        sock.shutdown(socket.SHUT_RDWR)
+def _bound(sock: Any, timeout: object) -> None:
+    """Give ``sock`` ``timeout``, capped by the :func:`watch` active here (if any)."""
+    watcher = _ACTIVE.get()
+    if watcher is None:
+        sock.settimeout(timeout)
+    else:
+        watcher.bound(sock, timeout)
 
 
 @contextmanager
 def watch(seconds: "float | None") -> "Iterator[_Watch | None]":
-    """Cut off every connection used inside the block once ``seconds`` have passed.
+    """Hold every connection used inside the block to a deadline ``seconds`` from now.
 
-    ``None`` means no deadline. Yields the watch (``.expired`` says whether it
-    fired, to tell a cut-off connection from an ordinary network error), or
-    ``None`` when there is none - and also when one is already active in this
-    context, so the outermost, longest-lived deadline is the one that counts.
+    ``None`` means no deadline. Yields the watch (``.expired`` says whether
+    the time is up, to tell a timed-out connection from an ordinary network
+    error), or ``None`` when there is none - and also when one is already
+    active in this context, so the outermost, longest-lived deadline is the
+    one that counts.
     """
     if seconds is None or _ACTIVE.get() is not None:
         yield None
         return
-    watcher = _Watch(seconds)
-    token = _ACTIVE.set(watcher)
-    watcher.start()
+    token = _ACTIVE.set(_Watch(seconds))
     try:
-        yield watcher
+        yield _ACTIVE.get()
     finally:
-        watcher.cancel()
         _ACTIVE.reset(token)
 
 
 @contextmanager
 def enforce(seconds: "float | None") -> "Iterator[None]":
-    """:func:`watch` the block, and turn a cut-off into a :class:`~webdav.exceptions.ClientError`.
+    """:func:`watch` the block, and turn a missed deadline into a :class:`~webdav.exceptions.ClientError`.
 
     Two things must not be left to the caller to remember. An exception that
-    escapes while the time is up is the cut-off connection talking, not a
-    network error - say so. And a socket shut down in the middle of a body
-    can look like a clean end of the data (EOF): a block that *returns* after
-    the time is up must never hand back what it read as complete.
+    escapes while the time is up is the deadline talking, not a network
+    error - say so. And a block that *returns* after the time is up has
+    not met the deadline either, whatever it read.
 
     Nested, the outermost deadline is the one that counts (see :func:`watch`).
     """
@@ -155,10 +126,10 @@ def enforce(seconds: "float | None") -> "Iterator[None]":
         try:
             yield
         except BaseException:
-            if watcher is not None and watcher.expired.is_set():
+            if watcher is not None and watcher.expired:
                 raise _deadline_error(seconds) from None
             raise
-        if watcher is not None and watcher.expired.is_set():
+        if watcher is not None and watcher.expired:
             raise _deadline_error(seconds)
 
 
@@ -168,47 +139,147 @@ def _deadline_error(seconds: "float | None") -> ClientError:
     )
 
 
-def _register(connection: Any) -> None:
+class _DeadlineReader(io.RawIOBase):
+    """The socket reader ``http.client`` reads a response from, held to :func:`watch`.
+
+    Each read first sets the socket's timeout: the one ``urllib3`` gave it
+    for reading, capped by the deadline active at that moment. Outside a
+    :func:`watch` (a streamed body read after the request returned) that is
+    the plain read timeout again.
+    """
+
+    def __init__(self, raw: io.RawIOBase, sock: Any) -> None:
+        super().__init__()
+        self._raw = raw
+        self._sock = sock
+        self._timeout = sock.gettimeout()
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> "int | None":
+        _bound(self._sock, self._timeout)
+        return self._raw.readinto(buffer)
+
+    def fileno(self) -> int:
+        return self._raw.fileno()
+
+    def close(self) -> None:
+        try:
+            self._raw.close()
+        finally:
+            super().close()
+
+
+class _DeadlineHTTPResponse(http.client.HTTPResponse):
+    """An ``http.client`` response whose every read is held to :func:`watch`."""
+
+    def __init__(self, sock: Any, *args: Any, **kwargs: Any) -> None:
+        super().__init__(sock, *args, **kwargs)
+        # Nothing has been read yet, so the buffer is empty and can be
+        # replaced; its raw reader carries over (and with it, the socket's
+        # reference count that closing it gives back).
+        raw = self.fp.detach()
+        self.fp = io.BufferedReader(_DeadlineReader(raw, sock))
+
+
+def _hold(sock: Any) -> None:
+    """Cap ``sock``'s current timeout to the active :func:`watch` (if any)."""
     watcher = _ACTIVE.get()
     if watcher is not None:
-        watcher.track(connection)
+        watcher.bound(sock, sock.gettimeout())
+
+
+class _HeldSocket:
+    """The socket under ``urllib3``'s ``SSLTransport`` (TLS inside TLS), held to :func:`watch`.
+
+    ``SSLTransport`` calls ``recv()`` and ``sendall()`` on it in a loop for
+    a single read, write or handshake; each call is capped here. Within one
+    deadline, a timeout capped by an earlier call is never shorter than
+    what is left now, so capping the socket's current timeout is enough;
+    the read timeout itself is set again through ``settimeout()`` (passed
+    on unchanged) by ``urllib3`` and :class:`_DeadlineReader`.
+    """
+
+    def __init__(self, sock: Any) -> None:
+        self._sock = sock
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._sock, name)
+
+    def recv(self, bufsize: int, flags: int = 0) -> bytes:
+        """``recv()`` on the wrapped socket, within what is left of the deadline."""
+        _hold(self._sock)
+        return cast("bytes", self._sock.recv(bufsize, flags))
+
+    def sendall(self, data: Any, flags: int = 0) -> None:
+        """Send all of ``data``, each ``send()`` within what is left of the deadline."""
+        with memoryview(data) as view, view.cast("B") as octets:
+            sent = 0
+            while sent < len(octets):
+                _hold(self._sock)
+                sent += self._sock.send(octets[sent:], flags)
 
 
 class _TrackedConnectionMixin:
-    """Reports a connection's socket to the active :func:`watch`, as early as possible.
+    """Holds every blocking operation of a connection to the active :func:`watch`."""
 
-    ``request()``/``getresponse()`` only ever see ``connection.sock`` once it
-    already exists - for a brand-new connection that is *after* the TCP
-    connect and (on https) the TLS handshake have both already run inside
-    ``super().request()``. Overriding ``_new_conn`` closes that gap: it is
-    called to get the raw socket before either of those runs, so
-    :meth:`_Watch.bound_connect_timeout` can cap how long they are allowed
-    to take - see its docstring for why that, not the shutdown-based
-    tracking the rest of this module uses, is what closing this gap needs.
-    """
+    def send(self, data: Any) -> None:
+        """Send ``data``, each piece within what is left of the deadline.
 
-    def request(self, *args: Any, **kwargs: Any) -> None:
-        _register(self)  # also a connection reused from the pool
-        super().request(*args, **kwargs)  # type: ignore[misc]
-
-    def getresponse(self, *args: Any, **kwargs: Any) -> Any:
-        _register(self)
-        return super().getresponse(*args, **kwargs)  # type: ignore[misc]
+        ``sendall()`` would apply one timeout per call (and an
+        ``SSLSocket``'s, one per internal ``send()``), so a server that
+        accepts one byte at a time could stretch it out. ``urllib3`` only
+        ever hands bytes here; anything else goes to ``http.client`` as is.
+        """
+        sock = getattr(self, "sock", None)
+        if (
+            sock is None
+            or _ACTIVE.get() is None
+            or not isinstance(data, bytes | bytearray | memoryview)
+        ):
+            super().send(data)  # type: ignore[misc]
+            return
+        timeout = getattr(self, "timeout", None)
+        with memoryview(data) as view, view.cast("B") as octets:
+            sent = 0
+            while sent < len(octets):
+                _bound(sock, timeout)
+                sent += sock.send(octets[sent:])
 
     def _new_conn(self) -> socket.socket:
-        sock = super()._new_conn()  # type: ignore[misc]
+        """Open the socket, the TCP connect and TLS handshake held to the deadline.
+
+        ``urllib3`` connects inside this call, with ``self.timeout`` - capped
+        here for that. The TLS handshake follows on the returned socket in
+        a single ``wrap_socket()`` call; :class:`ssl.SSLSocket` copies the
+        wrapped socket's timeout when it is created, so capping that one
+        again (time has passed) holds the handshake to the deadline too.
+        """
         watcher = _ACTIVE.get()
-        if watcher is not None:
-            watcher.bound_connect_timeout(sock)
-        return cast("socket.socket", sock)
+        if watcher is None:
+            return cast("socket.socket", super()._new_conn())  # type: ignore[misc]
+        connection: Any = self
+        timeout = connection.timeout
+        connection.timeout = watcher.capped(timeout)
+        try:
+            sock = cast("socket.socket", super()._new_conn())  # type: ignore[misc]
+        finally:
+            connection.timeout = timeout
+        watcher.bound(sock, sock.gettimeout())
+        return sock
 
 
 class _TrackedHTTPConnection(_TrackedConnectionMixin, HTTPConnection):
-    pass
+    response_class = _DeadlineHTTPResponse
 
 
 class _TrackedHTTPSConnection(_TrackedConnectionMixin, HTTPSConnection):
-    pass
+    response_class = _DeadlineHTTPResponse
+
+    def _connect_tls_proxy(self, hostname: str, sock: socket.socket) -> Any:
+        """Connect to an ``https://`` proxy; the result carries the TLS connection to the origin."""
+        return _HeldSocket(super()._connect_tls_proxy(hostname, sock))
 
 
 class _HTTPPool(HTTPConnectionPool):

@@ -297,9 +297,10 @@ These limits apply to a `Session`, a `FileSystem` and the short form alike.
 - `max_response_size` (default 64 MiB) caps a response body after
   decompression. A response with stacked content-codings is refused.
 - `max_response_time` (default 300 s) is a deadline for the whole request:
-  connecting, headers, interim `1xx` answers, body and trailers. When it
-  runs out, the connection is closed. `timeout` only limits each single
-  read.
+  connecting, headers, interim `1xx` answers, body and trailers. Every
+  socket wait is capped to the time left, so no extra thread is started.
+  When the time is up, the request fails with a `ClientError`. `timeout`
+  only limits each single read.
 - A streamed download (`stream=True`, `download_file`) is bounded per read
   only. It can be as large and take as long as the server makes it.
 - Credentials in a URL (`https://user:pw@host/`) are refused. Pass `auth=`.
