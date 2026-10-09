@@ -9,6 +9,7 @@ directory). One implementation, so the two can never drift apart.
 
 import os
 import shutil
+import socket
 import subprocess
 import time
 import urllib.error
@@ -280,6 +281,33 @@ def wait_until_up(url: str, timeout: float = 5.0) -> None:
     raise RuntimeError(msg)
 
 
+def wait_until_port_free(port: int, timeout: float = 10.0) -> None:
+    """Wait until nothing listens on ``port`` any more, so Apache can bind it.
+
+    The previous instance on a port can still hold it after :func:`stop` saw
+    its PID file go (seen in CI: ``AH00072: make_sock: could not bind to
+    address``). The check binds the way Apache does, with ``SO_REUSEADDR``:
+    a socket still listening blocks it, a connection in ``TIME_WAIT`` does not.
+
+    Raises:
+        RuntimeError: ``port`` was still in use after ``timeout`` seconds.
+
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind((HOST, port))
+            except OSError:
+                if time.monotonic() >= deadline:
+                    msg = f"{HOST}:{port} is still in use after {timeout}s - another instance listens there"
+                    raise RuntimeError(msg) from None
+            else:
+                return
+        time.sleep(0.1)
+
+
 def start(conf_file: Path, *, port: int = PORT) -> None:
     """Start Apache with ``conf_file``, and wait until it answers requests.
 
@@ -299,6 +327,7 @@ def start(conf_file: Path, *, port: int = PORT) -> None:
     if profile is None:
         msg = "missing: " + ", ".join(missing_prerequisites())
         raise RuntimeError(msg)
+    wait_until_port_free(port)
     result = subprocess.run(
         [profile.httpd, "-f", str(conf_file), "-k", "start"],
         capture_output=True,
