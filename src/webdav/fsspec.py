@@ -43,6 +43,7 @@ not part of the path. ``webdavs`` is WebDAV over TLS, ``webdav`` plain HTTP - li
 respectively; with one, the URL has to name the same server (its own scheme does not have
 to match - a ``webdav://`` URL against an ``https://`` ``base_url`` is fine; a ``webdavs://``
 one against a plain ``http://`` ``base_url`` is refused, unless that is a loopback address).
+Every method that takes a path - not only the constructor - refuses a URL for another server.
 Credentials in a URL are refused.
 """
 
@@ -292,7 +293,11 @@ class WebdavFileSystem(GuardedFileSystem):
         return f"{scheme}://{absolute(name)}"
 
     def _strip(self, path: str) -> str:
-        """``_strip_protocol`` for the common single-path case - everywhere but ``rm``."""
+        """``_strip_protocol`` for the common single-path case - everywhere but ``rm``.
+
+        A URL that names another server than this filesystem's is refused (:meth:`_own_server`).
+        """
+        self._own_server(path)
         return cast("str", self._strip_protocol(path))
 
     # pylint's signature-differs check is confused by these @overload stubs
@@ -415,6 +420,7 @@ class WebdavFileSystem(GuardedFileSystem):
         maxdepth: int | None = None,
     ) -> None:
         """Delete files and, optionally, directories recursively."""
+        self._own_server(path)
         stripped = self._strip_protocol(path)
         if (
             recursive
@@ -508,6 +514,7 @@ class WebdavFileSystem(GuardedFileSystem):
         also what fsspec's own test suite expects - not an empty directory
         created at the destination.
         """
+        self._own_server([path1, path2])
         if recursive:  # a non-recursive copy never takes a directory along
             self._refuse_into_itself(path1, path2)
         shortcut = self._whole_tree_shortcut(
@@ -558,6 +565,7 @@ class WebdavFileSystem(GuardedFileSystem):
         implementation compares the strings as given, so ``mv("d", "/d")`` would copy
         ``d`` into itself and then delete it.
         """
+        self._own_server([path1, path2])
         if (
             isinstance(path1, str)
             and isinstance(path2, str)
@@ -695,6 +703,7 @@ class WebdavFileSystem(GuardedFileSystem):
 
         fsspec's read-ahead cache would fetch a whole block for the few bytes asked for.
         """
+        self._own_server(path)
         kwargs.setdefault("cache_type", "none")
         return cast("bytes", super().cat_file(path, start, end, **kwargs))
 

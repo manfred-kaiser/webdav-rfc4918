@@ -105,15 +105,8 @@ def server_url(
     if base_url is None:
         name = f"[{host}]" if ":" in host else host
         return f"{transport}://{name}" + (f":{port}" if port else "")
+    check_host(base_url, host, port)
     given = urlsplit(base_url)
-    if (given.hostname or "").lower() != host.lower() or (
-        port is not None and port != (given.port or _DEFAULT_PORTS.get(given.scheme))
-    ):
-        msg = (
-            f"the URL names {host}{f':{port}' if port else ''}, "
-            f"but base_url is {redact_url(base_url)}: a filesystem is bound to one server"
-        )
-        raise ValueError(msg)
     if (
         transport == "https"
         and given.scheme == "http"
@@ -128,3 +121,21 @@ def server_url(
         )
         raise ValueError(msg)
     return base_url
+
+
+def check_host(base_url: str, host: str, port: "int | None") -> None:
+    """Refuse a ``host[:port]`` that is not the server of ``base_url``.
+
+    Raises:
+        ValueError: It is another server - a filesystem is bound to one.
+
+    """
+    given = urlsplit(base_url)
+    if (given.hostname or "").lower() != host.lower() or (
+        port is not None and port != (given.port or _DEFAULT_PORTS.get(given.scheme))
+    ):
+        msg = (
+            f"the URL names {host}{f':{port}' if port else ''}, "
+            f"but base_url is {redact_url(base_url)}: a filesystem is bound to one server"
+        )
+        raise ValueError(msg)

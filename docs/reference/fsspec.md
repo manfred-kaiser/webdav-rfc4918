@@ -51,7 +51,9 @@ a `base_url`, the server is `https://host[:port]` for `webdavs://` and
 With a `base_url`, the URL may leave out the host (`webdavs:///path`) or
 name the same server. The scheme does not have to match: `webdav://`
 against an `https://` `base_url` still uses HTTPS. Another host or port
-raises `ValueError` and is never followed like a redirect.
+raises `ValueError` and is never followed like a redirect. That holds for
+every method that takes a path, `cat_file`, `open`, `find`, `glob`, `get`,
+`put` and the rest included, not only at construction.
 
 The scheme is not free in one direction: `webdavs://host/...` says TLS, so a
 plain `http://` `base_url` is refused with a `ValueError` unless it is a
