@@ -121,6 +121,10 @@ list of defaults:
 - `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` are ignored, so the environment
   cannot replace the CA you configured. `~/.netrc` is ignored too: without
   `auth=`, no credentials are sent.
+  checking off or a weak cipher string.
+- `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` are ignored (`SSL_CERT_FILE` and
+  `SSL_CERT_DIR` are not: see "Trust store" below). `~/.netrc` is ignored
+  too: without `auth=`, no credentials are sent.
 - A URL with credentials in it (`https://user:pw@host/`) is refused. Pass
   `auth=` instead. [Why](https://webdav.readthedocs.io/en/latest/reference/url-credentials.html).
 - Credentials (`auth=`, cookies, an `Authorization` header) over plain `http`
@@ -155,10 +159,18 @@ list of defaults:
   `max_response_size` still costs memory in proportion (about 1.6 GB for 64
   MiB of nothing but empty elements); lower the limit for a server you do
   not trust.
-- Credentials do not end up in exception messages, warnings or logs: the
-  userinfo of a URL and the query of a signed URL are redacted.
+- Credentials do not end up in the exception messages, warnings or log lines
+  *this library* writes: the userinfo of a URL and the query of a signed URL
+  are redacted, also from the connection errors it passes on. Pass a signed
+  URL as a full URL, not as a path: a path is echoed as you wrote it. The
+  `urllib3` logger prints every requested path and query at DEBUG level; do
+  not enable it while you use signed URLs.
 - `download_file` writes only to the path you give, through a temporary
-  file, and refuses a symlink at that path.
+  file (private while it is written), and refuses a symlink at that path. A
+  recursive `get` or `put` does not follow a symlink out of the tree
+  (`follow_symlinks=True` allows it). That is a check made just before the
+  write, not a guarantee against someone who can change the directory at the
+  same time.
 
 What the defaults do **not** cover (the environment is trusted, a hostile
 server is not):

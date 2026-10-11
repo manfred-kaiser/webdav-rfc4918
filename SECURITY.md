@@ -49,10 +49,12 @@ exception escaping from server-controlled data.
 
 ## What the library promises
 
-Credentials do not leak into exception messages, warnings or logs: a URL's userinfo and
-the query of a signed URL are redacted before either is built, and an
-`InsecureTransportWarning` (credentials about to go out over plain `http`) names the host
-and port only.
+Credentials do not leak into the exception messages, warnings or log lines the library
+itself writes: a URL's userinfo and the query of a signed URL are redacted before either
+is built (also in the connection errors it passes on), and an `InsecureTransportWarning`
+(credentials about to go out over plain `http`) names the host and port only. This does
+not cover the loggers of `urllib3` and `requests`: at DEBUG level `urllib3` prints every
+requested path and query.
 
 XML from the server (multistatus, lock and error bodies) is parsed with the standard
 library's expat parser. External entities are never resolved, so a response cannot make
