@@ -213,6 +213,23 @@ requested bytes do not pull in a whole cache block.
 - Appending is not possible, because a `PUT` always replaces the whole
   resource. `open(..., "ab")` raises `ValueError`, and
   `pipe_file(..., mode="append")` raises `NotImplementedError`.
+- The bytes are collected in a temporary file first - in memory up to the
+  block size, on disk beyond it - so a big write does not grow your memory,
+  but it needs that much room in the temporary directory (`TMPDIR`).
+- A file that is never closed is uploaded when it is garbage-collected,
+  and Python then warns with a `ResourceWarning`. That is not guaranteed
+  (not at interpreter exit, and an error there is only printed): close it, or
+  use a `with` block.
+
+### Transactions
+
+`with fs.transaction:` works as fsspec defines it. A file opened for
+writing inside it is not uploaded when it is closed but when the block ends
+without an exception; if the block raises, nothing is uploaded. All the files
+of the transaction wait on disk until then, so the temporary directory needs
+room for all of them at once. A transaction is not atomic on the server: if
+the third upload fails, the first two are there. Reading a file you wrote in
+the same transaction finds the old content, or nothing.
 
 ## Local files
 

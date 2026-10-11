@@ -5,6 +5,7 @@ One group per finding (``FS-01``, ``BUG-05``, ...). A ``test_<ID>_...`` test fai
 """
 
 import errno
+import gc
 import io
 import os
 import stat
@@ -186,6 +187,124 @@ def test_BUG04_guard_plain_paths(ffs: WebdavFileSystem, tmp_path: Path) -> None:
     assert ffs.ls("/d/", detail=False) == ["/d/a"]
     assert ffs.ls("webdavs:///d", detail=False) == ["/d/a"]
     assert ffs.ls("", detail=False) == ["/d"]
+
+
+# ------------------------------------------------------------------ BUG-05
+def test_BUG05_transaction_defers_the_put_until_commit(
+    ffs: WebdavFileSystem, tmp_path: Path
+) -> None:
+    with ffs.transaction:
+        with ffs.open("/tx1.txt", "wb") as f:
+            f.write(b"abc")
+        assert not (tmp_path / "tx1.txt").exists()
+    assert (tmp_path / "tx1.txt").read_bytes() == b"abc"
+
+
+def test_BUG05_transaction_rolls_back_on_an_error(
+    ffs: WebdavFileSystem, tmp_path: Path
+) -> None:
+    with pytest.raises(RuntimeError):
+        with ffs.transaction:
+            with ffs.open("/tx2.txt", "wb") as f:
+                f.write(b"abc")
+            raise RuntimeError("boom")
+    assert not (tmp_path / "tx2.txt").exists()
+
+
+def test_BUG05_transaction_two_files_and_text_mode(
+    ffs: WebdavFileSystem, tmp_path: Path
+) -> None:
+    with ffs.transaction:
+        with ffs.open("/a.txt", "w") as f:
+            f.write("a")
+        with ffs.open("/b.txt", "wb") as f:
+            f.write(b"b")
+    assert (tmp_path / "a.txt").read_text() == "a"
+    assert (tmp_path / "b.txt").read_text() == "b"
+
+
+def test_BUG05_transaction_does_not_hold_a_big_file_in_memory(
+    ffs: WebdavFileSystem, tmp_path: Path
+) -> None:
+    data = os.urandom(20 * 1024 * 1024)
+    with ffs.transaction:
+        with ffs.open("/big.bin", "wb") as f:
+            f.write(data)
+            assert f._rolled  # type: ignore[attr-defined]  # on disk, not in RAM
+    assert (tmp_path / "big.bin").read_bytes() == data
+
+
+def test_BUG05_a_failing_commit_leaves_no_open_file(
+    ffs: WebdavFileSystem, tmp_path: Path
+) -> None:
+    (
+        tmp_path / "taken"
+    ).mkdir()  # a collection where the PUT goes: the server refuses it
+    held = []
+    with pytest.raises(IsADirectoryError):
+        with ffs.transaction:
+            f = ffs.open("/taken", "wb")
+            f.write(b"1")
+            f.close()
+            held.append(f)
+    assert all(f.closed for f in held)
+    with pytest.raises(RuntimeError):
+        with ffs.transaction:
+            g = ffs.open("/other.txt", "wb")
+            g.write(b"1")
+            g.close()
+            held.append(g)
+            raise RuntimeError
+    assert all(f.closed for f in held)
+    assert not (tmp_path / "other.txt").exists()
+
+
+def test_BUG05_guard_plain_open_uploads_on_close(
+    ffs: WebdavFileSystem, tmp_path: Path
+) -> None:
+    with ffs.open("/plain.txt", "wb") as f:
+        f.write(b"x")
+    assert (tmp_path / "plain.txt").read_bytes() == b"x"
+    f2 = ffs.open("/plain2.txt", "wb")
+    f2.write(b"y")
+    f2.close()
+    assert (tmp_path / "plain2.txt").read_bytes() == b"y"
+    assert f2.closed
+
+
+def test_BUG05_guard_an_exception_in_a_plain_with_discards(
+    ffs: WebdavFileSystem, tmp_path: Path
+) -> None:
+    with pytest.raises(RuntimeError):
+        with ffs.open("/nope.txt", "wb") as f:
+            f.write(b"x")
+            raise RuntimeError
+    assert not (tmp_path / "nope.txt").exists()
+
+
+# ------------------------------------------------------------------ BUG-11
+def test_BUG11_guard_an_unclosed_upload_file_still_uploads_and_warns(
+    ffs: WebdavFileSystem, tmp_path: Path
+) -> None:
+    with pytest.warns(ResourceWarning):
+        f = ffs.open("/gc.txt", "wb")
+        f.write(b"x")
+        del f
+        gc.collect()
+    assert (tmp_path / "gc.txt").read_bytes() == b"x"
+
+
+def test_BUG11_an_unclosed_transaction_file_is_not_uploaded_by_the_collector(
+    ffs: WebdavFileSystem, tmp_path: Path
+) -> None:
+    with ffs.transaction:
+        f = ffs.open("/held.txt", "wb")
+        f.write(b"x")
+        f.close()
+        del f
+        gc.collect()
+        assert not (tmp_path / "held.txt").exists()
+    assert (tmp_path / "held.txt").read_bytes() == b"x"
 
 
 # ------------------------------------------------------------------ BUG-12

@@ -678,7 +678,12 @@ class WebdavFileSystem(GuardedFileSystem):
             if "x" in mode and self.exists(path):
                 raise FileExistsError(errno.EEXIST, "File exists", path)
             return UploadFile(
-                self, path=path, mode=mode, block_size=block_size, exclusive="x" in mode
+                self,
+                path=path,
+                mode=mode,
+                block_size=block_size,
+                exclusive="x" in mode,
+                autocommit=autocommit,
             )
 
         with translate_exceptions():
@@ -1028,9 +1033,14 @@ class UploadFile(tempfile.SpooledTemporaryFile):
         block_size: "int | str | None" = None,
         *,
         exclusive: bool = False,
+        autocommit: bool = True,
     ) -> None:
         """Set up local buffering for a deferred upload to ``path`` on ``fs``."""
         self.exclusive = exclusive
+        # False inside ``fs.transaction``: ``close()`` only hands the file over, the PUT is
+        # ``commit()``'s - and ``discard()`` drops it (fsspec's contract of a transaction).
+        self.autocommit = autocommit
+        self._handed_over = False
         self.blocksize: int = (
             block_size
             if isinstance(block_size, int)
@@ -1070,6 +1080,11 @@ class UploadFile(tempfile.SpooledTemporaryFile):
         """Seekable."""
         return True
 
+    @property
+    def closed(self) -> bool:
+        """Closed for the caller - inside a transaction that is before the upload."""
+        return self._handed_over or super().closed
+
     def commit(self) -> None:
         """Upload the buffered content - this is where the real PUT happens.
 
@@ -1079,27 +1094,43 @@ class UploadFile(tempfile.SpooledTemporaryFile):
         :meth:`~WebdavFileSystem.pipe_file` already do - WebDAV PUT, like
         COPY, refuses a destination whose parent does not exist yet.
         """
-        self.seek(0)
-        with translate_exceptions():
-            self.fs.upload_fileobj(
-                cast("BinaryIO", self),
-                self.path,
-                chunk_size=self.blocksize,
-                overwrite=not self.exclusive,
-            )
+        if super().closed:
+            return
+        try:
+            self.seek(0)
+            with translate_exceptions():
+                self.fs.upload_fileobj(
+                    cast("BinaryIO", self),
+                    self.path,
+                    chunk_size=self.blocksize,
+                    overwrite=not self.exclusive,
+                )
+        finally:
+            self._release()
+
+    def _release(self) -> None:
+        """Close for real, and free the buffer."""
+        self._handed_over = False
+        super().close()
 
     def close(self) -> None:
-        """Commit and close - closed all the same when the upload fails, as ``io`` closes."""
-        if not self.closed:
-            try:
-                self.commit()
-            finally:
-                super().close()
+        """Commit and close - closed all the same when the upload fails, as ``io`` closes.
+
+        Inside ``fs.transaction`` the file is only handed over to it: the transaction
+        calls :meth:`commit` when it ends well, :meth:`discard` when it fails.
+        """
+        if self.closed:
+            return
+        if self.autocommit:
+            self.commit()
+        else:
+            self.flush()
+            self._handed_over = True
 
     def discard(self) -> None:
         """Close without uploading."""
-        if not self.closed:
-            super().close()
+        if not super().closed:
+            self._release()
 
     def info(self) -> NoReturn:
         """Not available while a write is still in progress."""
