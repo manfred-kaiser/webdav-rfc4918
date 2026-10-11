@@ -351,6 +351,15 @@ included; for `https://` it only sees the host and port. `trust_env=False`
 through a proxy says so in a note on the exception and in the log, because the
 usual cause is a stale `HTTP_PROXY`.
 
+### Digest authentication
+
+`requests.auth.HTTPDigestAuth` keeps its state (realm, nonce) per thread, not
+per host. With a session without a `base_url` that talks to several servers,
+the second server can be sent a header built from the first one's challenge (a
+hash, not the password). Use one session with a `base_url` per server when you
+use Digest. A challenge the client cannot use (`Digest nonce="n"` without a
+realm) is a `ClientError`, with the original error as its cause.
+
 ## Retries
 
 Transient failures (429, 5xx, timeouts, dropped connections) are retried

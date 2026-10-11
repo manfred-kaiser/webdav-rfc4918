@@ -360,8 +360,9 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
                 lands on).
             cert: Client certificate for mTLS - a path to a combined
                 cert+key PEM, or a ``(certfile, keyfile)`` tuple.
-            verify: Server certificate verification - ``True`` (system
-                trust store, the default), the path of a CA bundle
+            verify: Server certificate verification - ``True`` (the trust
+                store ``requests`` uses, the default: ``certifi``'s bundle
+                unless your distribution patches it), the path of a CA bundle
                 (a ``str`` or path-like), or ``False``. Nothing else is
                 accepted: ``None``, ``0`` or an empty string - say, an unset
                 environment variable - would be read as "do not check" by
@@ -374,7 +375,7 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
                 warning category (a common ``urllib3.disable_warnings()``
                 cannot silence it). Prefer naming the CA
                 (``verify="ca.pem"``) over disabling verification when the
-                server certificate simply isn't in the system trust store.
+                server certificate simply isn't in the trust store.
             tls: Advanced TLS knobs (encrypted private key, CRL checking,
                 explicit cipher restriction) that plain ``cert=``/
                 ``verify=`` cannot express - see

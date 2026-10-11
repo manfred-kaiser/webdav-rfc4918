@@ -1,7 +1,8 @@
 # TLS and mTLS
 
 The common case is a client certificate with an unencrypted private key,
-and a server verified against the system trust store or a custom CA
+and a server verified against the default trust store (see
+[Where the trust comes from](#where-the-trust-comes-from)) or a custom CA
 bundle. That needs only the usual `requests` arguments:
 
 ```python
@@ -38,6 +39,25 @@ All security defaults, TLS and otherwise, are listed in the
 would replace the CA you configured), and so is `~/.netrc`. Proxies from the
 environment (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) are used, as in
 `requests`; `trust_env=False` (`dav --no-proxy`) turns that off.
+
+## Where the trust comes from
+
+It is not "the system trust store" on every path:
+
+| Configuration | Trusted CAs |
+|---|---|
+| `verify=True` (no `tls=`) | What `requests` uses: the `certifi` bundle (or your distribution's own, where it patches `certifi`) |
+| `verify="ca.pem"` (no `tls=`) | Only that bundle |
+| `tls=TLSOptions()` | OpenSSL's default locations: the operating system's store, **plus** whatever `SSL_CERT_FILE`/`SSL_CERT_DIR` name |
+| `tls=TLSOptions(ca_files=...)` or `verify="ca.pem"` with `tls=` | Only those files (`ca_files` wins if both are given) |
+
+`SSL_CERT_FILE`/`SSL_CERT_DIR` therefore widen the trust of a session with
+`tls=` and no CA of its own, but not of one without `tls=`. A company CA in the
+operating system's store works with `tls=`, and only there. Naming the CA is
+the one way to a trust anchor that no environment variable can widen. A
+redirect to another origin is verified against the default locations in the
+`tls=` case, never against `ca_files` (see [Redirects to another
+origin](#redirects-to-another-origin)).
 
 ```{warning}
 All of this needs an `https://` `base_url`. Over plain `http://` there is
@@ -124,7 +144,8 @@ session = Session("https://webdav.example.org", tls=tls)
 
 Only these CAs are trusted. Without `ca_files`, a path given as
 `verify="ca-bundle.pem"` is used the same way, and without either, the
-system trust store.
+default locations of OpenSSL (see [Where the trust comes
+from](#where-the-trust-comes-from)).
 
 ### `crl_files`
 
@@ -174,6 +195,40 @@ otherwise tolerate, for example a CA certificate whose Basic Constraints
 extension is not marked critical. `False` accepts such chains, which some
 legacy or internal CAs produce. Like a low `minimum_version`, it emits the warning when
 the session is created.
+
+### `pin_sha256`
+
+```python
+tls = TLSOptions(ca_files="company-ca.pem", pin_sha256="3f:..:9a")  # 64 hex digits
+```
+
+The SHA-256 fingerprint of the server's certificate (DER form; colons and
+case do not matter). A connection to a server with another certificate fails
+with an `SSLError` that says so. It is checked on top of verification, not
+instead of it, and it takes the place of the host name check: the pinned
+certificate is the identity. It applies to your server only, never to another
+origin a redirect leads to. A pin breaks at every renewal of the certificate:
+change it together with the certificate. A single certificate in `ca_files` is
+the other way to pin, and survives a renewal with the same key if the CA is
+the same.
+
+## Which limits can be turned off, and what warns
+
+| What | Turned off by | Says so |
+|---|---|---|
+| Certificate verification | `verify=False` | `TLSHardeningDisabledWarning`, logged, on every request |
+| TLS 1.2 floor, strict chain checking | `TLSOptions` | `TLSHardeningDisabledWarning` when the session is created |
+| Weak ciphers | `TLSOptions(ciphers=...)` | `TLSHardeningDisabledWarning` when the session is created |
+| Whole-exchange deadline | `max_response_time=None` | `DeadlineDisabledWarning` |
+| Per-read timeout, response size cap | `timeout=None`, `max_response_size=None` | nothing: no network attacker gains from it, and large downloads need them |
+| Redirect restrictions | `RedirectPolicy.ALL`, `WHITELIST` with a predicate that is always true | nothing |
+| Cleartext credentials | `insecure_transport="warn"` or `"allow"` | `InsecureTransportWarning` (`"warn"`) |
+
+There is deliberately no single switch that turns all of these into errors:
+the Python warning filters (`-W error::webdav.exceptions.TLSHardeningDisabledWarning`)
+do that per category. The warning for `verify=False` is repeated on purpose,
+and `webdav` sets its filter to `always` for that category when it is
+imported.
 
 ## `build_ssl_context`
 

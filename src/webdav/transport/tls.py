@@ -19,6 +19,16 @@ independent of ``urllib3``'s own warning hierarchy (see its docstring for
 why) - a security-conscious deployment should be able to spot every one of
 these in its logs, and it should never be possible to accidentally not
 notice one.
+
+Where the trust comes from differs by path, and is not "the system trust store"
+in every case: plain ``verify=True`` is what ``requests`` does (``certifi``'s
+bundle, or the distribution's own when it patches ``certifi``), while a
+session with ``tls=`` loads the OpenSSL default locations (the operating
+system's store, plus whatever ``SSL_CERT_FILE``/``SSL_CERT_DIR`` name) unless
+``ca_files`` or a ``verify=`` path says otherwise. ``REQUESTS_CA_BUNDLE`` and
+``CURL_CA_BUNDLE`` are ignored on every path. Naming the CA (``verify="ca.pem"``
+or ``TLSOptions.ca_files``) is the one way to a trust anchor that no
+environment variable can widen.
 """
 
 import logging

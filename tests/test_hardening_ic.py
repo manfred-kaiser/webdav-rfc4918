@@ -314,6 +314,26 @@ def test_verify_none_for_one_call_means_the_sessions_own() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Trust sources differ by path (documented): pinned here
+# ---------------------------------------------------------------------------
+
+
+def test_the_tls_path_reads_ssl_cert_file_and_the_plain_path_does_not(
+    certs: Certificates, other_ca: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SSL_CERT_FILE", str(certs.ca_cert))
+    with tls_server(certs, always(OK)) as (url, _rec):
+        with pytest.raises(requests.exceptions.SSLError):
+            Session(retry=False).get(f"{url}/x")
+        assert Session(tls=TLSOptions(), retry=False).get(f"{url}/x").status_code == 204
+        # naming the CA is what no environment variable can widen
+        with pytest.raises(requests.exceptions.SSLError):
+            Session(tls=TLSOptions(ca_files=other_ca), retry=False).get(f"{url}/x")
+        with pytest.raises(requests.exceptions.SSLError):
+            Session(verify=other_ca, tls=TLSOptions(), retry=False).get(f"{url}/x")
+
+
+# ---------------------------------------------------------------------------
 # The policy of how to talk TLS goes along on a redirect, what is the origin's own does not
 # ---------------------------------------------------------------------------
 

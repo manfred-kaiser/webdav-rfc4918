@@ -127,7 +127,7 @@ def check_verify(verify: object) -> None:
     that talks to a server it does not authenticate hands the password to
     whoever answers, so every occurrence is loud and logged. Prefer naming
     the CA that signed the server's certificate (``verify="ca.pem"``)
-    over disabling verification when it's just not in the system trust store.
+    over disabling verification when it's just not in the trust store.
     Anything that is not ``True``, ``False`` or a path is refused: ``requests``
     would read ``""``, ``None`` or ``0`` as "do not check".
 
