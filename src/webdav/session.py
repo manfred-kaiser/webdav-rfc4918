@@ -111,7 +111,9 @@ from webdav.transport.redirects import (
 from webdav.transport.retry import MAX_RETRY_AFTER, retry_after
 from webdav.transport.retry import retry as _retry
 from webdav.transport.tls import (
+    SSLContextAdapter,
     configure_tls,
+    verification_on,
 )
 from webdav.url_safety import effective_origin, is_url, redact_url
 
@@ -356,7 +358,9 @@ class Session:
                 explicit cipher restriction) that plain ``cert=``/
                 ``verify=`` cannot express - see
                 :class:`~webdav.transport.tls.TLSOptions`. Triggers the hardened
-                :mod:`webdav.transport.tls` adapter when given.
+                :mod:`webdav.transport.tls` adapter when given; ``verify`` and
+                ``cert`` are then the adapter's too (changing them later
+                rebuilds its TLS context).
             timeout: Default ``(connect, read)`` timeout (or a single
                 value for both) applied when a request doesn't set its
                 own. ``None`` restores ``requests``' own no-timeout
@@ -511,6 +515,7 @@ class Session:
         self.retry = self._retry_arg
         self.locks = LockRegistry()
         self._is_trusted_redirect_target = build_trust_check(self._trusted_arg)
+        self._tls_lock = threading.Lock()
         self._features: dict[Origin | str, FeatureDetection] = {}
         self._features_lock = threading.RLock()
         self._cleartext = CleartextWarner()
@@ -586,21 +591,54 @@ class Session:
 
     @property
     def verify(self) -> "bool | str | None":
-        """See :attr:`requests.Session.verify`."""
+        """What certificate verification this session uses - ``True``, ``False`` or the path of a CA bundle.
+
+        Also with ``tls=``: setting it rebuilds the TLS context (and fails,
+        with the old one left as it was, if that cannot be done). A per-call
+        ``verify=`` does not change what a ``tls=`` session verifies - and one
+        that would turn verification *on* for a session that has it off is
+        refused.
+        """
         return self._transport.verify
 
     @verify.setter
     def verify(self, value: "bool | str | None") -> None:
-        self._transport.verify = value
+        self._reconfigure_tls(verify=value)
 
     @property
     def cert(self) -> "CertTypes":
-        """See :attr:`requests.Session.cert`."""
+        """See :attr:`requests.Session.cert` (with ``tls=``, setting it rebuilds the TLS context)."""
         return self._transport.cert
 
     @cert.setter
     def cert(self, value: "CertTypes") -> None:
-        self._transport.cert = value
+        self._reconfigure_tls(cert=value)
+
+    def _reconfigure_tls(self, **changes: Any) -> None:
+        """Apply a new ``verify``/``cert`` to what is in force - all or nothing, one change at a time.
+
+        Without ``tls=`` these are the attributes of ``requests``; with it the
+        TLS context is built anew first (so a bad value raises before anything
+        is touched) and swapped in place.
+        """
+        with self._tls_lock:
+            new_verify = changes.get("verify", self._verify_arg)
+            new_cert = changes.get("cert", self._cert_arg)
+            if self._tls_arg is None:
+                self._transport.verify = new_verify
+                self._transport.cert = new_cert
+            else:
+                configure_tls(
+                    self._transport,
+                    cert=new_cert,
+                    verify=new_verify,
+                    tls=self._tls_arg,
+                    response_class=self._response_class_arg,
+                    pool_connections=self._pool_connections_arg,
+                    pool_maxsize=self._pool_maxsize_arg,
+                )
+            self._verify_arg = new_verify
+            self._cert_arg = new_cert
 
     @property
     def trust_env(self) -> bool:
@@ -985,7 +1023,31 @@ class Session:
         return check_redirect_policy(override, trusted=self._trusted_arg is not None)
 
     def _require_verification(self, verify: object) -> None:
-        """Check (and warn about) the certificate verification a request will use."""
+        """Check (and warn about) the certificate verification a request will use.
+
+        A per-call ``verify=`` has no say over a session with ``tls=``: its
+        context verifies, or does not, as the session's ``verify`` made it. So
+        a ``verify=False`` that would be ignored is no "verification is off"
+        (it is logged as ignored), and a ``verify=True``/path where the
+        context does *not* verify is refused - the caller believes the
+        connection is checked, and it would not be.
+        """
+        adapter = self._transport.get_adapter("https://")
+        if verify is not None and isinstance(adapter, SSLContextAdapter):
+            wanted = verification_on(verify)
+            if wanted and not adapter.verifies:
+                msg = (
+                    "verify= for one call has no effect on a session with tls=: its TLS "
+                    "context does not verify the server. Set session.verify instead"
+                )
+                raise ClientError(msg)
+            if not wanted and adapter.verifies:
+                _LOGGER.warning(
+                    "verify=False for one call is ignored: this session has tls=, and "
+                    "its TLS context verifies the server. Set session.verify = False "
+                    "to turn verification off"
+                )
+                return
         check_verify(self.verify if verify is None else verify)
 
     def _fetch_once(

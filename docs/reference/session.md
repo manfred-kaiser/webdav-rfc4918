@@ -357,7 +357,9 @@ serialises the options you configured.
 - The TLS adapter is rebuilt from your constructor arguments, including
   `tls=TLSOptions(...)`. So mTLS with a client certificate can be pickled.
   A raw `ssl.SSLContext` cannot.
-- `auth`, headers and cookies are copied as they are.
+- `auth`, headers and cookies are copied as they are. A change to
+  `session.verify` or `session.cert` after construction is part of what is
+  copied.
 - A callable you passed (`trusted_redirect_origins=` or `retry=` as a
   function) has to be picklable too: a module-level function, not a lambda.
 

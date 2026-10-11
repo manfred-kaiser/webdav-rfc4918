@@ -78,9 +78,15 @@ A wrong password, a missing file or an invalid cipher string raises
 or `""`) raises `TLSConfigError` instead of quietly falling back to a
 weaker setup.
 
-With `tls=`, the `SSLContext` is the whole configuration. A per-call
-`verify=` or `cert=` does not change it, and the `certifi` bundle that
-`requests` would add is not used.
+With `tls=`, the `SSLContext` is the whole configuration, and the `certifi`
+bundle that `requests` would add is not used. `session.verify` and
+`session.cert` are part of it: setting one rebuilds the context (the new one
+is built first, so a value that cannot be applied raises and leaves the old
+configuration as it was), and `session.verify` returns what is in force.
+`ca_files` takes precedence over a `verify=` path. A per-call `verify=`
+cannot change it: `verify=False` is ignored (and logged as ignored), and
+`verify=True` or a path where the session does not verify is refused with a
+`ClientError`: set `session.verify` instead. A per-call `cert=` is ignored.
 
 ### `key_password`
 

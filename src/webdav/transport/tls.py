@@ -264,6 +264,32 @@ class SSLContextAdapter(DeadlineAdapter):
         self._verify = verify
         super().__init__(**kwargs)
 
+    @property
+    def verifies(self) -> bool:
+        """Whether this adapter checks the server's certificate (the context's say, not a per-call ``verify=``)."""
+        return self._verify
+
+    def reconfigure(self, ssl_context: ssl.SSLContext, *, verify: bool) -> None:
+        """Swap in a new context and start over with fresh connection pools - in place.
+
+        The adapter stays mounted where it is (``requests`` re-orders its
+        mounts on every ``mount()``, which a thread that is sending right now
+        iterates over). Connections that are in use finish on the old pools,
+        which are closed as they come back.
+        """
+        old_pool, old_proxies = self.poolmanager, self.proxy_manager
+        self._ssl_context = ssl_context
+        self._verify = verify
+        self.proxy_manager = {}
+        self.init_poolmanager(
+            self._pool_connections,  # type: ignore[attr-defined]
+            self._pool_maxsize,  # type: ignore[attr-defined]
+            block=self._pool_block,  # type: ignore[attr-defined]
+        )
+        old_pool.clear()
+        for manager in old_proxies.values():
+            manager.clear()
+
     def __getstate__(self) -> "dict[str, Any]":
         """Refuse: an ``SSLContext`` (client key, CA set) is not something to serialise."""
         msg = "an SSLContextAdapter holds an SSLContext and cannot be pickled or deep-copied"
@@ -278,7 +304,8 @@ class SSLContextAdapter(DeadlineAdapter):
         ``verify=False``/``cert=``. This context is the whole configuration:
         verification is exactly what :func:`build_ssl_context` built it
         with, against exactly the CAs it holds (if any), and the client
-        certificate is the one it was built with.
+        certificate is the one it was built with. (``Session`` refuses a
+        per-call ``verify=`` that would have said otherwise.)
         """
         conn.cert_reqs = "CERT_REQUIRED" if self._verify else "CERT_NONE"
         conn.ca_certs = None
@@ -311,18 +338,26 @@ def mount_mtls_adapter(
     """Build an mTLS :class:`SSLContextAdapter` and mount it for ``https://``.
 
     Convenience wrapper around :func:`build_ssl_context` +
-    :class:`SSLContextAdapter` for the common case.
+    :class:`SSLContextAdapter` for the common case. One that is already
+    mounted is reconfigured in place instead of replaced.
     """
-    adapter = SSLContextAdapter(
-        build_ssl_context(
-            certfile=certfile, keyfile=keyfile, options=options, verify=verify
-        ),
-        verify=verify,
-        response_class=response_class,
-        pool_connections=pool_connections,
-        pool_maxsize=pool_maxsize,
+    context = build_ssl_context(
+        certfile=certfile, keyfile=keyfile, options=options, verify=verify
     )
-    session.mount("https://", adapter)
+    mounted = session.get_adapter("https://")
+    if isinstance(mounted, SSLContextAdapter):
+        mounted.reconfigure(context, verify=verify)
+        return
+    session.mount(
+        "https://",
+        SSLContextAdapter(
+            context,
+            verify=verify,
+            response_class=response_class,
+            pool_connections=pool_connections,
+            pool_maxsize=pool_maxsize,
+        ),
+    )
 
 
 def verification_on(verify: object) -> bool:
@@ -352,6 +387,15 @@ def configure_tls(
     ``Session._init_derived``). ``pool_connections``/``pool_maxsize`` here
     only matter for the ``tls=...`` branch below, which replaces that
     adapter with a new one of its own.
+
+    With ``tls=`` the attributes are set too (the adapter is what counts, but
+    ``session.verify`` must say what is in force). Called again, it rebuilds
+    the adapter's context in place - the new context is built before anything
+    is touched, so a failure leaves the old configuration as it was.
+
+    Raises:
+        TLSConfigError: Something in ``tls`` could not be loaded.
+
     """
     verify_certificates = verification_on(verify)
     if tls is None:
@@ -385,3 +429,5 @@ def configure_tls(
         pool_connections=pool_connections,
         pool_maxsize=pool_maxsize,
     )
+    transport.cert = cert
+    transport.verify = verify
