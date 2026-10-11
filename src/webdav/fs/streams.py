@@ -11,6 +11,7 @@ resource) would otherwise let through unnoticed.
 import time
 from collections.abc import Generator
 from contextlib import contextmanager
+from email.message import Message
 from http import HTTPStatus
 from io import RawIOBase
 from typing import TYPE_CHECKING
@@ -335,9 +336,16 @@ class IterStream(RawIOBase):
 
     @property
     def encoding(self) -> str | None:
-        """Encoding of the response, as detected by ``requests``."""
+        """The ``charset`` the server declared in ``Content-Type``, or ``None``.
+
+        Not ``requests``' own guess, which is ISO-8859-1 for any ``text/*`` without a
+        charset (an RFC 2616 default that RFC 7231 dropped): a UTF-8 body would come out
+        as mojibake. Text mode reads a body without a declared charset as UTF-8.
+        """
         assert self._initial_response
-        return self._initial_response.encoding
+        message = Message()
+        message["Content-Type"] = self._initial_response.headers.get("Content-Type", "")
+        return message.get_content_charset()
 
     def close(self) -> None:
         """Close the underlying response, if not already closed."""

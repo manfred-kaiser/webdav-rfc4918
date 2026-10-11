@@ -61,6 +61,61 @@ def ffs(server_url: str) -> Iterator[WebdavFileSystem]:
     filesystem.filesystem.close()
 
 
+# ------------------------------------------------------------------ BUG-02
+def _text_server(content_type: "str | None", body: bytes) -> Any:
+    def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
+        if seen.method == "PROPFIND":
+            return 207, {}, PROPFIND_FILE
+        return (
+            200,
+            ({} if content_type is None else {"Content-Type": content_type}),
+            body,
+        )
+
+    return respond
+
+
+def _read_text(content_type: "str | None", body: bytes, **options: Any) -> str:
+    with scripted_server(_text_server(content_type, body)) as (url, _):
+        with FileSystem(retry=False).open(f"{url}/f", **options) as f:
+            return str(f.read())
+
+
+def test_BUG02_text_without_charset_is_utf8() -> None:
+    assert _read_text("text/plain", "héllo wörld €".encode()) == "héllo wörld €"
+
+
+def test_BUG02_no_content_type_is_utf8() -> None:
+    assert _read_text(None, "héllo €".encode()) == "héllo €"
+
+
+def test_BUG02_guard_declared_latin1_is_honoured() -> None:
+    assert (
+        _read_text("text/plain; charset=iso-8859-1", "héllo".encode("latin-1"))
+        == "héllo"
+    )
+
+
+def test_BUG02_guard_quoted_and_uppercase_charset() -> None:
+    assert _read_text('text/plain; Charset="UTF-8"', "héllo".encode()) == "héllo"
+
+
+def test_BUG02_guard_explicit_encoding_wins() -> None:
+    assert (
+        _read_text("text/plain", "héllo".encode("latin-1"), encoding="iso-8859-1")
+        == "héllo"
+    )
+
+
+def test_BUG02_legacy_latin1_without_charset_needs_encoding() -> None:
+    with pytest.raises(UnicodeDecodeError):
+        _read_text("text/plain", "héllo".encode("latin-1"))
+
+
+def test_BUG02_guard_hostile_charset_is_not_used() -> None:
+    assert _read_text("text/plain; charset=rot13", "héllo".encode()) == "héllo"
+
+
 # ------------------------------------------------------------------ BUG-12
 def _tree_server(forbidden: "set[str]") -> Any:
     def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:

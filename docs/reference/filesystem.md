@@ -197,6 +197,16 @@ the `with` block ends without an exception, so a failed block never leaves
 a half-written file on the server. `"x"` creates the file only if nothing
 is there yet.
 
+Text mode reads the `charset` the server declares in `Content-Type`, when it
+is a well-known text encoding, and UTF-8 otherwise. It does not guess
+ISO-8859-1 for a `text/*` body without a charset, as `requests` does. A server
+that sends Latin-1 text without saying so needs `encoding="iso-8859-1"`:
+
+```python
+with fs.open("Documents/old.txt", encoding="iso-8859-1") as f:
+    print(f.read())
+```
+
 `upload_fileobj` and `download_fileobj` take an open binary file object
 instead of a local path:
 
