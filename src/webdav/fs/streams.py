@@ -24,7 +24,7 @@ from webdav.transport.parse_utils import parse_content_range, parse_uint
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-    from typing import Any, Self
+    from typing import Any, BinaryIO, Self
 
     from requests import Response as HTTPResponse
     from typing_extensions import Buffer
@@ -33,6 +33,17 @@ if TYPE_CHECKING:
 
 MAX_RESUME_ATTEMPTS = 5
 RESUME_BACKOFF_SECONDS = 1.0
+
+
+def write_all(fileobj: "BinaryIO", data: bytes) -> None:
+    """``fileobj.write(data)`` until all of it is written (a raw stream may take less)."""
+    written = fileobj.write(data)
+    while isinstance(written, int) and written < len(data):
+        if written <= 0:
+            msg = "the file object accepted no more data"
+            raise OSError(msg)
+        data = data[written:]
+        written = fileobj.write(data)
 
 
 class SizedIterator:

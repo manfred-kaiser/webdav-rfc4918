@@ -79,7 +79,7 @@ from webdav.exceptions import (
     ResourceNotFoundError,
 )
 from webdav.fs._remote import Remote
-from webdav.fs.streams import IterStream, SizedIterator
+from webdav.fs.streams import IterStream, SizedIterator, write_all
 from webdav.methods import Method
 from webdav.resource import Resource
 from webdav.session import Session, SessionOptions
@@ -949,7 +949,7 @@ class FileSystem:
         ) as remote_obj:
             size = chunk_size or self._session.chunk_size
             while data := remote_obj.read(size):
-                fileobj.write(data)
+                write_all(fileobj, data)
 
     def download_file(
         self,

@@ -368,6 +368,54 @@ def test_seeking_and_reading_an_open_stream_still_works() -> None:
 
 
 # ---------------------------------------------------------------------------
+# a write that takes less than it was given
+# ---------------------------------------------------------------------------
+
+
+class Raw:
+    """A raw stream: ``write`` takes at most ``limit`` bytes at a time and says how many."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.data = b""
+
+    def write(self, chunk: bytes) -> int:
+        taken = chunk[: self.limit]
+        self.data += taken
+        return len(taken)
+
+
+class Silent:
+    """A file object whose ``write`` returns nothing (many wrappers)."""
+
+    def __init__(self) -> None:
+        self.data = b""
+
+    def write(self, chunk: bytes) -> None:
+        self.data += chunk
+
+
+def test_a_partial_write_is_written_to_the_end() -> None:
+    with scripted_server(file_server(len(_BODY), serves(_BODY))) as (url, _rec):
+        raw = Raw(limit=1000)
+        FileSystem(url).download_fileobj("/f", raw, chunk_size=4096)  # type: ignore[arg-type]
+        assert raw.data == _BODY
+
+
+def test_a_write_that_returns_none_counts_as_complete() -> None:
+    with scripted_server(file_server(len(_BODY), serves(_BODY))) as (url, _rec):
+        silent = Silent()
+        FileSystem(url).download_fileobj("/f", silent)  # type: ignore[arg-type]
+        assert silent.data == _BODY
+
+
+def test_a_file_object_that_takes_nothing_is_an_error_not_an_endless_loop() -> None:
+    with scripted_server(file_server(len(_BODY), serves(_BODY))) as (url, _rec):
+        with pytest.raises(OSError, match="accepted no more data"):
+            FileSystem(url).download_fileobj("/f", Raw(limit=0))  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
 # Content-Range is checked as a whole
 # ---------------------------------------------------------------------------
 
