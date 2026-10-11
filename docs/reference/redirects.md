@@ -48,6 +48,30 @@ session = Session(
 )
 ```
 
+::::{warning}
+This example trusts **every** host under a domain that anyone can rent
+space on. `.amazonaws.com` is multi-tenant: an attacker's own bucket
+(`attacker.s3.amazonaws.com`) matches, and a malicious or compromised server
+that redirects there receives the body of your `PUT`. A suffix test is only
+safe for a domain where nobody else can create hosts.
+
+Trust the exact origin you expect, or a short list of them, scheme and port
+included:
+
+```python
+TRUSTED = {("https", "uploads.example.com", 443)}
+
+
+def trusted_origin(url):
+    parts = urlsplit(url)
+    return (parts.scheme, parts.hostname, parts.port or 443) in TRUSTED
+```
+
+If the host varies per tenant, a list with one entry per tenant, or a
+pattern that matches only names you create
+(`<tenant>.uploads.example.com`), is safer than a public suffix.
+::::
+
 One call can use another policy than its session:
 
 ```python
