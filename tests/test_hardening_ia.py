@@ -367,6 +367,38 @@ def test_exc01_several_valid_hrefs_of_one_response_still_work() -> None:
     assert set(parsed.responses) == {"/a", "/a/"} or "/a" in parsed.responses
 
 
+# -- BUG-09: whitespace around an href or an ETag ----------------------------
+
+
+def test_bug09_a_pretty_printed_href_and_etag_are_read() -> None:
+    body = ms(
+        entry(
+            "\n    /d/a.txt\n  ",
+            extra='<d:getetag>\n  "abc"\n </d:getetag>',
+        )
+    )
+    parsed = MultiStatusResponse(body)
+    response = parsed.entries[0]
+    assert response.href == "/d/a.txt"
+    assert response.properties.etag == '"abc"'
+    assert entity_tag(response.properties.etag or "") == '"abc"'
+
+
+def test_bug09_an_href_of_nothing_but_whitespace_is_still_missing() -> None:
+    with pytest.raises(MalformedResponseError, match="missing a required"):
+        MultiStatusResponse(ms(entry(" \n ")))
+
+
+def test_bug09_a_control_character_inside_an_href_is_still_refused() -> None:
+    with pytest.raises(MalformedResponseError, match="control character"):
+        MultiStatusResponse(ms(entry("/d/a\tb")))
+
+
+def test_bug09_display_name_keeps_its_edge_spaces() -> None:
+    body = ms(entry("/a", extra="<d:displayname> a </d:displayname>"))
+    assert MultiStatusResponse(body).entries[0].properties.display_name == " a "
+
+
 # -- FS-09: two answers for one resource --------------------------------------
 
 
