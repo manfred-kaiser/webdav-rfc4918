@@ -176,8 +176,18 @@ Uploads take `(local_path, path)`, downloads `(path, local_path)`. Without
 `overwrite=True`, an existing target is an error:
 `ResourceAlreadyExistsError` on the server, `FileExistsError` locally. A
 download goes to a temporary file first and only a complete one is moved
-into place. It never writes through a symlink.
+into place.
 
+- The temporary file (`.webdav-<random>.part`, next to the target) is
+  private (`0600`) while it is written. The finished file gets the
+  permissions a new file gets (your umask applies), or those of the file it
+  replaces. A failed or interrupted download removes the temporary file; one
+  left by a killed process stays and can be deleted.
+- A symlink *at* the target is refused. This is a check of that one path,
+  made just before the write: a symlink in a *directory* of the path is
+  followed, as everywhere in Python, and a local user who can swap a path for
+  a symlink in that moment is not stopped. Keep the directory you download
+  into to yourself. (Windows has no `dir_fd` to close that gap.)
 - `upload_file` follows a symlink at `local_path`, as `open` does: you named
   it. `follow_symlinks=False` refuses one, for a path that is not your own
   choice.

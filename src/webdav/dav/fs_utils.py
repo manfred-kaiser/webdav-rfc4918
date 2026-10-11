@@ -1,7 +1,12 @@
 """Local file-object utilities."""
 
+import logging
 import os
+import shutil
+from pathlib import Path
 from typing import Any
+
+_LOGGER = logging.getLogger("webdav")
 
 
 def peek_filelike_length(stream: Any) -> int | None:
@@ -32,3 +37,30 @@ def peek_filelike_length(stream: Any) -> int | None:
             return None
 
     return length
+
+
+def claim_file(target: Path, flags: int, *, overwrite: bool) -> bool:
+    """Create ``target`` empty, exclusively - ``False`` if it is there and may be replaced.
+
+    O_EXCL is atomic on every file system (a hard link is not available on some), and only
+    a complete download gets this far, so no half-written file is ever visible. The kernel
+    applies the umask when it creates the claim: its mode is the one a new file is meant
+    to get, which the finished file is given without anyone reading the umask.
+    """
+    try:
+        os.close(os.open(target, flags, 0o666))
+    except FileExistsError:
+        if not overwrite:
+            raise
+        return False
+    return True
+
+
+def copy_mode(source: Path, destination: Path) -> None:
+    """Give ``destination`` the permissions of ``source``, where the file system lets it."""
+    try:
+        shutil.copymode(source, destination)
+    except (
+        OSError
+    ) as exc:  # a file system that refuses chmod (some network/FUSE mounts)
+        _LOGGER.debug("could not set the mode of %s: %s", destination, exc)

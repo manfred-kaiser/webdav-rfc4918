@@ -4,7 +4,10 @@ One group per finding (``FS-01``, ``BUG-05``, ...). A ``test_<ID>_...`` test fai
 ``test_<ID>_guard_...`` test pins behaviour that worked before and has to keep working.
 """
 
+import errno
+import io
 import os
+import stat
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -520,6 +523,78 @@ def test_FS03_guard_posix_names_download_as_they_are(
     assert sorted(p.name for p in dst.iterdir()) == sorted(
         ["a\\b.txt", "c:d", "-rf", "Case.TXT", "case.txt"]
     )
+
+
+# ------------------------------------------------------------------ FS-04
+def test_FS04_the_part_file_is_private_while_it_is_written(
+    fs: FileSystem, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fs.upload_fileobj(io.BytesIO(b"x" * 1000), "/a.txt")
+    modes: list[int] = []
+    real_fdopen = os.fdopen
+
+    def spy(fd: int, *args: Any, **kwargs: Any) -> Any:
+        modes.append(stat.S_IMODE(os.fstat(fd).st_mode))
+        return real_fdopen(fd, *args, **kwargs)
+
+    monkeypatch.setattr(os, "fdopen", spy)
+    target = tmp_path / "out" / "n.txt"
+    target.parent.mkdir()
+    fs.download_file("/a.txt", target)
+    assert modes[0] == 0o600
+
+
+def test_FS04_guard_the_final_mode_follows_the_umask(
+    fs: FileSystem, tmp_path: Path
+) -> None:
+    fs.upload_fileobj(io.BytesIO(b"x"), "/a.txt")
+    previous = os.umask(0o027)
+    try:
+        fs.download_file("/a.txt", tmp_path / "n.txt")
+        fs.download_file("/a.txt", tmp_path / "o.txt", overwrite=True)
+        (tmp_path / "p.txt").write_text("old")
+        (tmp_path / "p.txt").chmod(0o600)
+        fs.download_file("/a.txt", tmp_path / "p.txt", overwrite=True)
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE((tmp_path / "n.txt").stat().st_mode) == 0o640
+    assert stat.S_IMODE((tmp_path / "o.txt").stat().st_mode) == 0o640
+    assert (
+        stat.S_IMODE((tmp_path / "p.txt").stat().st_mode) == 0o600
+    )  # what is replaced keeps its own
+
+
+def test_FS04_a_file_system_that_refuses_chmod_still_gets_the_download(
+    fs: FileSystem, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    fs.upload_fileobj(io.BytesIO(b"x"), "/a.txt")
+
+    def refuse(*_args: Any, **_kwargs: Any) -> None:
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(shutil, "copymode", refuse)
+    fs.download_file("/a.txt", tmp_path / "n.txt")
+    assert (tmp_path / "n.txt").read_bytes() == b"x"
+
+
+def test_FS04_a_failed_download_leaves_no_part_file(
+    fs: FileSystem, tmp_path: Path
+) -> None:
+    fs.upload_fileobj(io.BytesIO(b"x" * 100), "/a.txt")
+
+    def boom(_n: int) -> None:
+        raise KeyboardInterrupt
+
+    out = tmp_path / "out"
+    out.mkdir()
+    with pytest.raises(KeyboardInterrupt):
+        fs.download_file("/a.txt", out / "n.txt", callback=boom)
+    assert list(out.iterdir()) == []
+    with pytest.raises(KeyboardInterrupt):
+        fs.download_file("/a.txt", out / "n.txt", overwrite=True, callback=boom)
+    assert list(out.iterdir()) == []
 
 
 # ------------------------------------------------------------------ FS-06

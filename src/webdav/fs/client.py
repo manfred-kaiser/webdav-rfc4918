@@ -30,7 +30,6 @@ import logging
 import os
 import pathlib
 import secrets
-import shutil
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -50,7 +49,11 @@ import requests
 
 from webdav.dav.conditional import token_condition
 from webdav.dav.features import FeatureDetection
-from webdav.dav.fs_utils import peek_filelike_length
+from webdav.dav.fs_utils import (
+    claim_file,
+    copy_mode,
+    peek_filelike_length,
+)
 from webdav.dav.headers import depth_header
 from webdav.dav.locks import (
     _TOKEN_RE,
@@ -989,6 +992,14 @@ class FileSystem:
         (``OSError``, or ``FileExistsError`` without ``overwrite``), so a
         pre-planted link can't redirect the write to an unintended local file
         (the same class of attack OpenSSH's ``sftp`` client hardened against).
+        That is a check of ``local_path`` itself, made just before the write: a symlink
+        in a *directory* of the path is followed, as everywhere in Python.
+
+        The temporary file is private (``0600``) while it is written; the finished file
+        gets the permissions a new file gets (the process's umask applies), or - with
+        ``overwrite`` - those of the file it replaces. A temporary ``.webdav-*.part``
+        file is removed when the download fails or is interrupted by an exception; one
+        left by a killed process stays and can be deleted.
         """
         if chunk_size is not None:
             check_chunk_size(chunk_size)
@@ -1011,25 +1022,17 @@ class FileSystem:
         # the process-wide umask, which another thread may be relying on.
         temp = directory / f".webdav-{secrets.token_hex(8)}.part"
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(temp, flags, 0o666)
+        fd = os.open(temp, flags, 0o600)  # private while it is incomplete
         claimed = False
         try:
             with os.fdopen(fd, mode="wb") as fobj:
                 self.download_fileobj(
                     path, fobj, callback=callback, chunk_size=chunk_size
                 )
-            if overwrite:
-                if target.exists():
-                    shutil.copymode(
-                        target, temp
-                    )  # keep the permissions of what is replaced
-            else:
-                # Claim the name first: O_EXCL is atomic on every file system
-                # (a hard link is not available on some), and only a complete
-                # download gets this far, so no half-written file is ever visible.
-                os.close(os.open(target, flags, 0o666))
-                claimed = True
+            claimed = claim_file(target, flags, overwrite=overwrite)
+            copy_mode(target, temp)
             temp.replace(target)
+            claimed = False  # it is the finished file now
         except BaseException:
             temp.unlink(missing_ok=True)
             if claimed and target.exists() and target.stat().st_size == 0:
