@@ -208,7 +208,10 @@ with fs.open("Documents/old.txt", encoding="iso-8859-1") as f:
 ```
 
 `upload_fileobj` and `download_fileobj` take an open binary file object
-instead of a local path:
+instead of a local path. An upload sends what is left to read from the
+current position. A pipe, a FIFO or `/dev/stdin` has no length: it is sent
+with chunked transfer encoding, which a few servers and proxies refuse (411);
+give `size=` or write it to a file first for those:
 
 ```python
 import io

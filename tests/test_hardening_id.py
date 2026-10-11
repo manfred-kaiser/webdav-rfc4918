@@ -282,6 +282,90 @@ def test_BUG05_guard_an_exception_in_a_plain_with_discards(
     assert not (tmp_path / "nope.txt").exists()
 
 
+# ------------------------------------------------------------------ BUG-06
+def test_BUG06_fileobj_not_at_offset_zero(fs: FileSystem, tmp_path: Path) -> None:
+    buf = io.BytesIO(b"HEADER:payload-bytes")
+    buf.seek(7)
+    fs.upload_fileobj(buf, "/off.bin")
+    assert (tmp_path / "off.bin").read_bytes() == b"payload-bytes"
+
+
+def test_BUG06_real_file_at_an_offset(fs: FileSystem, tmp_path: Path) -> None:
+    src = tmp_path / "s.bin"
+    src.write_bytes(b"HEADER:payload-bytes")
+    with src.open("rb") as fobj:
+        fobj.seek(7)
+        fs.upload_fileobj(fobj, "/off2.bin")
+    assert (tmp_path / "off2.bin").read_bytes() == b"payload-bytes"
+
+
+def test_BUG06_pipe(fs: FileSystem, tmp_path: Path) -> None:
+    r, w = os.pipe()
+    os.write(w, b"from a pipe")
+    os.close(w)
+    with os.fdopen(r, "rb") as fobj:
+        fs.upload_fileobj(fobj, "/pipe.bin")
+    assert (tmp_path / "pipe.bin").read_bytes() == b"from a pipe"
+
+
+def test_BUG06_fifo(fs: FileSystem, tmp_path: Path) -> None:
+    import threading
+
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+
+    def feed() -> None:
+        with fifo.open("wb") as out:
+            out.write(b"through a fifo")
+
+    thread = threading.Thread(target=feed)
+    thread.start()
+    with fifo.open("rb") as fobj:
+        fs.upload_fileobj(fobj, "/fifo.bin")
+    thread.join()
+    assert (tmp_path / "fifo.bin").read_bytes() == b"through a fifo"
+
+
+def test_BUG06_a_pipe_is_sent_chunked() -> None:
+    with _record_server() as (url, rec):
+        r, w = os.pipe()
+        os.write(w, b"x")
+        os.close(w)
+        with os.fdopen(r, "rb") as fobj:
+            try:
+                FileSystem(retry=False).upload_fileobj(fobj, url + "/p", overwrite=True)
+            except Exception:  # the scripted server does not de-chunk  # noqa: BLE001
+                pass
+    assert rec.requests
+    assert "content-length" not in rec.requests[0].headers
+    assert rec.requests[0].headers.get("transfer-encoding") == "chunked"
+
+
+def test_BUG06_the_fsspec_front_doors(ffs: WebdavFileSystem, tmp_path: Path) -> None:
+    buf = io.BytesIO(b"HEADER:payload")
+    buf.seek(7)
+    ffs.upload_fileobj(buf, "/a.bin")
+    r, w = os.pipe()
+    os.write(w, b"piped")
+    os.close(w)
+    with os.fdopen(r, "rb") as fobj:
+        ffs.upload_fileobj(fobj, "/b.bin")
+    assert (tmp_path / "a.bin").read_bytes() == b"payload"
+    assert (tmp_path / "b.bin").read_bytes() == b"piped"
+
+
+def test_BUG06_guard_sizes(fs: FileSystem, tmp_path: Path) -> None:
+    fs.upload_fileobj(io.BytesIO(b""), "/empty")
+    fs.upload_fileobj(io.BytesIO(b"abc"), "/abc")
+    assert (tmp_path / "empty").read_bytes() == b""
+    assert (tmp_path / "abc").read_bytes() == b"abc"
+
+
+def test_BUG06_guard_a_longer_file_than_declared_still_errors(fs: FileSystem) -> None:
+    with pytest.raises(ClientError):
+        fs.upload_fileobj(io.BytesIO(b"abcdef"), "/x", size=3)
+
+
 # ------------------------------------------------------------------ BUG-11
 def test_BUG11_guard_an_unclosed_upload_file_still_uploads_and_warns(
     ffs: WebdavFileSystem, tmp_path: Path

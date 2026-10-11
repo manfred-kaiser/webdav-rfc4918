@@ -3,6 +3,7 @@
 import logging
 import os
 import shutil
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -18,25 +19,36 @@ def peek_filelike_length(stream: Any) -> int | None:
     reimplemented here stdlib-only so this library doesn't need ``httpx``
     as a dependency just for this one helper.
 
+    This is what is left to read, from the current position - a file object that is
+    not at its start has less to send than the file is long.
+
     Returns ``None`` if the length can't be determined without reading
-    (e.g. a pure generator/non-seekable stream) - callers fall back to
-    chunked transfer encoding in that case.
+    (e.g. a pure generator/non-seekable stream, or a pipe, FIFO or character
+    device such as ``/dev/stdin``, which has a ``st_size`` of 0 whatever it
+    delivers) - callers fall back to chunked transfer encoding in that case.
     """
     try:
-        # An actual file: ask the OS for its size via the file descriptor.
-        fd = stream.fileno()
-        length = os.fstat(fd).st_size
+        offset: int | None = stream.tell()
+    except (AttributeError, OSError):
+        offset = None
+    try:
+        # An actual file: ask the OS for its size via the file descriptor - but only a
+        # regular file's size says how much can be read from it.
+        status = os.fstat(stream.fileno())
+        if not stat.S_ISREG(status.st_mode):
+            return None
+        length = status.st_size
     except (AttributeError, OSError):
         # Not a real file, but maybe something seekable (e.g. io.BytesIO):
         # seek to the end to find the length, then put the position back.
+        if offset is None:
+            return None
         try:
-            offset = stream.tell()
             length = stream.seek(0, os.SEEK_END)
             stream.seek(offset)
         except (AttributeError, OSError):
             return None
-
-    return length
+    return max(length - (offset or 0), 0)
 
 
 def claim_file(target: Path, flags: int, *, overwrite: bool) -> bool:
