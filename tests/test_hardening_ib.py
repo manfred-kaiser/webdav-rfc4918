@@ -8,6 +8,8 @@ import gzip
 import io
 import socket
 import threading
+import tracemalloc
+import types
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -22,6 +24,7 @@ from tests.scripted_server import (
 )
 from webdav import FileSystem, RedirectPolicy, Session
 from webdav.exceptions import ClientError
+from webdav.fs.streams import IterStream
 from webdav.fsspec import WebdavFileSystem
 from webdav.transport import retry as retry_module
 from webdav.transport.deadline import DeadlineAdapter
@@ -207,6 +210,56 @@ def test_identity_is_no_content_encoding() -> None:
 
 
 # ---------------------------------------------------------------------------
+# the headers of a response have a size limit
+# ---------------------------------------------------------------------------
+
+
+def _with_headers(
+    count: int, size: int
+) -> "Callable[[RawServer, socket.socket, Seen], None]":
+    def handler(_server: RawServer, conn: socket.socket, _seen: Seen) -> None:
+        lines = b"".join(b"X-%d: %s\r\n" % (i, b"a" * size) for i in range(count))
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n" + lines + b"\r\nok")
+
+    return handler
+
+
+def test_headers_of_two_megabytes_are_refused() -> None:
+    with raw_server(_with_headers(30, 65_000)) as server:
+        with pytest.raises(ClientError, match="response headers are larger"):
+            Session().get(f"{server.url}/x")
+
+
+@pytest.mark.parametrize(("count", "size"), [(1, 16_000), (14, 64_000)])
+def test_large_but_reasonable_headers_go_through(count: int, size: int) -> None:
+    with raw_server(_with_headers(count, size)) as server:
+        assert Session().get(f"{server.url}/x").text == "ok"
+
+
+# ---------------------------------------------------------------------------
+# skipping forward does not buffer what is skipped
+# ---------------------------------------------------------------------------
+
+
+def test_a_forward_seek_does_not_hold_what_it_skips() -> None:
+    size = 24 * 2**20
+    data = b"\0" * size
+    with scripted_server(file_server(size, serves(data))) as (url, _rec):
+        session = Session(url)
+        with IterStream(session, f"{url}/f", chunk_size=64 * 1024) as stream:
+            tracemalloc.start()
+            try:
+                tracemalloc.reset_peak()
+                stream.seek(size - 100, 1)
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            assert stream.tell() == size - 100
+            assert len(stream.read()) == 100
+        assert peak < 6 * 2**20
+
+
+# ---------------------------------------------------------------------------
 # an address urllib3 cannot parse is an InvalidURL
 # ---------------------------------------------------------------------------
 
@@ -255,6 +308,28 @@ def test_a_held_bodyless_response_does_not_break_the_next_request(method: str) -
         ]
         assert held[-1].text == "ok"
         assert server.connections == 1  # and the connection was kept alive, not dropped
+
+
+# ---------------------------------------------------------------------------
+# the corners of IterStream
+# ---------------------------------------------------------------------------
+
+
+def _stream(url: str, session: Session) -> IterStream:
+    return IterStream(session, f"{url}/f", chunk_size=100)
+
+
+def test_seeking_and_reading_an_open_stream_still_works() -> None:
+    with scripted_server(file_server(len(_BODY), serves(_BODY))) as (url, _rec):
+        with _stream(url, Session(url)) as stream:
+            assert stream.seek(10) == 10
+            assert stream.read(5) == _BODY[10:15]
+            assert stream.seek(5, 1) == 20
+            assert stream.read(5) == _BODY[20:25]
+            assert stream.seek(-10, 2) == len(_BODY) - 10
+            assert stream.read() == _BODY[-10:]
+            assert stream.seek(3) == 3
+            assert stream.read(2) == _BODY[3:5]
 
 
 # ---------------------------------------------------------------------------

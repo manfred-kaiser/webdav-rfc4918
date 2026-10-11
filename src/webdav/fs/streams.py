@@ -340,7 +340,7 @@ class IterStream(RawIOBase):
             loc = offset
         elif whence == 1:
             if offset >= 0:
-                self.read(offset)
+                self._skip(offset)
                 return self.loc
             loc = self.loc + offset
         elif whence == 2:
@@ -363,6 +363,14 @@ class IterStream(RawIOBase):
         _, self._iterator = self._cm.__enter__()
         self.loc = loc
         return loc
+
+    def _skip(self, count: int) -> None:
+        """Read and drop ``count`` bytes (or up to the end), a piece at a time - never all of them at once."""
+        while count > 0:
+            piece = self.read1(min(count, self.chunk_size))
+            if not piece:
+                break
+            count -= len(piece)
 
     def tell(self) -> int:
         """Return the current stream position."""
