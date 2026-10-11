@@ -18,6 +18,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from tests.instance_dir import ensure_private_dir
+
 #: Confirmed working on GitHub Actions' ubuntu-latest - apt's own
 #: "nginx" + "libnginx-mod-http-dav-ext" packages, no extra repo needed.
 #: Not yet confirmed on any RPM-based distro (no equivalent package found
@@ -127,6 +129,7 @@ def write_instance(instance_dir: Path, *, clean: bool = True) -> Path:
     if profile is None or shutil.which("htpasswd") is None:
         msg = "missing: " + ", ".join(missing_prerequisites())
         raise RuntimeError(msg)
+    ensure_private_dir(instance_dir)
     dav_root = instance_dir / "dav-root"
     if clean:
         shutil.rmtree(dav_root, ignore_errors=True)

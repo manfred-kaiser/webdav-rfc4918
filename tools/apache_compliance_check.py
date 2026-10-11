@@ -26,8 +26,10 @@ anything itself.
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -40,8 +42,10 @@ def main() -> int:
     parser.add_argument(
         "--instance-dir",
         type=Path,
-        default=Path("/tmp/apache-webdav-test"),  # noqa: S108
-        help="Where to put the throwaway Apache instance (default: %(default)s)",
+        default=None,
+        help="Where to put the throwaway Apache instance (default: a new private "
+        "directory under the system temp directory; an existing one must be "
+        "yours and not writable by others)",
     )
     parser.add_argument(
         "--keep-running",
@@ -76,9 +80,10 @@ def main() -> int:
         )
         return 1
 
-    conf_file = apache_instance.write_instance(
-        args.instance_dir, clean=not args.no_clean
+    instance_dir = args.instance_dir or Path(
+        tempfile.mkdtemp(prefix="webdav-rfc4918-apache-test-")
     )
+    conf_file = apache_instance.write_instance(instance_dir, clean=not args.no_clean)
     apache_instance.start(conf_file)
     try:
         env = {
@@ -109,6 +114,8 @@ def main() -> int:
             )
         else:
             apache_instance.stop(conf_file)
+            if not args.instance_dir:  # the one made above
+                shutil.rmtree(instance_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

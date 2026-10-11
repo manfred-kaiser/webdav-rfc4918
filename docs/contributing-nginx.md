@@ -48,14 +48,21 @@ For more control over the instance:
 ```console
 $ python tools/nginx_compliance_check.py
 $ python tools/nginx_compliance_check.py --keep-running   # inspect/retry by hand afterwards
-$ python tools/nginx_compliance_check.py --no-clean       # keep dav-root from the previous run
+$ python tools/nginx_compliance_check.py --instance-dir ~/nginx-test --no-clean   # keep dav-root of that directory
 $ python tools/nginx_compliance_check.py -- -k lock -v    # extra args go straight to pytest
-$ python tools/nginx_compliance_check.py --instance-dir /tmp/my-instance
+$ python tools/nginx_compliance_check.py --instance-dir ~/nginx-test
 ```
 
+Without `--instance-dir` the script makes a fresh private directory
+(`mkdtemp`, mode 0700) under the system temp directory and removes it afterwards.
+A directory you name must be yours and not writable by anyone else, and not a
+symlink; otherwise the script refuses it. A predictable name in a shared
+`/tmp` could be prepared by another local user, who could then overwrite
+your files through it or swap the server's configuration.
+
 It shares `tests/nginx_instance.py` with the fixture, names any missing
-package, writes the instance under `/tmp/nginx-webdav-test`, and stops nginx
-also on failure or Ctrl-C.
+package, writes the instance into a new private directory (see above), and stops
+nginx also on failure or Ctrl-C.
 
 ## By hand
 
@@ -63,7 +70,8 @@ This is what `tests/nginx_instance.py` automates.
 
 ```console
 $ sudo apt-get install nginx libnginx-mod-http-dav-ext apache2-utils
-$ mkdir -p /tmp/nginx-webdav-test/{dav-root,client_body}
+$ mkdir -m 700 /tmp/nginx-webdav-test   # fails if it exists: do not reuse a name someone else could have made
+$ mkdir /tmp/nginx-webdav-test/{dav-root,client_body}
 $ htpasswd -bc /tmp/nginx-webdav-test/htpasswd testuser testpass123
 ```
 

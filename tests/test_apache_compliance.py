@@ -25,6 +25,7 @@ import io
 import logging
 import os
 import re
+import shutil
 import socket
 import threading
 import time
@@ -32,7 +33,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from tempfile import gettempdir
+from tempfile import mkdtemp
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
 from urllib.parse import urlsplit
 from xml.etree.ElementTree import Element
@@ -103,7 +104,8 @@ def _apache_session() -> Iterator[None]:
         )
         yield
         return
-    instance_dir = Path(gettempdir()) / "webdav-rfc4918-apache-test"
+    # A fresh directory of our own (mode 0700), not a name in /tmp another user could prepare.
+    instance_dir = Path(mkdtemp(prefix="webdav-rfc4918-apache-test-"))
     conf_file = apache_instance.write_instance(instance_dir)
     apache_instance.start(conf_file)
     _Apache.url = f"http://{apache_instance.HOST}:{apache_instance.PORT}"
@@ -111,6 +113,7 @@ def _apache_session() -> Iterator[None]:
         yield
     finally:
         apache_instance.stop(conf_file)
+        shutil.rmtree(instance_dir, ignore_errors=True)
 
 
 @pytest.fixture

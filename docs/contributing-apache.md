@@ -76,10 +76,17 @@ For more control over the instance:
 ```console
 $ python tools/apache_compliance_check.py
 $ python tools/apache_compliance_check.py --keep-running   # inspect/retry by hand afterwards
-$ python tools/apache_compliance_check.py --no-clean       # keep dav-root from the previous run
+$ python tools/apache_compliance_check.py --instance-dir ~/apache-test --no-clean   # keep dav-root of that directory
 $ python tools/apache_compliance_check.py -- -k lock -v    # extra args go straight to pytest
-$ python tools/apache_compliance_check.py --instance-dir /tmp/my-instance
+$ python tools/apache_compliance_check.py --instance-dir ~/apache-test
 ```
+
+Without `--instance-dir` the script makes a fresh private directory
+(`mkdtemp`, mode 0700) under the system temp directory and removes it afterwards.
+A directory you name must be yours and not writable by anyone else, and not a
+symlink; otherwise the script refuses it. A predictable name in a shared
+`/tmp` could be prepared by another local user, who could then overwrite
+your files through it or swap the server's configuration.
 
 It shares `tests/apache_instance.py` with the fixture, names any missing
 package, and stops Apache also on failure or Ctrl-C. The exit code is
@@ -97,7 +104,8 @@ modules ship in the base `apache2` package.
 
 ```console
 $ sudo zypper install apache2 apache2-utils
-$ mkdir -p /tmp/apache-webdav-test/{logs,dav-root,locks}
+$ mkdir -m 700 /tmp/apache-webdav-test   # fails if it exists: do not reuse a name someone else could have made
+$ mkdir /tmp/apache-webdav-test/{logs,dav-root,locks}
 $ htpasswd -bc /tmp/apache-webdav-test/htpasswd testuser testpass123
 ```
 
@@ -165,8 +173,8 @@ holds for both. A clean start removes the previous run's lock database.
 
 ## Troubleshooting
 
-The fixture's instance is `$TMPDIR/webdav-rfc4918-apache-test` (usually
-`/tmp/...`); the script and the by-hand setup use `/tmp/apache-webdav-test`.
+The fixture's and the script's instance is a new `$TMPDIR/webdav-rfc4918-apache-test-<random>`
+(usually `/tmp/...`); the by-hand setup uses `/tmp/apache-webdav-test`.
 
 - **"Apache did not come up within 5s"**: see `logs/error.log` in the
   instance directory. Usual causes: a layout that matches no profile in

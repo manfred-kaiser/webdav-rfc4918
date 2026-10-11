@@ -28,11 +28,12 @@ a throwaway instance is started and stopped automatically.
 
 import io
 import os
+import shutil
 import threading
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from tempfile import gettempdir
+from tempfile import mkdtemp
 
 import pytest
 
@@ -86,7 +87,8 @@ def _nginx_session() -> Iterator[None]:
         )
         yield
         return
-    instance_dir = Path(gettempdir()) / "webdav-rfc4918-nginx-test"
+    # A fresh directory of our own (mode 0700), not a name in /tmp another user could prepare.
+    instance_dir = Path(mkdtemp(prefix="webdav-rfc4918-nginx-test-"))
     conf_file = nginx_instance.write_instance(instance_dir)
     nginx_instance.start(conf_file)
     _Nginx.url = f"http://{nginx_instance.HOST}:{nginx_instance.PORT}"
@@ -94,6 +96,7 @@ def _nginx_session() -> Iterator[None]:
         yield
     finally:
         nginx_instance.stop(conf_file)
+        shutil.rmtree(instance_dir, ignore_errors=True)
 
 
 @pytest.fixture

@@ -17,6 +17,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from tests.instance_dir import ensure_private_dir
+
 #: (.so filename, Apache's own LoadModule directive name for it).
 REQUIRED_MODULES = (
     ("mod_mpm_prefork.so", "mpm_prefork_module"),
@@ -226,6 +228,7 @@ def write_instance(
     if profile is None or htpasswd_bin is None:
         msg = "missing: " + ", ".join(missing_prerequisites())
         raise RuntimeError(msg)
+    ensure_private_dir(instance_dir)
     dav_root = instance_dir / "dav-root"
     if clean:
         # The lock database too: a run that damaged it (Berkeley DB can be, by many writers at
