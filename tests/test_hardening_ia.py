@@ -582,6 +582,22 @@ def test_proto05_the_public_constructor_takes_any_root_as_before() -> None:
     assert MultiStatusResponse(b"<anything/>").entries == []
 
 
+# -- PROTO-06: an If header with every token ---------------------------------
+
+
+def test_proto06_two_locks_on_one_resource_both_go_into_the_if_header() -> None:
+    registry = LockRegistry()
+    registry.add("http://h/f", "urn:a", "0")
+    registry.add("http://h/f", "urn:b", "0")
+    assert registry.if_header("http://h/f") == "(<urn:a>) (<urn:b>)"
+
+
+def test_proto06_one_lock_keeps_its_header() -> None:
+    registry = LockRegistry()
+    registry.add("http://h/f", "urn:a", "0")
+    assert registry.if_header("http://h/f") == "(<urn:a>)"
+
+
 # -- PROTO-07: a 3xx that carried nothing out --------------------------------
 
 

@@ -14,9 +14,9 @@ from xml.etree.ElementTree import Element
 
 from webdav.dav.conditional import (
     Condition,
+    build_if_header,
     build_if_header_single,
     merge_if_headers,
-    token_condition,
 )
 from webdav.dav.urls import URL, path_key
 from webdav.dav.xml_utils import (
@@ -521,7 +521,9 @@ class LockRegistry:
             and not tuple(include_below)
             and all(self._key(h.url) == self._key(urls[0]) for h in held_locks)
         ):
-            return token_condition(held_locks[0].token)
+            # Every lock this session holds on the resource: a request that needs
+            # one of several shared locks is satisfied by any (sec. 10.4: lists are alternatives).
+            return build_if_header([[Condition(token=h.token)] for h in held_locks])
         return merge_if_headers(
             *(
                 build_if_header_single([Condition(token=h.token)], resource=h.url)
