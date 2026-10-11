@@ -1110,9 +1110,10 @@ class Session:
         """Prepare ``request``; with no credentials configured, none are looked up.
 
         ``requests`` would otherwise search ``~/.netrc`` for the host and
-        authenticate with whatever it finds (see :data:`~webdav.transport.guards.NO_AUTH`).
+        authenticate with whatever it finds (see :data:`~webdav.transport.guards.NO_AUTH`) -
+        also when ``auth`` is given as ``False``, ``()`` or ``""``.
         """
-        if request.auth is None and self.auth is None:
+        if not request.auth and not self.auth:
             request.auth = NO_AUTH
         return self._transport.prepare_request(request)
 

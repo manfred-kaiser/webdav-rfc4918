@@ -366,3 +366,33 @@ def test_a_failed_unlock_logs_no_query(caplog: pytest.LogCaptureFixture) -> None
         )
     assert caplog.records
     assert _SIGNATURE not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# No netrc behind an auth that is falsy
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("falsy", [False, (), ""])
+def test_a_falsy_auth_does_not_read_netrc(
+    falsy: object, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    netrc = tmp_path / "netrc"
+    netrc.write_text("machine 127.0.0.1 login netrcuser password netrcpass\n")
+    netrc.chmod(0o600)
+    monkeypatch.setenv("NETRC", str(netrc))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    with scripted_server(always(OK)) as (url, rec):
+        Session(retry=False).get(f"{url}/a", auth=falsy)
+        Session(retry=False).propfind(f"{url}/a", depth=0, auth=falsy)
+        Session(auth=falsy, retry=False).get(f"{url}/a")  # type: ignore[arg-type]
+    assert len(rec.requests) == 3
+    assert all("authorization" not in r.headers for r in rec.requests)
+
+
+def test_a_per_call_false_auth_still_beats_the_sessions() -> None:
+    with scripted_server(always(OK)) as (url, rec):
+        Session(auth=("u", "p"), retry=False).get(f"{url}/a", auth=False)
+        Session(auth=("u", "p"), retry=False).get(f"{url}/a")
+    assert "authorization" not in rec.requests[0].headers
+    assert rec.requests[1].headers["authorization"].startswith("Basic ")
