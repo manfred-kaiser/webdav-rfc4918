@@ -172,6 +172,11 @@ module. It can also be used directly for a custom conditional request.
 ```{eval-rst}
 .. autoclass:: webdav.fsspec.WebdavFileSystem
    :members:
+
+The methods of fsspec's own base class that this filesystem guards - a ``walk`` has a
+bound:
+
+.. automethod:: webdav._fsspec_guards.GuardedFileSystem.walk
 ```
 
 ## Exceptions

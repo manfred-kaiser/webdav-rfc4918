@@ -13,6 +13,7 @@ from tests.credentials import AUTH
 from tests.scripted_server import Seen, scripted_server
 from webdav import FileSystem
 from webdav.exceptions import (
+    ClientError,
     ForbiddenError,
     WebDAVError,
 )

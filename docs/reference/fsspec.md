@@ -105,7 +105,8 @@ counterpart does, under fsspec's name. The rest of fsspec's
 | fsspec method | `FileSystem` counterpart |
 |---|---|
 | `ls(path, detail=True)`, `info(path)` | `ls`, `info`, with a `dict` instead of a `Resource` |
-| `exists`, `isdir`, `isfile`, `walk` | same name |
+| `exists`, `isdir`, `isfile` | same name |
+| `walk` | `walk`, with fsspec's arguments (`onerror` is fsspec's `on_error`) |
 | `find`, `glob`, `du` | none (all files below, pattern match, total size) |
 | `open(path, mode="rb")` | `open`, whose default mode is `"r"` |
 | `cat_file`, `cat`, `head`, `tail`, `read_bytes`, `read_text`, `pipe_file`, `pipe`, `write_text`, `touch` | none |
@@ -218,6 +219,11 @@ for example `fs.get("/Photos", "photos", recursive=True)`.
 - `rm(path, recursive=True)` is one `DELETE` for the whole tree: `DELETE`
   on a collection removes everything below it on the server, there is no
   way to ask for less.
+- `walk`, and so `find`, `du`, `glob("**")`, `expand_path` and
+  `get(recursive=True)`, give up with a `ClientError` in a tree deeper than
+  256 levels or with more than 100 000 folders: a server that invents a new
+  folder in every folder never ends. Raise the limits (or pass `None`) in the
+  constructor: `WebdavFileSystem(..., walk_max_depth=1000, walk_max_dirs=None)`.
 
 ## Parallel writers
 
