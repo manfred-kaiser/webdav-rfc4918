@@ -19,3 +19,27 @@ def parse_uint(value: "str | None") -> "int | None":
     if not (text.isascii() and text.isdigit()) or len(text) > MAX_UINT_DIGITS:
         return None
     return int(text)
+
+
+def parse_content_range(value: "str | None") -> "tuple[int, int, int | None] | None":
+    """Parse ``bytes first-last/total`` into ``(first, last, total)``, or ``None`` if it is not one.
+
+    ``total`` is ``None`` for ``*`` (not known). Valid is what RFC 9110
+    sec. 14.4 says: ``first <= last``, and ``last < total`` where the total
+    is given. Nothing is accepted that merely starts like it (a unit other
+    than ``bytes``, a missing part, signs, spaces inside a number).
+    """
+    unit, _, rest = (value or "").strip().partition(" ")
+    span, slash, total_text = rest.partition("/")
+    first_text, dash, last_text = span.partition("-")
+    if unit != "bytes" or not slash or not dash:
+        return None
+    first, last = parse_uint(first_text), parse_uint(last_text)
+    total = None if total_text == "*" else parse_uint(total_text)
+    if first is None or last is None or first > last:
+        return None
+    if total_text != "*" and (total is None or last >= total):
+        return None
+    if any(part != part.strip() for part in (first_text, last_text, total_text)):
+        return None
+    return first, last, total

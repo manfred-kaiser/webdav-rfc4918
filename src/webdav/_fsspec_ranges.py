@@ -15,6 +15,7 @@ import requests.exceptions
 from webdav.exceptions import ClientError, raise_for_status
 from webdav.methods import Method
 from webdav.transport.body import reject_content_encoding
+from webdav.transport.parse_utils import parse_content_range
 
 if TYPE_CHECKING:
     from requests import Response as HTTPResponse
@@ -84,8 +85,11 @@ def _validate(
     """
     if response.status_code == HTTPStatus.PARTIAL_CONTENT:
         content_range = response.headers.get("Content-Range", "")
-        if not content_range.startswith(f"bytes {start}-"):
-            msg = f"expected Content-Range starting at byte {start}, got {content_range!r}"
+        parsed = parse_content_range(content_range)
+        if parsed is None or parsed[0] != start or parsed[1] > end - 1:
+            msg = (
+                f"expected Content-Range bytes {start}-{end - 1}, got {content_range!r}"
+            )
             raise ClientError(msg)
     elif not (whole and response.status_code == HTTPStatus.OK):
         msg = (

@@ -5,6 +5,7 @@ has always been right and must stay so.
 """
 
 import gzip
+import io
 import socket
 import threading
 from collections.abc import Callable, Iterator
@@ -254,3 +255,180 @@ def test_a_held_bodyless_response_does_not_break_the_next_request(method: str) -
         ]
         assert held[-1].text == "ok"
         assert server.connections == 1  # and the connection was kept alive, not dropped
+
+
+# ---------------------------------------------------------------------------
+# Content-Range is checked as a whole
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("bytes 0-9/20", (0, 9, 20)),
+        ("bytes 10-19/*", (10, 19, None)),
+        ("bytes 5-5/6", (5, 5, 6)),
+        ("bytes 0-9/5", None),  # last beyond the total
+        ("bytes 10-99999/1", None),
+        ("bytes 10-5/20", None),
+        ("bytes 10-/20", None),
+        ("bytes -5/20", None),
+        ("bytes 10-19", None),
+        ("bytes */20", None),
+        ("items 0-9/20", None),
+        ("bytes  0-9/20", None),
+        ("bytes 0 -9/20", None),
+        ("bytes +0-9/20", None),
+        ("bytes 0-9/2x", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_content_range_is_parsed_whole(
+    value: "str | None", expected: "tuple[int, int, int | None] | None"
+) -> None:
+    from webdav.transport.parse_utils import parse_content_range  # noqa: PLC0415
+
+    assert parse_content_range(value) == expected
+
+
+def _resumed_with(content_range: str) -> "Callable[[Seen], Reply]":
+    """A first answer cut off after 10 of 20 bytes, and a resumed one with ``content_range``."""
+    data = bytes(range(20))
+
+    def on_get(seen: Seen) -> Reply:
+        if "range" not in seen.headers:
+            headers = {
+                "ETag": '"v"',
+                "Accept-Ranges": "bytes",
+                NO_CONTENT_LENGTH: "1",
+                "Content-Length": "20",
+            }
+            return 200, headers, data[:10]
+        return 206, {"ETag": '"v"', "Content-Range": content_range}, data[10:]
+
+    return file_server(20, on_get)
+
+
+@pytest.mark.parametrize(
+    "content_range",
+    ["bytes 10-99999/1", "bytes 10-19/5", "bytes 10-5/20", "bytes 10-/20"],
+)
+def test_a_resumed_response_with_a_wrong_content_range_is_refused(
+    content_range: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("webdav.fs.streams.RESUME_BACKOFF_SECONDS", 0.01)
+    with scripted_server(_resumed_with(content_range)) as (url, _rec):
+        with pytest.raises(ClientError, match="Content-Range"):
+            FileSystem(url).download_fileobj("/f", io.BytesIO())
+
+
+@pytest.mark.parametrize("content_range", ["bytes 10-19/20", "bytes 10-19/*"])
+def test_a_resumed_response_with_a_right_content_range_is_taken(
+    content_range: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("webdav.fs.streams.RESUME_BACKOFF_SECONDS", 0.01)
+    with scripted_server(_resumed_with(content_range)) as (url, _rec):
+        sink = Sink()
+        FileSystem(url).download_fileobj("/f", sink)  # type: ignore[arg-type]
+        assert sink.data == bytes(range(20))
+
+
+@pytest.mark.parametrize(
+    "content_range",
+    ["bytes 0-9/5", "bytes 0-9/20", "bytes 0-4/x", "bytes 1-4/20", "0-4/20"],
+)
+def test_a_block_with_a_wrong_content_range_is_refused(content_range: str) -> None:
+    from webdav._fsspec_ranges import fetch_range  # noqa: PLC0415
+
+    reply = (206, {"Content-Range": content_range}, b"abcde")
+    with scripted_server(file_server(20, lambda _s: reply)) as (url, _rec):
+        with pytest.raises(ClientError, match="Content-Range"):
+            fetch_range(Session(url, retry=False), "/f", 0, 5, total=20)
+
+
+def test_a_block_with_the_right_content_range_is_taken() -> None:
+    from webdav._fsspec_ranges import fetch_range  # noqa: PLC0415
+
+    reply = (206, {"Content-Range": "bytes 0-4/20"}, b"abcde")
+    with scripted_server(file_server(20, lambda _s: reply)) as (url, _rec):
+        assert (
+            fetch_range(Session(url, retry=False), "/f", 0, 5, total=20).data
+            == b"abcde"
+        )
+
+
+# ---------------------------------------------------------------------------
+# a certificate that fails verification is not tried again
+# ---------------------------------------------------------------------------
+
+
+def _verification_error() -> requests.exceptions.SSLError:
+    cause = ssl.SSLCertVerificationError(
+        1, "certificate verify failed: self-signed certificate"
+    )
+    low = urllib3.exceptions.SSLError(cause)
+    pool = urllib3.exceptions.MaxRetryError(None, "https://x/", low)  # type: ignore[arg-type]
+    return requests.exceptions.SSLError(pool)
+
+
+def _handshake_cut_off() -> requests.exceptions.SSLError:
+    cause = ssl.SSLEOFError(8, "EOF occurred in violation of protocol")
+    return requests.exceptions.SSLError(urllib3.exceptions.SSLError(cause))
+
+
+@pytest.mark.parametrize(
+    ("error", "calls"),
+    [(_verification_error, 1), (_handshake_cut_off, 3)],
+)
+def test_only_a_failed_certificate_check_is_not_retried(
+    error: "Callable[[], Exception]", calls: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        retry_module, "time", types.SimpleNamespace(sleep=lambda _s: None)
+    )
+    count = 0
+
+    def attempt() -> None:
+        nonlocal count
+        count += 1
+        raise error()
+
+    with pytest.raises(requests.exceptions.SSLError):
+        retry_module.retry(enabled=True)(attempt)
+    assert count == calls
+
+
+def test_an_untrusted_server_certificate_is_one_handshake_not_three(
+    tmp_path: Path,
+) -> None:
+    from tests.certificates import Certificates  # noqa: PLC0415
+
+    certs = Certificates(tmp_path)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(str(certs.server_cert), str(certs.server_key))
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(10)
+    accepted = 0
+
+    def serve() -> None:
+        nonlocal accepted
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            accepted += 1
+            try:
+                context.wrap_socket(conn, server_side=True).close()
+            except OSError:
+                conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    try:
+        with pytest.raises(requests.exceptions.SSLError):
+            Session(f"https://127.0.0.1:{listener.getsockname()[1]}").get("/x")
+    finally:
+        listener.close()
+    assert accepted == 1

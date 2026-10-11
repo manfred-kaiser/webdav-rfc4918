@@ -20,7 +20,7 @@ import requests.exceptions
 from webdav.exceptions import ClientError, raise_for_status
 from webdav.methods import Method
 from webdav.transport.body import iter_body, reject_content_encoding
-from webdav.transport.parse_utils import parse_uint
+from webdav.transport.parse_utils import parse_content_range, parse_uint
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -97,7 +97,8 @@ def _validate_resumed_response(
         raise ClientError(msg)
 
     content_range = response.headers.get("Content-Range", "")
-    if not content_range.startswith(f"bytes {pos}-"):
+    parsed = parse_content_range(content_range)
+    if parsed is None or parsed[0] != pos:
         msg = f"expected Content-Range starting at byte {pos}, got {content_range!r}"
         raise ClientError(msg)
 
