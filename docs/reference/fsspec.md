@@ -53,6 +53,13 @@ name the same server. The scheme does not have to match: `webdav://`
 against an `https://` `base_url` still uses HTTPS. Another host or port
 raises `ValueError` and is never followed like a redirect.
 
+The scheme is not free in one direction: `webdavs://host/...` says TLS, so a
+plain `http://` `base_url` is refused with a `ValueError` unless it is a
+loopback address (a test or development server, or one behind a
+TLS-terminating proxy on the same machine). Use `webdav://` or an `https://`
+`base_url`. `webdavs:///path` has no host, fsspec then does not tell the
+filesystem which scheme was used, and nothing is checked.
+
 ```python
 import fsspec
 

@@ -6,6 +6,7 @@ backend takes it out in ``_get_kwargs_from_urls`` and leaves the path in ``_stri
 
 from urllib.parse import urlsplit
 
+from webdav.transport.guards import _is_loopback
 from webdav.url_safety import redact_url
 
 #: The two schemes the fsspec filesystem accepts, and the transport each implies
@@ -111,6 +112,19 @@ def server_url(
         msg = (
             f"the URL names {host}{f':{port}' if port else ''}, "
             f"but base_url is {redact_url(base_url)}: a filesystem is bound to one server"
+        )
+        raise ValueError(msg)
+    if (
+        transport == "https"
+        and given.scheme == "http"
+        and not _is_loopback(given.hostname or "")
+    ):
+        # ``webdavs://`` says TLS. Not for a loopback server (a test or development server,
+        # or one behind a TLS-terminating proxy on the same machine), where the clear text
+        # never leaves the host; ``webdavs:///path`` without a host never gets here.
+        msg = (
+            f"a webdavs:// URL names TLS, but base_url {redact_url(base_url)} is plain http, "
+            "so credentials would go out in clear text: use webdav:// for http, or an https base_url"
         )
         raise ValueError(msg)
     return base_url

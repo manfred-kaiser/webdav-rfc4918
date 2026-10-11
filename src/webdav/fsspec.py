@@ -41,8 +41,9 @@ gives fsspec the ``host``/``port``/``transport`` (``_get_kwargs_from_urls``), an
 not part of the path. ``webdavs`` is WebDAV over TLS, ``webdav`` plain HTTP - like
 ``ftps``/``ftp`` - so without a ``base_url`` that is ``https://host`` or ``http://host``
 respectively; with one, the URL has to name the same server (its own scheme does not have
-to match - a ``webdav://`` URL against an ``https://`` ``base_url`` is fine). Credentials in
-a URL are refused.
+to match - a ``webdav://`` URL against an ``https://`` ``base_url`` is fine; a ``webdavs://``
+one against a plain ``http://`` ``base_url`` is refused, unless that is a loopback address).
+Credentials in a URL are refused.
 """
 
 import errno

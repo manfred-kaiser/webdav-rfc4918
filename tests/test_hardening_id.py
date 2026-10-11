@@ -7,6 +7,7 @@ One group per finding (``FS-01``, ``BUG-05``, ...). A ``test_<ID>_...`` test fai
 from collections.abc import Iterator
 from typing import Any
 
+import fsspec
 import pytest
 
 from tests.credentials import AUTH
@@ -206,3 +207,38 @@ def test_EXC06_guard_ordinary_authorities(
     from webdav._webdavs_url import host_and_port
 
     assert host_and_port(authority) == expected
+
+
+# ------------------------------------------------------------------ FS-06
+def test_FS06_webdavs_url_against_a_plain_http_base_url_is_refused() -> None:
+    with pytest.raises(ValueError, match="webdav://"):
+        WebdavFileSystem(
+            base_url="http://files.example/dav", host="files.example", transport="https"
+        )
+
+
+def test_FS06_the_same_through_fsspec() -> None:
+    with pytest.raises(ValueError, match="plain http"):
+        fsspec.core.url_to_fs(
+            "webdavs://files.example/d", base_url="http://files.example/dav"
+        )
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
+def test_FS06_guard_loopback_stays_possible(host: str) -> None:
+    name = f"[{host}]" if ":" in host else host
+    WebdavFileSystem(
+        base_url=f"http://{name}:8080/dav", host=host, transport="https"
+    ).filesystem.close()
+
+
+def test_FS06_guard_other_combinations() -> None:
+    WebdavFileSystem(
+        base_url="https://files.example/dav", host="files.example", transport="https"
+    ).filesystem.close()
+    WebdavFileSystem(
+        base_url="http://files.example/dav", host="files.example", transport="http"
+    ).filesystem.close()
+    WebdavFileSystem(
+        base_url="http://files.example/dav"
+    ).filesystem.close()  # no URL host: nothing to compare
