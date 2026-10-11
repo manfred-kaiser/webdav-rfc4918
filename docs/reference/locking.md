@@ -108,7 +108,10 @@ than the time it granted: WsgiDAV answers a request for 300 seconds with
 `Second-299`. Servers also cap the timeout. WsgiDAV grants at most four
 weeks, also when asked for `Infinite`. If a server does grant `Infinite`,
 `active_lock.timeout` is `None` and the lock needs no refresh, so the
-arithmetic above does not apply.
+arithmetic above does not apply. `None` also stands for a `Timeout` the
+library cannot read (`Second-99999999999999999999`, `garbage`): then
+`active_lock.timeout_raw` holds the text, and the lock is *not* known to last
+forever.
 
 `refresh_lock()` is a method of [`FileSystem`](api.md#filesystem).
 

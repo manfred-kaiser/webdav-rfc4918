@@ -200,6 +200,11 @@ class ActiveLock:
     owner: str | None
     timeout: "int | None"
     lock_root: str | None
+    #: The ``Timeout`` text the server sent when it is neither ``Infinite`` nor a
+    #: readable ``Second-N`` (too large, negative, garbage); ``None`` otherwise.
+    #: ``timeout`` is ``None`` for that text as well as for ``Infinite``: a lock
+    #: with a ``timeout_raw`` is *not* known to last forever.
+    timeout_raw: "str | None" = None
 
     @classmethod
     def from_element(
@@ -237,6 +242,13 @@ class ActiveLock:
 
         timeout_text = element.findtext(dav("timeout")) or timeout_header
         timeout = parse_timeout(timeout_text)
+        timeout_raw = None
+        if (
+            timeout is None
+            and timeout_text
+            and timeout_text.split(",")[0].strip() != "Infinite"
+        ):
+            timeout_raw = timeout_text.strip()[:64]
 
         return cls(
             token=token,
@@ -245,6 +257,7 @@ class ActiveLock:
             owner=owner,
             timeout=timeout,
             lock_root=lock_root,
+            timeout_raw=timeout_raw,
         )
 
 

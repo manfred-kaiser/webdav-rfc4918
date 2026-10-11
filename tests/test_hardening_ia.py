@@ -520,6 +520,41 @@ def test_exc02_an_error_crosses_a_process_pool() -> None:
             pool.submit(_raise_not_found).result(timeout=60)
 
 
+# -- PROTO-02: a timeout nobody could read -----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "timeout", "raw"),
+    [
+        ("Infinite", None, None),
+        ("Second-600", 600, None),
+        ("Second-1, Infinite", 1, None),
+        ("Second-99999999999999999999", None, "Second-99999999999999999999"),
+        ("garbage", None, "garbage"),
+        ("Second--5", None, "Second--5"),
+        ("Second-1000000000000000000", None, "Second-1000000000000000000"),
+    ],
+)
+def test_proto02_timeout_raw_tells_infinite_from_unreadable(
+    text: str, timeout: "int | None", raw: "str | None"
+) -> None:
+    body = f"""<d:activelock {DAV}><d:locktoken><d:href>urn:a</d:href></d:locktoken>
+    <d:timeout>{text}</d:timeout></d:activelock>"""
+    from xml.etree.ElementTree import fromstring
+
+    lock = ActiveLock.from_element(fromstring(body))
+    assert lock.timeout == timeout
+    assert lock.timeout_raw == raw
+
+
+def test_proto02_an_unreadable_timeout_is_never_an_error() -> None:
+    body = f"""<d:activelock {DAV}><d:locktoken><d:href>urn:a</d:href></d:locktoken>
+    <d:timeout>garbage</d:timeout></d:activelock>"""
+    from xml.etree.ElementTree import fromstring
+
+    assert ActiveLock.from_element(fromstring(body)).token == "urn:a"
+
+
 # -- PROTO-05: the root element of a multistatus -------------------------------
 
 
