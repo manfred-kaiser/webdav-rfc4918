@@ -42,7 +42,7 @@ from typing import (
     TypedDict,
     cast,
 )
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
 import requests
 import requests.adapters
@@ -1416,17 +1416,7 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
             hops += 1
             seen.add(target)
             if same_origin and not left_origin:
-                # ``params`` were already merged into the original URL; the
-                # Location is complete, and must not get them appended again.
-                # The lock header is worked out again for *this* URL.
-                hop_kwargs = (
-                    kwargs_for(target)
-                    if kwargs_for is not None
-                    else {k: v for k, v in kwargs.items() if k != "params"}
-                )
-                response = self._dispatch(
-                    method, target, allow_redirects=False, **hop_kwargs
-                )
+                response = self._dispatch_hop(method, target, kwargs, kwargs_for)
             else:
                 if same_origin:
                     _LOGGER.info(
@@ -1438,6 +1428,45 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
                 response = self._send_stripped(method, target, kwargs)
             response.history = [*previous.history, previous]
         return response
+
+    def _dispatch_hop(
+        self,
+        method: str,
+        target: str,
+        kwargs: dict[str, Any],
+        kwargs_for: "Callable[[str], dict[str, Any]] | None",
+    ) -> Response:
+        """Send the next hop of a chain that is still on the origin it started at - with everything that belongs to the session.
+
+        The ``params`` of the call were already merged into the original URL;
+        the ``Location`` is complete, and must not get them appended again -
+        nor the session's, for a key it already has. The lock header is worked
+        out again for *this* URL.
+        """
+        hop_kwargs = (
+            kwargs_for(target)
+            if kwargs_for is not None
+            else {k: v for k, v in kwargs.items() if k != "params"}
+        )
+        if hop_params := self._params_missing_from(target):
+            hop_kwargs["params"] = hop_params
+        return self._dispatch(method, target, allow_redirects=False, **hop_kwargs)
+
+    def _params_missing_from(self, target: str) -> "dict[str, None]":
+        """The session ``params`` a redirect's ``Location`` already carries, as ``{key: None}`` - which ``requests`` reads as "leave that one out".
+
+        A session ``params`` (``session.params = {"token": ...}``) is added to
+        every request, including the one a redirect leads to; but a
+        ``Location`` that already has the key (``/dir/?token=...``) would end
+        up with it twice. A key the ``Location`` lacks is still added.
+        """
+        session_params = self.params
+        if not session_params or not hasattr(session_params, "keys"):
+            return {}
+        present = {
+            key for key, _ in parse_qsl(urlsplit(target).query, keep_blank_values=True)
+        }
+        return {key: None for key in session_params if str(key) in present}
 
     def _send_stripped(self, method: str, url: str, kwargs: dict[str, Any]) -> Response:
         """Send one request to another origin, carrying nothing that is ours.

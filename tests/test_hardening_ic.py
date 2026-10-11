@@ -1091,3 +1091,90 @@ def test_a_failing_hook_of_the_callers_is_not_turned_into_a_client_error() -> No
     ) as (url, _rec):
         with pytest.raises(KeyError):
             Session(retry=False).get(f"{url}/x", hooks={"response": boom})
+
+
+# ---------------------------------------------------------------------------
+# write_redirects="same-path"
+# ---------------------------------------------------------------------------
+
+
+def _write_redirect(location: str) -> Any:
+    def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
+        return redirect(307, location) if seen.path == "/a" else OK
+
+    return respond
+
+
+@pytest.mark.parametrize("method", ["put", "delete"])
+def test_a_write_redirect_to_another_path_is_followed_by_default(method: str) -> None:
+    with scripted_server(_write_redirect("/elsewhere")) as (url, rec):
+        response = getattr(Session(retry=False), method)(f"{url}/a")
+    assert response.status_code == 204
+    assert rec.to("/elsewhere")
+
+
+@pytest.mark.parametrize("method", ["put", "delete"])
+def test_same_path_refuses_a_write_redirect_to_another_path(method: str) -> None:
+    with scripted_server(_write_redirect("/elsewhere")) as (url, rec):
+        response = getattr(Session(retry=False, write_redirects="same-path"), method)(
+            f"{url}/a"
+        )
+    assert response.status_code == 307
+    assert "write_redirects" in (response.redirect_refusal or "")
+    assert rec.to("/elsewhere") == []
+
+
+def test_same_path_still_follows_a_trailing_slash_and_leaves_reads_alone() -> None:
+    session = Session(retry=False, write_redirects="same-path")
+    with scripted_server(_write_redirect("/a/")) as (url, rec):
+        assert session.put(f"{url}/a", data=b"x").status_code == 204
+        assert rec.to("/a/")
+    with scripted_server(_write_redirect("/elsewhere")) as (url, rec):
+        assert session.get(f"{url}/a").status_code == 204
+        assert session.propfind(f"{url}/a", depth=0).status_code == 204
+
+
+def test_a_pickle_of_the_previous_release_follows_write_redirects() -> None:
+    session = pickle.loads(base64.b64decode("".join(old.PLAIN)))
+    assert session.write_redirects == "follow"
+
+
+def test_write_redirects_is_validated() -> None:
+    with pytest.raises(ValueError, match="write_redirects"):
+        Session(write_redirects="never")
+
+
+# ---------------------------------------------------------------------------
+# Session params on a redirect hop
+# ---------------------------------------------------------------------------
+
+
+def _redirecting_to(location: str) -> Any:
+    def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
+        return redirect(301, location) if seen.path.startswith("/start") else OK
+
+    return respond
+
+
+def test_a_session_param_the_location_already_has_is_not_added_twice() -> None:
+    with scripted_server(_redirecting_to("/dir/?a=1")) as (url, rec):
+        session = Session(retry=False)
+        session.params = {"a": "1"}
+        session.get(f"{url}/start")
+    assert [r.path for r in rec.requests][-1] == "/dir/?a=1"
+
+
+def test_a_session_param_the_location_lacks_is_still_added() -> None:
+    with scripted_server(_redirecting_to("/dir/")) as (url, rec):
+        session = Session(retry=False)
+        session.params = {"token": "T"}
+        session.get(f"{url}/start")
+    assert [r.path for r in rec.requests][-1] == "/dir/?token=T"
+
+
+def test_the_location_wins_over_a_session_param_of_the_same_key() -> None:
+    with scripted_server(_redirecting_to("/dir/?a=2")) as (url, rec):
+        session = Session(retry=False)
+        session.params = {"a": "1", "b": "x"}
+        session.get(f"{url}/start")
+    assert [r.path for r in rec.requests][-1] == "/dir/?a=2&b=x"
