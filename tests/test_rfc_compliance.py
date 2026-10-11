@@ -6,7 +6,7 @@ tests/test_security_edge_cases.py's adversarial-server coverage).
 """
 
 import io
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from xml.etree.ElementTree import Element
 
@@ -607,10 +607,10 @@ def test_a_leap_second_cannot_be_represented_but_does_not_raise() -> None:
 
 
 def test_an_asctime_or_rfc850_retry_after_is_read_as_utc() -> None:
-    """asctime values carry no zone and are assumed UTC (§5.6.7) - exercised through Retry-After."""
-    naive = from_rfc1123("Sun Nov  6 08:49:37 1994")
-    assert naive is not None
-    assert naive.tzinfo is None
+    """asctime values carry no zone and are UTC (§5.6.7) - as an aware value, so they compare with every other date."""
+    asctime = from_rfc1123("Sun Nov  6 08:49:37 1994")
+    assert asctime is not None
+    assert asctime.utcoffset() == timedelta(0)
     aware = from_rfc1123("Sunday, 06-Nov-94 08:49:37 GMT")
     assert aware is not None
     assert aware.tzinfo is not None

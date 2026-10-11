@@ -31,6 +31,11 @@ _TIME = re.compile(r"\b\d{1,2}:\d{2}:\d{2}\b", re.ASCII)
 _RFC850_TWO_DIGIT_YEAR = re.compile(r"\b\d{2}-[A-Za-z]{3}-(\d{2})\b")
 
 
+def _utc_if_naive(value: datetime) -> datetime:
+    """``value``, with a zone: an HTTP-date names GMT (RFC 9110 sec. 5.6.7), so one that says no zone (asctime, ``-0000``) is UTC."""
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+
 def _usable(value: datetime) -> "datetime | None":
     """``value`` if it can be converted and printed, else ``None`` (a bad offset, an overflow)."""
     try:
@@ -80,14 +85,17 @@ def _rfc850_corrected_year(text: str, value: datetime) -> "datetime | None":
 def from_rfc1123(datetime_string: str) -> "datetime | None":
     """Convert an HTTP-date (RFC 1123, and the obsolete RFC 850/asctime forms) to a datetime.
 
-    Falls back to ISO 8601. ``None`` if the string is neither, or not a usable date.
+    An HTTP-date is timezone-aware, always (one that names no zone - asctime,
+    ``-0000`` - is UTC), so dates compare with one another. Falls back to ISO 8601,
+    read as it is written: without a zone it stays naive, nothing says which zone
+    it is in. ``None`` if the string is neither, or not a usable date.
     """
     text = datetime_string.strip()
     if len(text) > MAX_DATE_STRING_LENGTH:
         return None
     if _MONTH.search(text) and _TIME.search(text):
         try:
-            value = _usable(parsedate_to_datetime(text))
+            value = _usable(_utc_if_naive(parsedate_to_datetime(text)))
         except (TypeError, ValueError, IndexError, OverflowError):
             value = None
         if value is not None:

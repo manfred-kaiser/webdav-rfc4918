@@ -572,6 +572,51 @@ def test_proto07_the_message_says_nothing_was_carried_out() -> None:
         make_response(304, method="PUT").raise_for_status()
 
 
+# -- BUG-08: HTTP dates are UTC ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Sun, 06 Nov 1994 08:49:37 GMT",
+        "Sun, 06 Nov 1994 08:49:37 -0000",
+        "Sun Nov  6 08:49:37 1994",
+        "Sun, 06 Nov 1994 08:49:37",
+        "Sunday, 06-Nov-94 08:49:37 GMT",
+    ],
+)
+def test_bug08_every_http_date_is_aware_utc(text: str) -> None:
+    value = from_rfc1123(text)
+    assert value is not None
+    assert value.utcoffset() == timedelta(0)
+    assert value == datetime(1994, 11, 6, 8, 49, 37, tzinfo=UTC)
+
+
+def test_bug08_http_dates_in_any_form_sort_together() -> None:
+    values = [
+        from_rfc1123("Sun, 06 Nov 1994 08:49:37 GMT"),
+        from_rfc1123("Sun Nov  6 08:49:38 1994"),
+        from_rfc1123("Sun, 06 Nov 1994 08:49:39 -0000"),
+    ]
+    assert sorted(v for v in values if v) == [v for v in values if v]
+
+
+@pytest.mark.parametrize("text", ["2024-01-01", "2024-01-01T00:00:00"])
+def test_bug08_an_iso_date_without_a_zone_stays_as_it_is(text: str) -> None:
+    value = fromisoformat(text)
+    assert value is not None
+    assert value.tzinfo is None
+    other = from_rfc1123(text)  # the ISO fallback of from_rfc1123
+    assert other is not None
+    assert other.tzinfo is None
+
+
+def test_bug08_an_iso_date_with_a_zone_keeps_it() -> None:
+    value = fromisoformat("2024-01-01T00:00:00+02:00")
+    assert value is not None
+    assert value.utcoffset() == timedelta(hours=2)
+
+
 # -- BUG-09: whitespace around an href or an ETag ----------------------------
 
 
