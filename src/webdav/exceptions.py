@@ -17,6 +17,7 @@ import inspect
 import warnings
 import xml.etree.ElementTree as ET
 from http import HTTPStatus
+from itertools import islice
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar
 
@@ -91,8 +92,27 @@ class MalformedResponseError(ClientError):
     """
 
 
+#: How many failures the message of a :class:`MultiStatusError` names, and how
+#: many characters of each ``href``: the whole list is in ``.statuses``, and a
+#: message is read by a person (or a log) - a server that reports thousands of
+#: failures with huge hrefs must not be able to make it megabytes long.
+_MESSAGE_ENTRIES = 10
+_MESSAGE_HREF_LENGTH = 200
+
+
+def _clipped(href: str) -> str:
+    return (
+        href
+        if len(href) <= _MESSAGE_HREF_LENGTH
+        else f"{href[:_MESSAGE_HREF_LENGTH]}..."
+    )
+
+
 class MultiStatusError(WebDAVError):
-    """Raised when a 207 Multi-Status response contains per-resource errors."""
+    """Raised when a 207 Multi-Status response contains per-resource errors.
+
+    The message names the first few failures; ``statuses`` has all of them.
+    """
 
     def __init__(
         self,
@@ -113,10 +133,16 @@ class MultiStatusError(WebDAVError):
         self.statuses = statuses
         self.error_codes = error_codes or {}
         if len(statuses) > 1:
-            msg = f"multiple errors received: {statuses}"
+            shown = {
+                _clipped(href): status
+                for href, status in islice(statuses.items(), _MESSAGE_ENTRIES)
+            }
+            msg = f"multiple errors received: {shown}"
+            if len(statuses) > len(shown):
+                msg += f" (and {len(statuses) - len(shown)} more - see .statuses)"
         else:
             href, status = next(iter(statuses.items()))
-            msg = f"The resource {href} is {status.lower()}"
+            msg = f"The resource {_clipped(href)} is {status.lower()}"
         self.msg = msg
         super().__init__(msg)
 

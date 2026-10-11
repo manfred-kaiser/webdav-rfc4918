@@ -73,8 +73,9 @@ Every exception class, with its attributes, is listed in the
   {attr}`~webdav.exceptions.HTTPStatusError.error_codes` in the API
   reference.
 - `MultiStatusError.statuses` is the same per-`href` mapping, but to a
-  human-readable reason instead of a code. The exception's message is
-  built from it.
+  human-readable reason instead of a code. The exception's message names
+  the first ten of them (each `href` cut at 200 characters, then "and N
+  more"); `statuses` always has every one.
 - The [fsspec](fsspec.md) backend translates the common errors into the
   stdlib exceptions its callers expect: `404` into `FileNotFoundError`,
   `412` into `FileExistsError`, `403` into `PermissionError`, and the

@@ -247,6 +247,23 @@ def test_dos06_serialising_a_too_deep_tree_is_a_value_error() -> None:
         build_proppatch_body({("urn:x", "p"): _deep_element(5000)})
 
 
+# -- DOS-07: the message of a MultiStatusError stays small -------------------
+
+
+def test_dos07_a_flood_of_failures_gives_a_short_message_and_full_statuses() -> None:
+    statuses = {f"/{i}-" + "x" * 8000: "Locked" for i in range(3000)}
+    exc = MultiStatusError(statuses)
+    assert len(str(exc)) < 10_000
+    assert "more" in str(exc)
+    assert len(exc.statuses) == 3000
+
+
+def test_dos07_a_few_short_failures_keep_their_message() -> None:
+    assert str(MultiStatusError({"/a": "Locked"})) == "The resource /a is locked"
+    two = {"/a": "Locked", "/b": "Not Found"}
+    assert str(MultiStatusError(two)) == f"multiple errors received: {two}"
+
+
 # -- DOS-09: the cost of one document ----------------------------------------
 
 
