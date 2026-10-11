@@ -25,6 +25,7 @@ import requests.exceptions
 
 from webdav._base_exceptions import ClientError, WebDAVError
 from webdav._xml_guard import check_xml
+from webdav.methods import WRITE_METHODS
 from webdav.transport.body import content_within
 from webdav.url_safety import redact_url
 
@@ -494,7 +495,12 @@ class RedirectNotFollowedError(HTTPStatusError):
             msg += f" for {path!r}"
         if location:
             msg += f", redirecting to {redact_url(location)!r}"
-        msg += f" - not followed: {reason}" if reason else " - not followed"
+        if reason:
+            msg += f" - not followed: {reason}"
+        elif not location:
+            msg += " - not followed: the response names no Location, so the request was not carried out"
+        else:
+            msg += " - not followed"
         super().__init__(response, path=path, msg=msg)
 
     @property
@@ -582,13 +588,25 @@ def raise_for_status(response: "Response", path: str | None = None) -> None:
 
     Raises:
         RedirectNotFollowedError: The response is a 3xx redirect that
-            ``requests`` did not follow (``allow_redirects=False``).
-            Checked before ``response.ok`` - a 3xx status is otherwise
+            ``requests`` did not follow (``allow_redirects=False``), or
+            any other 3xx answering a request that writes (PUT, DELETE,
+            MKCOL, COPY, MOVE, PROPPATCH, POST, PATCH): nothing was carried
+            out. Checked before ``response.ok`` - a 3xx status is otherwise
             "ok" by ``requests``' own definition, which would otherwise
             let it through to a caller expecting e.g. a 207 body.
 
     """
     if response.is_redirect or response.is_permanent_redirect:
+        raise RedirectNotFollowedError(response, path=path)
+    request = getattr(response, "request", None)
+    if (
+        300 <= response.status_code < 400
+        and request is not None
+        and request.method in WRITE_METHODS
+    ):
+        # A 300, 304 or 305 - or a redirect without a Location: nothing was
+        # followed, so nothing was written. (A conditional GET answered 304 is
+        # a success, and stays one.)
         raise RedirectNotFollowedError(response, path=path)
     # Not ``response.ok``: on a :class:`webdav.response.Response` that calls
     # back into ``raise_for_status()``, i.e. into this function.

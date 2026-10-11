@@ -76,6 +76,11 @@ Every exception class, with its attributes, is listed in the
   human-readable reason instead of a code. The exception's message names
   the first ten of them (each `href` cut at 200 characters, then "and N
   more"); `statuses` always has every one.
+- A write (`PUT`, `DELETE`, `MKCOL`, `COPY`, `MOVE`, `PROPPATCH`, `POST`,
+  `PATCH`) answered with a 3xx that names no `Location` (300, 304, 305) did
+  not do anything: `raise_for_status()` raises
+  {class}`~webdav.exceptions.RedirectNotFollowedError` for it. A conditional
+  `GET` answered `304` is still a success.
 - The [fsspec](fsspec.md) backend translates the common errors into the
   stdlib exceptions its callers expect: `404` into `FileNotFoundError`,
   `412` into `FileExistsError`, `403` into `PermissionError`, and the

@@ -411,6 +411,31 @@ def test_proto05_the_public_constructor_takes_any_root_as_before() -> None:
     assert MultiStatusResponse(b"<anything/>").entries == []
 
 
+# -- PROTO-07: a 3xx that carried nothing out --------------------------------
+
+
+@pytest.mark.parametrize("status", [300, 301, 304, 305, 306])
+@pytest.mark.parametrize("method", ["PUT", "DELETE", "MKCOL", "MOVE", "PROPPATCH"])
+def test_proto07_a_write_answered_by_an_unfollowable_3xx_is_an_error(
+    status: int, method: str
+) -> None:
+    response = make_response(status, method=method)
+    with pytest.raises(RedirectNotFollowedError):
+        response.raise_for_status()
+    with pytest.raises(RedirectNotFollowedError):
+        raise_for_status(response)
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD", "PROPFIND", "OPTIONS"])
+def test_proto07_a_conditional_read_answered_304_stays_fine(method: str) -> None:
+    make_response(304, method=method).raise_for_status()
+
+
+def test_proto07_the_message_says_nothing_was_carried_out() -> None:
+    with pytest.raises(RedirectNotFollowedError, match="no Location"):
+        make_response(304, method="PUT").raise_for_status()
+
+
 # -- BUG-09: whitespace around an href or an ETag ----------------------------
 
 
