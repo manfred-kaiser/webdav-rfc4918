@@ -12,7 +12,6 @@ Each one either refuses the request (with the library's own
 """
 
 import ipaddress
-import os
 import pathlib
 import threading
 from typing import TYPE_CHECKING
@@ -21,7 +20,11 @@ from urllib.parse import urlsplit
 import requests.auth
 
 from webdav.exceptions import ClientError, InsecureTransportWarning, warn_at_caller
-from webdav.transport.tls import verification_on, warn_hardening_disabled
+from webdav.transport.tls import (
+    check_verify_type,
+    verification_on,
+    warn_hardening_disabled,
+)
 from webdav.url_safety import effective_origin, is_url, redact_url
 
 if TYPE_CHECKING:
@@ -111,25 +114,28 @@ def check_base_url(value: "str | None") -> "str | None":
 def check_verify(verify: object) -> None:
     """Warn loudly when talking to a server whose certificate will not be checked.
 
-    ``requests`` reads any falsy ``verify`` as "do not check", per call and
-    as a session attribute. An explicit choice, not refused - see
+    ``verify=False`` is an explicit choice, not refused - see
     :class:`~webdav.exceptions.TLSHardeningDisabledWarning` - but a session
     that talks to a server it does not authenticate hands the password to
     whoever answers, so every occurrence is loud and logged. Prefer naming
     the CA that signed the server's certificate (``verify="ca.pem"``)
     over disabling verification when it's just not in the system trust store.
+    Anything that is not ``True``, ``False`` or a path is refused: ``requests``
+    would read ``""``, ``None`` or ``0`` as "do not check".
 
     Raises:
+        TypeError: ``verify`` is not ``True``, ``False`` or a path.
         ClientError: ``verify`` names a CA bundle that does not exist.
 
     """
+    verify = check_verify_type(verify)
     if not verification_on(verify):
         warn_hardening_disabled(
             f"TLS server certificate verification is off (verify={verify!r})"
         )
         return
-    if isinstance(verify, str | os.PathLike) and not pathlib.Path(verify).exists():
-        msg = f"the CA bundle {os.fspath(verify)!r} (verify=) does not exist"
+    if isinstance(verify, str) and not pathlib.Path(verify).exists():
+        msg = f"the CA bundle {verify!r} (verify=) does not exist"
         raise ClientError(msg)
 
 

@@ -30,11 +30,21 @@ from webdav.url_safety import effective_origin
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("verify", [False, None, 0, "", b"", 0.0])
-def test_the_constructor_warns_loudly_for_everything_that_means_no_verification(
+def test_the_constructor_warns_loudly_for_verify_false() -> None:
+    with pytest.warns(exceptions.TLSHardeningDisabledWarning, match="verification"):
+        Session(verify=False)
+
+
+@pytest.mark.parametrize("verify", [None, 0, "", b"", 0.0, [], 1, object()])
+def test_the_constructor_refuses_what_only_requests_reads_as_no_verification(
     verify: object,
 ) -> None:
-    with pytest.warns(exceptions.TLSHardeningDisabledWarning, match="verification"):
+    """``None``/``0``/``""`` used to switch verification off (with a warning); that is a ``TypeError`` now.
+
+    ``verify=os.environ.get("CA_BUNDLE", "")`` must not turn TLS off by
+    accident - ``verify=False`` is the way to say it on purpose.
+    """
+    with pytest.raises(TypeError, match=r"verify=False"):
         Session(verify=verify)  # type: ignore[arg-type]
 
 
@@ -84,14 +94,21 @@ def test_a_missing_ca_bundle_is_a_webdav_error_not_an_oserror(tmp_path: Path) ->
         session.get("http://unused.invalid/a")
 
 
-def test_verification_falsy_values_warn_per_call_too() -> None:
+def test_verification_false_warns_per_call_and_the_rest_is_refused() -> None:
     with scripted_server(always(OK)) as (url, rec):
         session = Session(retry=False)
-        for falsy in (False, 0, "", None):
-            session.verify = falsy  # type: ignore[assignment]
-            with pytest.warns(exceptions.TLSHardeningDisabledWarning):
-                session.get(f"{url}/a")
-        assert len(rec.requests) == 4
+        session.verify = False
+        with pytest.warns(exceptions.TLSHardeningDisabledWarning):
+            session.get(f"{url}/a")
+        for falsy in (0, "", None):
+            with pytest.raises(TypeError, match=r"verify=False"):
+                session.verify = falsy  # type: ignore[assignment]
+            if falsy is not None:
+                with pytest.raises(TypeError, match=r"verify=False"):
+                    session.get(f"{url}/a", verify=falsy)
+        with pytest.warns(exceptions.TLSHardeningDisabledWarning):
+            session.get(f"{url}/a", verify=None)  # per call, None is "the session's own"
+        assert len(rec.requests) == 2
 
 
 def test_the_environment_cannot_replace_the_configured_ca(

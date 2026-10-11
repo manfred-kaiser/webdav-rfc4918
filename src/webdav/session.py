@@ -29,6 +29,7 @@ failures, and a cap on how large a response body may be declared.
 
 import difflib
 import logging
+import os
 import threading
 import time
 from contextlib import suppress
@@ -112,6 +113,7 @@ from webdav.transport.retry import MAX_RETRY_AFTER, retry_after
 from webdav.transport.retry import retry as _retry
 from webdav.transport.tls import (
     SSLContextAdapter,
+    check_verify_type,
     configure_tls,
     verification_on,
 )
@@ -261,7 +263,7 @@ class ConnectionOptions(TypedDict, total=False):
 
     auth: "AuthTypes"
     cert: "CertTypes"
-    verify: "bool | str"
+    verify: "bool | str | os.PathLike[str]"
     tls: "TLSOptions | None"
     timeout: "float | tuple[float | None, float | None] | None"
     redirect_policy: RedirectPolicy
@@ -308,7 +310,7 @@ class Session:
         auth: "AuthTypes" = None,
         headers: "dict[str, str] | None" = None,
         cert: "CertTypes" = None,
-        verify: bool | str = True,
+        verify: "bool | str | os.PathLike[str]" = True,
         tls: "TLSOptions | None" = None,
         timeout: "float | tuple[float | None, float | None] | None" = DEFAULT_TIMEOUT,
         redirect_policy: RedirectPolicy = RedirectPolicy.SAME_ORIGIN,
@@ -344,10 +346,14 @@ class Session:
             cert: Client certificate for mTLS - a path to a combined
                 cert+key PEM, or a ``(certfile, keyfile)`` tuple.
             verify: Server certificate verification - ``True`` (system
-                trust store, the default), a path to a CA bundle, or
-                ``False``. Disabling it is a deliberate, explicit choice a
-                developer is free to make - it is not this library's place
-                to forbid it - but it raises and logs a
+                trust store, the default), the path of a CA bundle
+                (a ``str`` or path-like), or ``False``. Nothing else is
+                accepted: ``None``, ``0`` or an empty string - say, an unset
+                environment variable - would be read as "do not check" by
+                ``requests``, and raise a ``TypeError`` here instead.
+                Disabling it is a deliberate, explicit choice a developer is
+                free to make - it is not this library's place to forbid it - but it
+                raises and logs a
                 :class:`~webdav.exceptions.TLSHardeningDisabledWarning`
                 every time, loud and independent of ``urllib3``'s own
                 warning category (a common ``urllib3.disable_warnings()``
@@ -422,6 +428,7 @@ class Session:
                 :class:`~webdav.transport.redirects.RedirectPolicy`, or
                 ``response_class`` is not a subclass of
                 :class:`~webdav.response.Response`.
+            TypeError: ``verify`` is not ``True``, ``False`` or a path.
             ValueError: ``trusted_redirect_origins`` and ``redirect_policy``
                 disagree - see :func:`~webdav.transport.redirects.validate_policy` -
                 or ``base_url``, ``timeout``, ``max_response_size``,
@@ -435,6 +442,7 @@ class Session:
         ):
             msg = f"response_class must be a subclass of webdav.Response, got {response_class!r}"
             raise TypeError(msg)
+        verify = check_verify_type(verify)
         self._transport = requests.Session()
         self.auth = auth
         if headers:
@@ -590,7 +598,7 @@ class Session:
         self._transport.stream = check_flag("stream", value)
 
     @property
-    def verify(self) -> "bool | str | None":
+    def verify(self) -> "bool | str":
         """What certificate verification this session uses - ``True``, ``False`` or the path of a CA bundle.
 
         Also with ``tls=``: setting it rebuilds the TLS context (and fails,
@@ -598,11 +606,15 @@ class Session:
         ``verify=`` does not change what a ``tls=`` session verifies - and one
         that would turn verification *on* for a session that has it off is
         refused.
+
+        Raises:
+            TypeError: When set to anything but ``True``, ``False`` or a path.
+
         """
-        return self._transport.verify
+        return cast("bool | str", self._transport.verify)
 
     @verify.setter
-    def verify(self, value: "bool | str | None") -> None:
+    def verify(self, value: "bool | str") -> None:
         self._reconfigure_tls(verify=value)
 
     @property
@@ -621,8 +633,9 @@ class Session:
         TLS context is built anew first (so a bad value raises before anything
         is touched) and swapped in place.
         """
+        verify = check_verify_type(changes["verify"]) if "verify" in changes else None
         with self._tls_lock:
-            new_verify = changes.get("verify", self._verify_arg)
+            new_verify = self._verify_arg if "verify" not in changes else verify
             new_cert = changes.get("cert", self._cert_arg)
             if self._tls_arg is None:
                 self._transport.verify = new_verify
@@ -631,13 +644,13 @@ class Session:
                 configure_tls(
                     self._transport,
                     cert=new_cert,
-                    verify=new_verify,
+                    verify=new_verify,  # type: ignore[arg-type]
                     tls=self._tls_arg,
                     response_class=self._response_class_arg,
                     pool_connections=self._pool_connections_arg,
                     pool_maxsize=self._pool_maxsize_arg,
                 )
-            self._verify_arg = new_verify
+            self._verify_arg = new_verify  # type: ignore[assignment]
             self._cert_arg = new_cert
 
     @property
@@ -895,7 +908,13 @@ class Session:
 
         ``self._transport`` and every derived, unpicklable piece of state
         (locks, caches, adapters) are rebuilt fresh - see :meth:`_init_derived`.
+        A ``verify`` that is not a ``bool`` or a path (``None``, ``0``, ``""``:
+        accepted then, and meaning "off") stays what it meant: ``False``.
         """
+        verify = state.get("_verify_arg", True)
+        if not isinstance(verify, bool | str | os.PathLike) or verify == "":
+            verify = verify or False
+        state["_verify_arg"] = check_verify_type(verify)
         self._transport = requests.Session()
         # base_url has no setter (see its property) - restored directly.
         self._base_url = state.pop("base_url", None)
@@ -1034,7 +1053,7 @@ class Session:
         """
         adapter = self._transport.get_adapter("https://")
         if verify is not None and isinstance(adapter, SSLContextAdapter):
-            wanted = verification_on(verify)
+            wanted = verification_on(check_verify_type(verify))
             if wanted and not adapter.verifies:
                 msg = (
                     "verify= for one call has no effect on a session with tls=: its TLS "

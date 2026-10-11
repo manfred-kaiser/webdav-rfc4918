@@ -251,3 +251,53 @@ def test_changing_verify_while_other_threads_send_breaks_nothing(
         for thread in threads:
             thread.join()
     assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# verify is a bool or a path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("verify", [None, 0, "", b"", 0.0, [], 1, object()])
+def test_the_setter_refuses_what_is_no_bool_and_no_path(verify: object) -> None:
+    session = Session()
+    with pytest.raises(TypeError, match=r"True, False or the path"):
+        session.verify = verify  # type: ignore[assignment]
+    assert session.verify is True
+
+
+def test_a_path_object_is_a_ca_bundle_without_and_with_tls(
+    certs: Certificates, other_ca: str
+) -> None:
+    ca = certs.ca_cert
+    with tls_server(certs, always(OK)) as (url, _rec):
+        for tls in (None, TLSOptions()):
+            session = Session(verify=ca, tls=tls, retry=False)
+            assert session.get(f"{url}/x").status_code == 204
+            assert session.verify == str(ca)
+            # the private CA is the pin: it does not fall back to the system store
+            wrong = Session(verify=Path(other_ca), tls=tls, retry=False)
+            with pytest.raises(requests.exceptions.SSLError):
+                wrong.get(f"{url}/x")
+
+
+def test_a_falsy_verify_in_an_old_pickle_stays_what_it_meant() -> None:
+    """The pickled session ran unverified (loudly); loading it must not turn that into an error or into verification."""
+    with pytest.warns(exceptions.TLSHardeningDisabledWarning):
+        session = pickle.loads(base64.b64decode("".join(old.FALSY_VERIFY)))
+    assert session.verify is False
+
+
+def test_a_refused_verify_leaves_the_session_as_it_was(certs: Certificates) -> None:
+    with tls_server(certs, always(OK)) as (url, _rec):
+        session = Session(verify=str(certs.ca_cert), tls=TLSOptions(), retry=False)
+        with pytest.raises(TypeError):
+            session.verify = ""  # type: ignore[assignment]
+        assert session.verify == str(certs.ca_cert)
+        assert session.get(f"{url}/x").status_code == 204
+
+
+def test_verify_none_for_one_call_means_the_sessions_own() -> None:
+    with scripted_server(always(OK)) as (url, rec):
+        Session(retry=False).get(f"{url}/x", verify=None)
+    assert len(rec.requests) == 1

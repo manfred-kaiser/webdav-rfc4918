@@ -14,14 +14,18 @@ session = Session(
 )
 ```
 
-Server certificate verification is on by default. The constructor, a
-single call and `session.verify` all accept `False`, and also `None`, `0`
-and `""`, which `requests` reads the same way.
+Server certificate verification is on by default. `verify` is `True`,
+`False` or the path of a CA bundle (a `str` or a path-like object), in the
+constructor, on `session.verify` and on a single call. Nothing else is
+accepted: `requests` reads `None`, `0` and `""` as "do not verify", so
+`verify=os.environ.get("CA_BUNDLE", "")` would silently turn verification off
+whenever the variable is unset. Those values raise a `TypeError` that says
+`verify=False` is how to ask for it. On a single call, `verify=None` still
+means "the session's own setting".
 
 ```{warning}
-Every use of `verify=False` (or anything else `requests` reads as false)
-emits and logs a `TLSHardeningDisabledWarning` (a Python warning, not an
-exception). It is separate from
+Every use of `verify=False` emits and logs a `TLSHardeningDisabledWarning`
+(a Python warning, not an exception). It is separate from
 `urllib3`'s warning category, so `urllib3.disable_warnings()` does not
 silence it. For a private CA or a test setup, use
 `verify=<path to a CA bundle>` instead, which keeps verification on.

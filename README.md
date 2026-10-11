@@ -112,10 +112,12 @@ includes:
 A WebDAV server, or a redirect to one, can be hostile. This is the complete
 list of defaults:
 
-- TLS verification is on. Turning it off (`verify=False`, or anything
-  `requests` reads as false) emits and logs a `TLSHardeningDisabledWarning`
-  that `urllib3.disable_warnings()` does not silence. So does a
-  `TLSOptions` with a TLS version below 1.2 or with strict chain checking off.
+- TLS verification is on. `verify` is `True`, `False` or a CA bundle path;
+  `None`, `0` or `""` (an unset environment variable) are a `TypeError`,
+  not a silent "off". Turning it off (`verify=False`) emits and logs a
+  `TLSHardeningDisabledWarning` that `urllib3.disable_warnings()` does not
+  silence. So does a `TLSOptions` with a TLS version below 1.2, strict chain
+  checking off.
 - `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` are ignored, so the environment
   cannot replace the CA you configured. `~/.netrc` is ignored too: without
   `auth=`, no credentials are sent.

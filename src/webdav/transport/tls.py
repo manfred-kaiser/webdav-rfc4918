@@ -360,6 +360,34 @@ def mount_mtls_adapter(
     )
 
 
+def check_verify_type(verify: object) -> "bool | str":
+    """``verify`` as ``True``, ``False`` or the path of a CA bundle (a ``str``) - or a ``TypeError``.
+
+    ``requests`` reads anything falsy as "do not check", so ``verify=""`` from
+    an unset environment variable, a ``None`` from a config file or a stray
+    ``0`` would turn certificate checking off without a word. Only a ``bool``,
+    a non-empty ``str`` or a path-like is a statement about verification.
+
+    Raises:
+        TypeError: ``verify`` is anything else.
+
+    """
+    if isinstance(verify, bool):
+        return verify
+    if isinstance(verify, str | os.PathLike):
+        path = os.fspath(verify)
+        if isinstance(path, str) and path:
+            return path
+    msg = (
+        f"verify must be True, False or the path of a CA bundle, got {verify!r}. "
+        "Pass verify=False to turn certificate verification off explicitly, or "
+        "verify='/path/to/ca.pem' to trust that CA (an empty or unset value, such "
+        "as an empty environment variable, is refused: it would turn verification "
+        "off without being asked)"
+    )
+    raise TypeError(msg)
+
+
 def verification_on(verify: object) -> bool:
     """Whether ``verify`` means "check the server's certificate" (to ``requests``, anything falsy does not)."""
     return verify is True or (
@@ -394,9 +422,11 @@ def configure_tls(
     is touched, so a failure leaves the old configuration as it was.
 
     Raises:
+        TypeError: ``verify`` is not ``True``, ``False`` or a path.
         TLSConfigError: Something in ``tls`` could not be loaded.
 
     """
+    verify = check_verify_type(verify)
     verify_certificates = verification_on(verify)
     if tls is None:
         if not verify_certificates:
