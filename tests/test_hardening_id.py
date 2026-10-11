@@ -22,6 +22,8 @@ from webdav import FileSystem
 from webdav.exceptions import (
     ClientError,
     ForbiddenError,
+    PreconditionFailedError,
+    ResourceAlreadyExistsError,
     WebDAVError,
 )
 from webdav.fsspec import WebdavFileSystem
@@ -364,6 +366,58 @@ def test_BUG06_guard_sizes(fs: FileSystem, tmp_path: Path) -> None:
 def test_BUG06_guard_a_longer_file_than_declared_still_errors(fs: FileSystem) -> None:
     with pytest.raises(ClientError):
         fs.upload_fileobj(io.BytesIO(b"abcdef"), "/x", size=3)
+
+
+# ------------------------------------------------------------------ BUG-10
+@pytest.mark.parametrize("status", [202, 204])
+def test_BUG10_mkdir_accepts_any_success_status(status: int) -> None:
+    with scripted_server(always((status, {}, b""))) as (url, _):
+        FileSystem(retry=False).mkdir(url + "/d")
+
+
+def test_BUG10_mkdir_405_is_only_exists_if_the_resource_is_there() -> None:
+    def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
+        if seen.method == "PROPFIND":
+            return 404, {}, b""
+        return 405, {"Allow": "GET, PUT"}, b""
+
+    with scripted_server(respond) as (url, _):
+        with pytest.raises(WebDAVError) as caught:
+            FileSystem(retry=False).mkdir(url + "/d")
+    assert not isinstance(caught.value, ResourceAlreadyExistsError)
+
+
+def test_BUG10_guard_mkdir_on_something_that_exists(fs: FileSystem) -> None:
+    fs.mkdir("/d")
+    with pytest.raises(ResourceAlreadyExistsError):
+        fs.mkdir("/d")
+
+
+def test_BUG10_guard_fsspec_makedirs_exist_ok(ffs: WebdavFileSystem) -> None:
+    ffs.makedirs("/a/b", exist_ok=True)
+    ffs.makedirs("/a/b", exist_ok=True)
+
+
+def test_BUG10_copy_412_from_the_if_header_is_not_exists() -> None:
+    def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
+        return (404, {}, b"") if seen.method == "PROPFIND" else (412, {}, b"")
+
+    with scripted_server(respond) as (url, _):
+        with pytest.raises(PreconditionFailedError) as caught:
+            FileSystem(url, retry=False).copy("/a", "/b")
+        with pytest.raises(PreconditionFailedError) as caught_move:
+            FileSystem(url, retry=False).move("/a", "/b")
+    assert not isinstance(caught.value, ResourceAlreadyExistsError)
+    assert not isinstance(caught_move.value, ResourceAlreadyExistsError)
+
+
+def test_BUG10_guard_copy_and_move_onto_an_existing_destination(fs: FileSystem) -> None:
+    fs.upload_fileobj(io.BytesIO(b"1"), "/a")
+    fs.upload_fileobj(io.BytesIO(b"2"), "/b")
+    with pytest.raises(ResourceAlreadyExistsError):
+        fs.copy("/a", "/b")
+    with pytest.raises(ResourceAlreadyExistsError):
+        fs.move("/a", "/b")
 
 
 # ------------------------------------------------------------------ BUG-11

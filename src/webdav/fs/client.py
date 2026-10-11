@@ -111,6 +111,15 @@ _OPEN_MODES = frozenset({"r", "rt", "rb", "w", "wt", "wb", "x", "xt", "xb"})
 _WALK_MAX_DEPTH = 256
 _WALK_MAX_DIRS = 100_000
 
+#: What a server that created the collection may answer a MKCOL with (RFC 4918 only has 201:
+#: a proxy or gateway in front may say 200, 202 or 204).
+_MKCOL_SUCCESS = (
+    HTTPStatus.OK,
+    HTTPStatus.CREATED,
+    HTTPStatus.ACCEPTED,
+    HTTPStatus.NO_CONTENT,
+)
+
 #: A write-mode ``open`` keeps this many bytes in memory before spilling to disk.
 _SPOOL_SIZE = 8 * 1024 * 1024
 
@@ -576,7 +585,11 @@ class FileSystem:
                 Method.MKCOL, path, add_trailing_slash=True, data=data
             )
         except HTTPStatusError as exc:
-            if exc.status_code == HTTPStatus.METHOD_NOT_ALLOWED:
+            # RFC 4918 sec. 9.3.1: 405 is "already mapped". But a server without MKCOL (a
+            # read-only one) answers 405 for everything: "exists" only if it is there.
+            if exc.status_code == HTTPStatus.METHOD_NOT_ALLOWED and (
+                self._remote.exists_quietly(path.rstrip("/"))
+            ):
                 raise ResourceAlreadyExistsError(exc.response, path) from exc
             # Apache's mod_dav 2.4 answers 400, not 405, when the trailing
             # slash this method always adds (RFC 4918 sec. 5.2) lands on an
@@ -592,7 +605,7 @@ class FileSystem:
                 raise ResourceAlreadyExistsError(exc.response, path) from exc
             raise
 
-        if response.status_code not in (HTTPStatus.OK, HTTPStatus.CREATED):
+        if response.status_code not in _MKCOL_SUCCESS:
             msg = f"unexpected status {response.status_code} from MKCOL"
             raise MalformedResponseError(msg)
 
@@ -677,9 +690,8 @@ class FileSystem:
             destination=destination,
         )
 
-    @staticmethod
     def _raise_for_overwrite_conflict(
-        response: "Response", *, overwrite: "bool | None", destination: str
+        self, response: "Response", *, overwrite: "bool | None", destination: str
     ) -> None:
         """``response.raise_for_status()``, translating a 412 into the more specific error.
 
@@ -687,12 +699,13 @@ class FileSystem:
         existing destination fails with 412 - the same condition
         :meth:`upload_fileobj`/:meth:`mkdir` already report as
         :class:`~webdav.exceptions.ResourceAlreadyExistsError`, for the same
-        caller-facing reason.
+        caller-facing reason - but only if the destination is there: a 412 can also
+        answer the ``If`` header (a lock token that has gone stale).
         """
         try:
             response.raise_for_status()
         except PreconditionFailedError as exc:
-            if not overwrite:
+            if not overwrite and self._remote.exists_quietly(destination):
                 raise ResourceAlreadyExistsError(
                     exc.response, display_url(destination)
                 ) from exc

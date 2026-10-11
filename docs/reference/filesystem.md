@@ -252,10 +252,14 @@ with webdav.FileSystem("https://webdav.example.org", auth=("user", "password")) 
     fs.remove("Archive")
 ```
 
-`mkdir` raises `ResourceAlreadyExistsError` if the folder exists. `copy`
-and `move` do not replace an existing destination unless you pass
-`overwrite=True`. `remove` deletes a folder with everything in it, but
-refuses to remove the root of the base URL. The copy happens on the
+`mkdir` raises `ResourceAlreadyExistsError` if the folder exists. A server
+that refuses MKCOL altogether (a read-only one) answers 405 for every folder;
+that is only "exists" if the folder is really there, else you get the
+`HTTPStatusError`. `copy` and `move` do not replace an existing destination
+unless you pass `overwrite=True`; a 412 is "exists" only if the destination
+is there (a stale lock token in the `If` header also answers 412, and raises
+`PreconditionFailedError`). `remove` deletes a folder with everything in it,
+but refuses to remove the root of the base URL. The copy happens on the
 server, nothing is downloaded.
 
 ## Properties
