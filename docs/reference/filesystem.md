@@ -262,6 +262,13 @@ is there (a stale lock token in the `If` header also answers 412, and raises
 but refuses to remove the root of the base URL. The copy happens on the
 server, nothing is downloaded.
 
+Servers differ where the standard leaves room, and the library does not paper
+over it: nginx's `ngx_http_dav_module` ignores `If-None-Match: *`, so an
+upload with `overwrite=False` silently replaces an existing file there (Apache
+checks, but not atomically), and nginx wants a trailing `/` on a collection for
+`copy`, `move` and `remove`, which these methods do not add - write the
+`/` yourself. See the compliance pages for the details.
+
 ## Properties
 
 One method per common property:
@@ -372,6 +379,12 @@ yet (issue #5, Windows/macOS CI). It is for you, where you create files from
 server names. It does not detect two names that are one file on a
 case-insensitive file system either. Error messages show a name escaped,
 never raw.
+
+`resource.href` is "as the server wrote it", and a server may write another
+host in it - a reverse proxy does so innocently, a hostile server on purpose.
+`Resource.name` is built from the path only and never reaches another host.
+Do not pass `href` to a `Session` that has no `base_url`: it would send its
+credentials to whatever host `href` names.
 
 ## Errors
 

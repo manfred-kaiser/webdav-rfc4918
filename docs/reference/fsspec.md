@@ -174,7 +174,9 @@ name is always `"/" + name`.
 
 Beyond the keys fsspec requires (`name`, `size`, `type`), the info dict
 has `href`, `created`, `modified`, `etag`, `content_type`,
-`content_language` and `display_name`.
+`content_language` and `display_name`. The `href` is what the server wrote,
+host included if it wrote one: use `name`, not `href`, to name the resource
+again, and never hand `href` to a `Session` without a `base_url`.
 
 ## Reading
 

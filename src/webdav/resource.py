@@ -67,7 +67,13 @@ class Resource(str):  # noqa: SLOT000 - a str subclass cannot have a non-empty _
     """
 
     href: str
-    """The ``href`` as the server wrote it."""
+    """The ``href`` as the server wrote it.
+
+    It is the server's word, and a server may write another host in it (a reverse proxy
+    does, innocently; a hostile one on purpose): never hand it to a
+    :class:`~webdav.session.Session` that has no ``base_url`` - the session would send its
+    credentials there. :attr:`name` is the safe way to name the resource again.
+    """
     is_dir: bool
     """Whether it is a collection."""
     size: "int | None"
