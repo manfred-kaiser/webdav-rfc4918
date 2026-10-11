@@ -57,7 +57,7 @@ Several calls to the same server: a `FileSystem` keeps the connection open.
 
 ```python
 with webdav.FileSystem("https://webdav.example.org", auth=auth) as fs:
-    fs.upload_file("Gorilla.jpg", "Photos/Gorilla.jpg")
+    fs.upload_file("Gorilla.jpg", "Photos/Gorilla.jpg", overwrite=True)
     print(fs.ls("Photos"))
     fs.download_file("Photos/Gorilla.jpg", "copy.jpg")
 
