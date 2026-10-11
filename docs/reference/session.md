@@ -385,8 +385,13 @@ there from the environment.
   `requests.Session`. It is forwarded to one the session holds internally.
 - Redirects are handled by this library, not by `requests`, see
   [Redirects](redirects.md).
-- `send` sends one prepared request as is. It does not follow redirects
-  and does not add lock tokens. Use `request` for that.
+- `send` sends one prepared request. It does not follow redirects and does
+  not add lock tokens (use `request` for that). It sends what is prepared, but
+  not to anywhere: this session's credentials, cookies and headers go with it,
+  so a request for another origin than the `base_url`, outside
+  `allowed_origins`, or for a URL with user and password in it, is refused
+  with a `ClientError`. Use a `Session` of its own, or `requests`, for another
+  server. `prepare_request` itself prepares whatever it is given.
 
 The one visible difference: `isinstance(session, requests.Session)` is
 `False`.

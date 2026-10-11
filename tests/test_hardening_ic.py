@@ -557,6 +557,52 @@ def test_a_pickle_roundtrip_is_unchanged() -> None:
 
 
 # ---------------------------------------------------------------------------
+# send() refuses what request() refuses
+# ---------------------------------------------------------------------------
+
+
+def test_send_refuses_another_origin_than_the_base_url() -> None:
+    with scripted_server(always(OK)) as (other, other_rec):
+        with scripted_server(always(OK)) as (url, rec):
+            session = Session(
+                url, auth=("u", "p"), headers={"X-Api-Key": "K"}, retry=False
+            )
+            prepared = session.prepare_request(requests.Request("GET", f"{other}/x"))
+            assert prepared.headers[
+                "Authorization"
+            ]  # prepare_request prepares as asked
+            with pytest.raises(ClientError, match="base_url"):
+                session.send(prepared)
+            ok = session.prepare_request(requests.Request("GET", f"{url}/y"))
+            assert session.send(ok).status_code == 204
+    assert other_rec.requests == []
+    assert len(rec.requests) == 1
+
+
+def test_send_refuses_a_url_with_credentials_in_it() -> None:
+    with scripted_server(always(OK)) as (url, rec):
+        host = url.removeprefix("http://")
+        session = Session(retry=False)
+        prepared = session.prepare_request(
+            requests.Request("GET", f"http://u:p@{host}/x")
+        )
+        with pytest.raises(ClientError, match="credentials"):
+            session.send(prepared)
+    assert rec.requests == []
+
+
+def test_send_without_a_base_url_still_sends_to_any_http_url() -> None:
+    with scripted_server(always(OK)) as (url, _rec):
+        session = Session(retry=False)
+        assert (
+            session.send(
+                session.prepare_request(requests.Request("GET", f"{url}/x"))
+            ).status_code
+            == 204
+        )
+
+
+# ---------------------------------------------------------------------------
 # A Digest challenge that cannot be used
 # ---------------------------------------------------------------------------
 

@@ -1118,7 +1118,8 @@ class Session:
 
         ``requests`` would otherwise search ``~/.netrc`` for the host and
         authenticate with whatever it finds (see :data:`~webdav.transport.guards.NO_AUTH`) -
-        also when ``auth`` is given as ``False``, ``()`` or ``""``.
+        also when ``auth`` is given as ``False``, ``()`` or ``""``. The request is
+        prepared as it is: whether it may be *sent* is :meth:`send`'s decision.
         """
         if not request.auth and not self.auth:
             request.auth = NO_AUTH
@@ -1178,13 +1179,22 @@ class Session:
         by :meth:`request`; a 3xx that reaches the caller of ``send`` is
         returned as it is, with ``redirect_refusal`` set. The timeout,
         certificate-verification and body-size rules apply as they do to
-        every request.
+        every request - and so does the question *where* it may go: this
+        session's credentials, cookies and default headers go along with
+        whatever is sent here, so a request for another origin than the
+        ``base_url``'s, or for a URL with
+        user and password in it, is refused. Use a ``Session`` of its own
+        (or ``requests``) for another server.
 
         Raises:
+            ClientError: The request may not be sent - see above.
             requests.RequestException: The request could not be completed
                 (connection, TLS, timeout).
 
         """
+        if request.url is not None:
+            self.resolve_url(request.url)
+            require_full_url(request.url, has_base_url=self.base_url is not None)
         kwargs.setdefault("timeout", self.timeout)
         allow_redirects = kwargs.pop("allow_redirects", True)
         kwargs.setdefault("stream", self.stream)
