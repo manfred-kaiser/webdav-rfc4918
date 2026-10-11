@@ -396,3 +396,209 @@ def test_a_per_call_false_auth_still_beats_the_sessions() -> None:
         Session(auth=("u", "p"), retry=False).get(f"{url}/a")
     assert "authorization" not in rec.requests[0].headers
     assert rec.requests[1].headers["authorization"].startswith("Basic ")
+
+
+# ---------------------------------------------------------------------------
+# Cookies
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("host", "cookie", "kept"),
+    [
+        ("127.0.0.1", "a=b; Domain=.0.1", 0),  # an IP address has no sibling hosts
+        ("127.0.0.1", "a=b; Domain=1", 0),
+        ("127.0.0.1", "a=b; Domain=127.0.0.1", 1),  # the address itself is fine
+        ("10.0.0.5", "a=b; Domain=10.0.0.5", 1),
+        ("127.0.0.1", "a=b", 1),
+        ("dav.example.com", "a=b; Domain=.example.com", 1),  # names keep Domain cookies
+        ("dav.example.com", "a=b; Domain=example.com", 1),
+        ("dav.example.com", "a=b", 1),
+    ],
+)
+def test_cookie_domain_rules(host: str, cookie: str, kept: int) -> None:
+    session = Session()
+    assert _accepted(host, session.cookies, cookie) == kept
+
+
+def test_a_planted_cookie_is_not_sent_to_a_neighbour_address() -> None:
+    session = Session()
+    _accepted("127.0.0.1", session.cookies, "planted=1; Domain=.0.1")
+    from requests.cookies import get_cookie_header
+
+    request = requests.Request("GET", "http://127.1.0.1/").prepare()
+    assert get_cookie_header(session.cookies, request) is None  # type: ignore[no-untyped-call]
+
+
+def test_cookie_size_limits() -> None:
+    session = Session()
+    limit = jar_policy.MAX_COOKIE_SIZE
+    assert _accepted("h.example", session.cookies, "a=" + "x" * (limit - 1)) == 1
+    assert (
+        _accepted("h.example", session.cookies, "b=" + "x" * limit) == 1
+    )  # too large: not kept
+
+
+def test_a_large_sso_cookie_of_ten_kib_is_kept() -> None:
+    session = Session()
+    assert _accepted("h.example", session.cookies, "sso=" + "x" * 10_000) == 1
+
+
+def test_one_domain_cannot_hold_more_than_the_limit_but_a_cookie_can_be_replaced() -> (
+    None
+):
+    session = Session()
+    for index in range(jar_policy.MAX_COOKIES_PER_DOMAIN + 20):
+        _accepted("h.example", session.cookies, f"c{index}=1")
+    assert len(session.cookies) == jar_policy.MAX_COOKIES_PER_DOMAIN
+    _accepted("h.example", session.cookies, "c0=new")
+    assert session.cookies.get("c0") == "new"
+    assert len(session.cookies) == jar_policy.MAX_COOKIES_PER_DOMAIN
+    _accepted(
+        "other.example", session.cookies, "x=1"
+    )  # another domain has its own room
+    assert len(session.cookies) == jar_policy.MAX_COOKIES_PER_DOMAIN + 1
+
+
+def test_the_whole_jar_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(jar_policy, "MAX_JAR_SIZE", 5000)
+    session = Session()
+    for index in range(10):
+        _accepted(f"h{index}.example", session.cookies, "a=" + "x" * 1000)
+    assert 1 <= len(session.cookies) <= 5
+
+
+def test_a_hundred_big_cookies_per_response_do_not_fill_the_jar() -> None:
+    session = Session()
+    cookies = [f"c{i}=" + "x" * 15_000 for i in range(100)]
+    _accepted("h.example", session.cookies, *cookies)
+    held = sum(len(c.name) + len(c.value or "") for c in session.cookies)
+    assert held <= jar_policy.MAX_JAR_SIZE
+
+
+def test_cookies_set_by_hand_are_not_cut() -> None:
+    session = Session()
+    session.cookies.set("big", "x" * 100_000, domain="h.example")
+    assert len(session.cookies) == 1
+
+
+def test_a_copy_has_the_policy_and_a_jar_of_the_callers_own_stays_theirs() -> None:
+    guarded = copy.copy(Session())
+    assert _accepted("127.0.0.1", guarded.cookies, "a=b; Domain=.0.1") == 0
+    own = Session()
+    own.cookies = RequestsCookieJar()
+    clone = copy.copy(own)
+    assert _accepted("127.0.0.1", clone.cookies, "a=b; Domain=.0.1") == 1
+
+
+def test_a_new_pickle_needs_nothing_a_plain_requests_jar_cannot_load() -> None:
+    session = Session("https://dav.example.org")
+    session.cookies.set("sid", "abc", domain="dav.example.org")
+    data = pickle.dumps(session)
+    assert b"transport.cookies" not in data
+    assert b"_Policy" not in data
+    loaded = pickle.loads(data)
+    assert type(loaded.cookies) is RequestsCookieJar
+    assert loaded.cookies.get("sid") == "abc"
+
+
+def test_a_server_cannot_plant_a_cookie_end_to_end() -> None:
+    with scripted_server(
+        always((204, {"Set-Cookie": "planted=1; Domain=.0.1"}, b""))
+    ) as (url, _rec):
+        session = Session(retry=False)
+        session.get(f"{url}/x")
+    assert len(session.cookies) == 0
+
+
+def test_a_normal_cookie_session_still_works_end_to_end() -> None:
+    def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
+        if "cookie" not in seen.headers:
+            return 204, {"Set-Cookie": "sid=abc; Path=/"}, b""
+        return OK
+
+    with scripted_server(respond) as (url, rec):
+        session = Session(retry=False)
+        session.get(f"{url}/login")
+        session.get(f"{url}/next")
+    assert rec.requests[1].headers["cookie"] == "sid=abc"
+
+
+# ---------------------------------------------------------------------------
+# A copy shares no containers with its original
+# ---------------------------------------------------------------------------
+
+
+def test_a_copy_does_not_share_its_containers() -> None:
+    session = Session(headers={"X-A": "1"})
+    session.params = {"a": "1"}
+    session.proxies = {"http": "http://proxy.example:3128"}
+    session.cookies.set("c", "1", domain="h.example")
+    clone = copy.copy(session)
+    clone.headers["X-B"] = "2"
+    clone.params["b"] = "2"
+    clone.proxies["https"] = "http://other.example:3128"
+    clone.cookies.set("d", "2", domain="h.example")
+    clone.hooks["response"].append(lambda r, **_k: r)
+    assert "X-B" not in session.headers
+    assert session.params == {"a": "1"}
+    assert "https" not in session.proxies
+    assert session.cookies.get("d") is None
+    assert session.hooks["response"] == []
+    assert clone.headers["X-A"] == "1"
+    assert clone.cookies.get("c") == "1"
+
+
+def test_a_pickle_roundtrip_is_unchanged() -> None:
+    session = Session("https://h.example", auth=("u", "p"), headers={"X-A": "1"})
+    clone = pickle.loads(pickle.dumps(session))
+    assert clone.auth == ("u", "p")
+    assert clone.headers["X-A"] == "1"
+
+
+# ---------------------------------------------------------------------------
+# A Digest challenge that cannot be used
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "challenge", ['Digest nonce="n"', 'Digest realm="r"', "Digest"]
+)
+def test_a_broken_digest_challenge_is_a_client_error_with_its_cause(
+    challenge: str,
+) -> None:
+    with scripted_server(always((401, {"WWW-Authenticate": challenge}, b""))) as (
+        url,
+        _rec,
+    ):
+        session = Session(auth=HTTPDigestAuth("u", "p"), retry=False)
+        with pytest.raises(ClientError, match="Digest") as caught:
+            session.get(f"{url}/x")
+    assert isinstance(caught.value.__cause__, KeyError)
+
+
+def test_a_valid_digest_handshake_still_works() -> None:
+    def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
+        if "authorization" not in seen.headers:
+            return (
+                401,
+                {"WWW-Authenticate": 'Digest realm="r", nonce="abc", qop="auth"'},
+                b"",
+            )
+        return OK
+
+    with scripted_server(respond) as (url, rec):
+        response = Session(auth=HTTPDigestAuth("u", "p"), retry=False).get(f"{url}/x")
+    assert response.status_code == 204
+    assert rec.requests[1].headers["authorization"].startswith("Digest ")
+
+
+def test_a_failing_hook_of_the_callers_is_not_turned_into_a_client_error() -> None:
+    def boom(_response: Any, **_kwargs: Any) -> None:
+        raise KeyError("mine")
+
+    with scripted_server(
+        always((401, {"WWW-Authenticate": 'Basic realm="r"'}, b""))
+    ) as (url, _rec):
+        with pytest.raises(KeyError):
+            Session(retry=False).get(f"{url}/x", hooks={"response": boom})

@@ -909,7 +909,9 @@ class Session:
 
         ``self._transport`` and every derived, unpicklable piece of state
         (locks, caches, adapters) are rebuilt fresh - see :meth:`_init_derived`.
-        A ``verify`` that is not a ``bool`` or a path (``None``, ``0``, ``""``:
+        What the state holds as containers (``cookies``, ``headers``,
+        ``proxies``, ``hooks``, ``params``) is copied: a copy of a session and
+        the session it was copied from do not share them. A ``verify`` that is not a ``bool`` or a path (``None``, ``0``, ``""``:
         accepted then, and meaning "off") stays what it meant: ``False``.
         """
         verify = state.get("_verify_arg", True)
@@ -919,6 +921,11 @@ class Session:
         self._transport = requests.Session()
         # base_url has no setter (see its property) - restored directly.
         self._base_url = state.pop("base_url", None)
+        for name in ("headers", "proxies", "params", "cookies"):
+            if hasattr(state.get(name), "copy"):
+                state[name] = state[name].copy()
+        if isinstance(state.get("hooks"), dict):
+            state["hooks"] = {k: list(v) for k, v in state["hooks"].items()}
         # The private arguments first: a setter (``redirect_policy``) may need one.
         for name in sorted(state, key=lambda n: not n.startswith("_")):
             setattr(self, name, state[name])

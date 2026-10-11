@@ -265,7 +265,8 @@ are this library's own [exceptions](exceptions.md), unchanged:
 
 ```{warning}
 This filesystem's `to_json()` output, or a pickled instance, contains its
-credentials in clear text. Dask (distributed) pickles it with its
+credentials in clear text: `auth`, headers, cookies and the `key_password` of
+`TLSOptions`. Dask (distributed) pickles it with its
 `storage_options` and sends it over the network to its workers, see
 [pandas and Dask](#pandas-and-dask). Never write it to disk or send it
 anywhere untrusted.

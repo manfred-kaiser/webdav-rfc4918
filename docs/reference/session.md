@@ -357,15 +357,22 @@ serialises the options you configured.
 - The TLS adapter is rebuilt from your constructor arguments, including
   `tls=TLSOptions(...)`. So mTLS with a client certificate can be pickled.
   A raw `ssl.SSLContext` cannot.
-- `auth`, headers and cookies are copied as they are. A change to
+- `auth`, headers and cookies are copied as they are, but into containers of
+  their own: a copy and its original share no `headers`, `cookies`, `proxies`,
+  `hooks` or `params`, and changing one does not change the other. A change to
   `session.verify` or `session.cert` after construction is part of what is
   copied.
 - A callable you passed (`trusted_redirect_origins=` or `retry=` as a
   function) has to be picklable too: a module-level function, not a lambda.
 
 ```{warning}
-A pickled `Session`/`FileSystem` contains its credentials in clear text.
-Never write it to disk or send it anywhere untrusted.
+A pickled `Session`/`FileSystem` contains its credentials in clear text:
+`auth`, the headers (an `X-Api-Key`, an `Authorization`), the cookies and the
+`key_password` of `TLSOptions`. Never write it to disk or send it anywhere
+untrusted. There is no option that leaves them out: a worker that gets a
+session through `pickle` (`multiprocessing`, `dask`) needs them. To keep them
+out of a pickle, give the worker the configuration, and create the session
+there from the environment.
 ```
 
 ## A note on `requests.Session`
