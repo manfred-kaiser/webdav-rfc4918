@@ -319,6 +319,41 @@ def _stream(url: str, session: Session) -> IterStream:
     return IterStream(session, f"{url}/f", chunk_size=100)
 
 
+def test_seeking_to_the_end_of_an_empty_file_is_position_zero() -> None:
+    with scripted_server(file_server(0, serves(b""))) as (url, _rec):
+        with _stream(url, Session(url)) as stream:
+            assert stream.seek(0, 2) == 0
+            assert stream.read() == b""
+
+
+def test_read_none_reads_everything() -> None:
+    with scripted_server(file_server(len(_BODY), serves(_BODY))) as (url, _rec):
+        with _stream(url, Session(url)) as stream:
+            assert stream.read(None) == _BODY  # type: ignore[arg-type]
+
+
+def test_reading_a_closed_stream_is_a_value_error() -> None:
+    with scripted_server(file_server(len(_BODY), serves(_BODY))) as (url, _rec):
+        stream = _stream(url, Session(url))
+        with stream:
+            pass
+        for call in (stream.read, stream.read1, stream.readall):
+            with pytest.raises(ValueError, match="closed file"):
+                call()
+
+
+def test_a_seek_on_a_closed_stream_does_not_open_it_again() -> None:
+    with scripted_server(file_server(len(_BODY), serves(_BODY))) as (url, rec):
+        stream = _stream(url, Session(url))
+        with stream:
+            stream.read(10)
+        gets = len([r for r in rec.requests if r.method == "GET"])
+        with pytest.raises(ValueError, match="closed file"):
+            stream.seek(5)
+        assert stream.closed
+        assert len([r for r in rec.requests if r.method == "GET"]) == gets
+
+
 def test_seeking_and_reading_an_open_stream_still_works() -> None:
     with scripted_server(file_server(len(_BODY), serves(_BODY))) as (url, _rec):
         with _stream(url, Session(url)) as stream:

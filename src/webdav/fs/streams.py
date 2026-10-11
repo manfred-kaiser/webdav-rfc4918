@@ -288,6 +288,7 @@ class IterStream(RawIOBase):
         self._cm = iter_url(session, self.url, chunk_size=chunk_size)
         self._iterator: Iterator[bytes] | None = None
         self._initial_response: HTTPResponse | None = None
+        self._shut = False  # closed on purpose (not just not opened yet)
 
     @property
     def supports_ranges(self) -> bool:
@@ -329,13 +330,25 @@ class IterStream(RawIOBase):
 
     def close(self) -> None:
         """Close the underlying response, if not already closed."""
+        self._release()
+        self._shut = True
+
+    def _release(self) -> None:
         if self._iterator:
             self._cm.__exit__(None, None, None)
         self._iterator = None
         self.buffer = b""
 
+    def _check_open(self) -> None:
+        if self._shut or self._iterator is None:
+            msg = "I/O operation on closed file"
+            raise ValueError(msg)
+
     def seek(self, offset: int, whence: int = 0) -> int:
         """Seek within the stream, re-requesting with ``Range`` if needed."""
+        if self._shut:
+            msg = "I/O operation on closed file"
+            raise ValueError(msg)
         if whence == 0:
             loc = offset
         elif whence == 1:
@@ -344,7 +357,7 @@ class IterStream(RawIOBase):
                 return self.loc
             loc = self.loc + offset
         elif whence == 2:
-            if not self.size:
+            if self.size is None:
                 msg = "cannot seek to the end of file"
                 raise ValueError(msg)
             loc = self.size + offset
@@ -358,7 +371,7 @@ class IterStream(RawIOBase):
             msg = "server does not support ranges"
             raise ValueError(msg)
 
-        self.close()
+        self._release()
         self._cm = iter_url(self.session, self.url, pos=loc, chunk_size=self.chunk_size)
         _, self._iterator = self._cm.__enter__()
         self.loc = loc
@@ -402,7 +415,7 @@ class IterStream(RawIOBase):
 
     def read(self, num: int = -1) -> bytes:
         """Read at most ``num`` bytes."""
-        if num < 0:
+        if num is None or num < 0:
             return self.readall()
 
         buff = b""
@@ -415,6 +428,7 @@ class IterStream(RawIOBase):
 
     def read1(self, num: int = -1) -> bytes:
         """Read at most once from the underlying iterator."""
+        self._check_open()
         assert self._iterator
         if self.buffer:
             chunk = self.buffer
