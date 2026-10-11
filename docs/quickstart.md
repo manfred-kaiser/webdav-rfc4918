@@ -115,6 +115,9 @@ $ dav ls webdavs://webdav.example.org/Photos
 ```
 
 `dav` also has `get`, `put`, `cat`, `info`, `mkdir`, `rm`, `cp` and `mv`.
+Give the password through `$WEBDAV_PASSWORD`, `--password-stdin` or
+`--password-file`, not on the command line, see
+[CLI](reference/cli.md#credentials).
 
 ## Read next
 

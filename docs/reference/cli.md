@@ -12,12 +12,57 @@ Every command takes one or more WebDAV URLs: `webdavs://host/path`,
 `webdav://host/path`, or plain `http(s)://`. `webdavs://` is HTTPS,
 `webdav://` is plain HTTP.
 
-Authentication is `--user`/`--password`, `user:pass@host` in the URL, or
-the `WEBDAV_USER`/`WEBDAV_PASSWORD` environment variables, in that order of
-precedence. The `dav` command takes `user:pass@host` out of the URL itself
-and passes it on as `auth=` before it creates a `Session`. The library
-itself still refuses credentials in a URL, see
-[Session: Limits](session.md#limits-on-what-a-server-can-make-the-client-do).
+## Credentials
+
+The user comes from `--user`, else from `user@host` in the URL, else from
+`$WEBDAV_USER`, in that order. The password comes from `--password`,
+`--password-stdin` or `--password-file`, else from `user:pass@host` in the
+URL, else from `$WEBDAV_PASSWORD`, in that order. The `dav` command takes
+`user:pass@host` out of the URL itself and passes it on as `auth=` before it
+creates a `Session`. The library itself still refuses credentials in a URL,
+see [Session: Limits](session.md#limits-on-what-a-server-can-make-the-client-do).
+
+| Source | Visible in the process list and shell history? |
+|---|---|
+| `--password`, `user:pass@host` in the URL | Yes |
+| `--password-stdin`: the first line of standard input | No |
+| `--password-file PATH`: the first line of a file | No. Any file permissions are accepted (a mounted Kubernetes or Docker secret is `0644`) |
+| `$WEBDAV_PASSWORD` | Not in the arguments. Other processes of the same user can read it from the environment |
+| Prompt: `--user` and no password from any source, on a terminal | No |
+
+```console
+$ printf '%s\n' "$SECRET" | dav ls --user alice --password-stdin webdavs://webdav.example.org/
+$ dav ls --user alice --password-file /run/secrets/dav webdavs://webdav.example.org/
+$ dav ls --user alice webdavs://webdav.example.org/        # asks: Password for alice:
+```
+
+`--password`, `--password-stdin` and `--password-file` exclude each other.
+Only the line ending is removed from the password, spaces stay. An empty
+stdin or file is an error. `--password-stdin` cannot be combined with
+`dav put /dev/stdin ...`, which reads the same stream.
+
+Some rules you may trip over:
+
+- **The prompt only appears on a terminal** (standard input and standard
+  error both). In cron, CI and pipelines `dav --user alice URL` still sends
+  an empty password and never waits for input.
+- **A password needs a user.** A password from `--password`, `--password-stdin`,
+  `--password-file` or `:pass@host`, but no user from any source, is an error
+  and no request is sent. An exported `$WEBDAV_PASSWORD` alone is not: it
+  is ignored when there is no user, so it does not break requests to an
+  anonymous server.
+- **`$WEBDAV_PASSWORD` belongs to `$WEBDAV_USER`.** If `$WEBDAV_USER` is set
+  and the user of the URL or `--user` is a different one, using
+  `$WEBDAV_PASSWORD` for it is an error, so the password of one account is
+  not sent as another account's. Without `$WEBDAV_USER`,
+  `dav ls https://alice@host/` with `$WEBDAV_PASSWORD` set uses it for
+  `alice`. Mind that the password goes to whichever host the URL names.
+- **The userinfo of a URL is percent-decoded** (RFC 3986): write
+  `al%40ice:p%40ss` for `al@ice` and `p@ss`. `+` and a `%` that is not
+  followed by two hex digits stay as they are. A password that
+  contains a literal `%` followed by two hex digits (`pa%41ss`) is therefore
+  read as `paAss`; write `%25` for the `%` (`pa%2541ss`), or give such a
+  password with `--password-stdin` or `--password-file`, which are never decoded.
 
 ```{warning}
 A `webdav://` or `http://` URL would send the username and password in
@@ -27,10 +72,13 @@ anyway, with a warning. Use `webdavs://` or `https://`.
 
 `--password` is visible to other local users via the process list. A
 password in the URL (`user:pass@host`) is part of the command line as
-well and is visible in the same way. Set the password in
-`$WEBDAV_PASSWORD` instead. For an encrypted client key, use
+well and is visible in the same way, and both stay in the shell history. On a
+terminal, `dav` prints a note when it sees one. Use `--password-stdin`,
+`--password-file` or `$WEBDAV_PASSWORD` instead. For an encrypted client key, use
 `$WEBDAV_KEY_PASSWORD` instead of `--key-password`.
 ```
+
+## Commands
 
 ```console
 $ export WEBDAV_USER=user WEBDAV_PASSWORD=password

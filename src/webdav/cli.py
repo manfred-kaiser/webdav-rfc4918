@@ -4,9 +4,13 @@ Every command takes one or more WebDAV URLs
 (``webdav://host/path``/``webdavs://host/path``, or plain ``http(s)://``) -
 the scheme's host/port is the server, everything after it is the
 resource path. Authentication is ``--user``/``--password``, else
-``user:pass@host`` in the URL, else the ``WEBDAV_USER``/``WEBDAV_PASSWORD``
-environment variables, in that order of precedence (an explicit flag beats
-what a pasted URL happens to contain). mTLS (client certificates) is
+``user:pass@host`` in the URL (percent-encoded: ``@ : / %`` in a name or
+password are written ``%40 %3A %2F %25``), else the ``WEBDAV_USER``/
+``WEBDAV_PASSWORD`` environment variables, in that order of precedence (an
+explicit flag beats what a pasted URL happens to contain). A password
+that stays off the process list and the shell history comes from
+``--password-stdin``, ``--password-file`` or ``$WEBDAV_PASSWORD``; ``--user``
+alone asks for it on a terminal. mTLS (client certificates) is
 available via ``--cert``/``--key``/``--ca-cert`` - see ``--help`` on any
 subcommand. The commonly needed :class:`~webdav.session.Session`
 constructor options (redirect policy, response-size cap, retry, timeout,
@@ -15,11 +19,13 @@ group in ``--help``.
 """
 
 import argparse
+import getpass
 import math
 import os
 import ssl
 import sys
 from contextlib import suppress
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlsplit, urlunsplit
 
@@ -53,6 +59,9 @@ _REDIRECT_POLICIES = {policy.value: policy for policy in RedirectPolicy}
 #: meaningful value for --max-response-size: disable the cap).
 _UNSET = object()
 
+#: Local paths that are this process's own standard input.
+_STDIN_PATHS = ("/dev/stdin", "/dev/fd/0")
+
 
 class CLIError(Exception):
     """Raised for CLI-level errors (bad arguments, ...), caught in :func:`main`."""
@@ -74,11 +83,36 @@ def _split_url(
         msg = "a URL with a query or fragment is not supported (a signed URL is not a WebDAV path)"
         raise CLIError(msg)
 
-    resolved_user = user or parts.username or os.environ.get("WEBDAV_USER")
-    resolved_password = (
-        password or parts.password or os.environ.get("WEBDAV_PASSWORD") or ""
-    )
-    auth = (resolved_user, resolved_password) if resolved_user is not None else None
+    # RFC 3986 requires ``@ : / %`` in a userinfo to be percent-encoded.
+    url_user = unquote(parts.username) if parts.username else None
+    url_password = unquote(parts.password) if parts.password else None
+    env_user = os.environ.get("WEBDAV_USER")
+    resolved_user = user or url_user or env_user
+    if resolved_user is None and (password is not None or url_password):
+        # Dropping it silently would send the request anonymously.
+        msg = "a password was given but no user name (use --user, or user@host in the URL)"
+        raise CLIError(msg)
+
+    chosen: str | None
+    if password is not None:  # an explicit empty password is a password
+        chosen = password
+    elif url_password:
+        chosen = url_password
+    elif resolved_user is not None and (
+        env_password := os.environ.get("WEBDAV_PASSWORD")
+    ):
+        if env_user and resolved_user != env_user:
+            # The ambient password belongs to the ambient user.
+            msg = (
+                f"$WEBDAV_PASSWORD belongs to $WEBDAV_USER ({env_user!r}), not to "
+                f"{resolved_user!r}: give the password for {resolved_user!r} with "
+                "--password-stdin or --password-file, or unset WEBDAV_USER"
+            )
+            raise CLIError(msg)
+        chosen = env_password
+    else:
+        chosen = None
+    auth = (resolved_user, chosen or "") if resolved_user is not None else None
 
     host = parts.hostname or ""
     if ":" in host:
@@ -234,7 +268,63 @@ def _trust_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     return kwargs
 
 
+def _prepare_password(args: argparse.Namespace, *urls: str) -> None:
+    """Resolve a password that is not on the command line into ``args.password``.
+
+    Called once per command, before :func:`_split_url` (``mv``/``cp`` split two
+    URLs; standard input can only be read once).
+    """
+    on_terminal = sys.stderr.isatty()
+    if on_terminal and (
+        args.password is not None or any(urlsplit(url).password for url in urls)
+    ):
+        print(
+            "dav: a password on the command line or in the URL is visible to other "
+            "local users (process list) and stays in the shell history; "
+            "use --password-stdin, --password-file or $WEBDAV_PASSWORD",
+            file=sys.stderr,
+        )
+    if args.password_stdin:
+        if args.command == "put" and args.local_path in _STDIN_PATHS:
+            msg = "--password-stdin cannot be combined with an upload read from stdin"
+            raise CLIError(msg)
+        args.password = _first_line(sys.stdin.readline(), "stdin")
+    elif args.password_file:
+        with Path(args.password_file).open(encoding="utf-8") as secret:
+            args.password = _first_line(secret.readline(), args.password_file)
+    elif _should_prompt(args, urls):
+        # cron, CI and pipes (no terminal) must never wait for input.
+        try:
+            args.password = getpass.getpass(f"Password for {args.user}: ")
+        except EOFError:
+            msg = "no password entered"
+            raise CLIError(msg) from None
+    args.password_stdin = False
+    args.password_file = None
+
+
+def _should_prompt(args: argparse.Namespace, urls: "tuple[str, ...]") -> bool:
+    """Whether ``--user`` alone is to be completed by asking, on a terminal."""
+    return (
+        bool(args.user)
+        and args.password is None
+        and not os.environ.get("WEBDAV_PASSWORD")
+        and all(urlsplit(url).password is None for url in urls)
+        and sys.stderr.isatty()
+        and sys.stdin.isatty()
+    )
+
+
+def _first_line(line: str, source: str) -> str:
+    """A password read from ``source``: its first line, without the line ending."""
+    if not line:
+        msg = f"no password in {source}"
+        raise CLIError(msg)
+    return line.removesuffix("\n").removesuffix("\r")
+
+
 def _client_for(url: str, args: argparse.Namespace) -> tuple[FileSystem, str]:
+    _prepare_password(args, url)
     base_url, path, auth = _split_url(url, user=args.user, password=args.password)
     return FileSystem(base_url, auth=auth, **_client_kwargs(args)), path
 
@@ -298,6 +388,7 @@ def _cmd_rm(args: argparse.Namespace) -> None:
 def _same_server_paths(
     src: str, dst: str, args: argparse.Namespace
 ) -> tuple[FileSystem, str, str]:
+    _prepare_password(args, src, dst)
     src_base, src_path, src_auth = _split_url(
         src, user=args.user, password=args.password
     )
@@ -330,14 +421,31 @@ def _add_client_args(parser: argparse.ArgumentParser) -> None:
     """Add every flag that configures the underlying :class:`~webdav.session.Session`."""
     auth = parser.add_argument_group("authentication")
     auth.add_argument(
-        "--user", default=None, help="username (default: $WEBDAV_USER, or from the URL)"
+        "--user",
+        default=None,
+        help="username (default: $WEBDAV_USER, or from the URL); without any "
+        "password source, a terminal is asked for it",
     )
-    auth.add_argument(
+    secret = auth.add_mutually_exclusive_group()
+    secret.add_argument(
         "--password",
         default=None,
         help="password (default: $WEBDAV_PASSWORD, or from the URL) - "
-        "prefer the environment variable, --password is visible to other "
-        "local users via the process list",
+        "prefer --password-stdin, --password-file or the environment variable, "
+        "--password is visible to other local users via the process list",
+    )
+    secret.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="read the password from the first line of standard input "
+        "(not for 'put /dev/stdin')",
+    )
+    secret.add_argument(
+        "--password-file",
+        default=None,
+        metavar="PATH",
+        help="read the password from the first line of a file "
+        "(any permissions: a mounted Kubernetes/Docker secret works)",
     )
 
     tls = parser.add_argument_group("TLS / mTLS")

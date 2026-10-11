@@ -228,7 +228,9 @@ dav put ./report.pdf webdavs://webdav.example.org/report.pdf --overwrite
 `webdavs://` is WebDAV over HTTPS, `webdav://` plain HTTP.
 
 Also `info`, `cat`, `mkdir`, `rm`, `mv` and `cp`. Credentials via `--user` and
-`--password`, or `$WEBDAV_USER` and `$WEBDAV_PASSWORD`. See the
+`--password-stdin`/`--password-file` (or a prompt on a terminal), or `$WEBDAV_USER`
+and `$WEBDAV_PASSWORD`; `--password` and `user:pass@host` work too, but a command
+line is visible in the process list. See the
 [CLI reference](https://webdav.readthedocs.io/en/latest/reference/cli.html), or `dav <command> --help`.
 
 
