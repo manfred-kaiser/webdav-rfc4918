@@ -94,6 +94,17 @@ cannot change it: `verify=False` is ignored (and logged as ignored), and
 `verify=True` or a path where the session does not verify is refused with a
 `ClientError`: set `session.verify` instead. A per-call `cert=` is ignored.
 
+### Redirects to another origin
+
+What a redirect to another origin is sent through gets the policy of how to
+talk TLS: `minimum_version`, `maximum_version`, `ciphers`,
+`strict_chain_checking` and whether to verify. It does not get what belongs to
+your server: no `ca_files`, no `crl_files` (the storage host has no CRL from
+your CA), no client certificate or key password. A target that
+cannot meet the policy (a storage host that speaks TLS 1.2 where you require
+1.3) makes the request fail with an `SSLError`; `RedirectPolicy.SAME_ORIGIN`
+(the default) is the way not to follow it.
+
 ### `key_password`
 
 The password of the key in `cert=`, as in the example
@@ -189,6 +200,7 @@ urllib.request.urlopen("https://webdav.example.org/", context=context)
 | `keyfile` | `None` | Its private key, if not in `certfile` |
 | `options` | `TLSOptions()` | The fields above |
 | `verify` | `True` | `False` turns off certificate and hostname checking, with a `TLSHardeningDisabledWarning` |
+| `warn` | `True` | `False` leaves out the hardening warnings (for a second context of a configuration already warned about) |
 
 All arguments are keyword-only. Every signature is also in the
 [API reference](api.md#tls).

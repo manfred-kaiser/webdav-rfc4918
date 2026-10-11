@@ -114,6 +114,7 @@ from webdav.transport.retry import MAX_RETRY_AFTER, retry_after
 from webdav.transport.retry import retry as _retry
 from webdav.transport.tls import (
     SSLContextAdapter,
+    build_foreign_adapter,
     check_verify_type,
     configure_tls,
     verification_on,
@@ -369,7 +370,10 @@ class Session:
                 :class:`~webdav.transport.tls.TLSOptions`. Triggers the hardened
                 :mod:`webdav.transport.tls` adapter when given; ``verify`` and
                 ``cert`` are then the adapter's too (changing them later
-                rebuilds its TLS context).
+                rebuilds its TLS context), and what the options say about
+                versions, ciphers and chain checking also holds for a redirect to
+                another origin (never the CA files, CRLs or client
+                certificate).
             timeout: Default ``(connect, read)`` timeout (or a single
                 value for both) applied when a request doesn't set its
                 own. ``None`` restores ``requests``' own no-timeout
@@ -535,10 +539,15 @@ class Session:
         self._features: dict[Origin | str, FeatureDetection] = {}
         self._features_lock = threading.RLock()
         self._cleartext = CleartextWarner()
-        # What a redirect to another origin is sent through: a plain adapter,
+        # What a redirect to another origin is sent through: its own adapter,
         # so that neither a client certificate (mTLS) nor any transport
-        # setting meant for *this* server goes with it.
-        self._foreign_adapter = DeadlineAdapter(response_class=self._response_class_arg)
+        # setting meant for *this* server goes with it - only how to talk TLS
+        # does (see build_foreign_adapter).
+        self._foreign_adapter = build_foreign_adapter(
+            self._tls_arg,
+            verify=verification_on(self._verify_arg),
+            response_class=self._response_class_arg,
+        )
 
     # -- forwarded to self._transport, exactly like plain requests.Session --
 
@@ -639,7 +648,8 @@ class Session:
 
         Without ``tls=`` these are the attributes of ``requests``; with it the
         TLS context is built anew first (so a bad value raises before anything
-        is touched) and swapped in place.
+        is touched) and swapped in place, together with the one a redirect to
+        another origin goes through.
         """
         verify = check_verify_type(changes["verify"]) if "verify" in changes else None
         with self._tls_lock:
@@ -657,6 +667,12 @@ class Session:
                     response_class=self._response_class_arg,
                     pool_connections=self._pool_connections_arg,
                     pool_maxsize=self._pool_maxsize_arg,
+                )
+                self._foreign_adapter = build_foreign_adapter(
+                    self._tls_arg,
+                    verify=verification_on(new_verify),
+                    response_class=self._response_class_arg,
+                    adapter=self._foreign_adapter,
                 )
             self._verify_arg = new_verify  # type: ignore[assignment]
             self._cert_arg = new_cert

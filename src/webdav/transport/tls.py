@@ -145,6 +145,7 @@ def build_ssl_context(
     keyfile: "StrPath | None" = None,
     options: TLSOptions | None = None,
     verify: bool = True,
+    warn: bool = True,
 ) -> ssl.SSLContext:
     """Build a hardened :class:`ssl.SSLContext`, optionally for mTLS.
 
@@ -169,6 +170,9 @@ def build_ssl_context(
         verify: Server certificate verification. ``False`` disables it
             entirely (and hostname checking with it) - the connection is
             then not protected against a machine-in-the-middle.
+        warn: ``False`` for a second context of a configuration that has
+            already been warned about (the one a redirect to another origin is
+            sent through), which would only repeat every warning.
 
     Raises:
         TLSConfigError: A certificate, key or CA/CRL file could not be
@@ -176,7 +180,8 @@ def build_ssl_context(
 
     """
     options = options or TLSOptions()
-    _warn_about_disabled_hardening(options, verify=verify)
+    if warn:
+        _warn_about_disabled_hardening(options, verify=verify)
 
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.minimum_version = options.minimum_version
@@ -358,6 +363,35 @@ def mount_mtls_adapter(
             pool_maxsize=pool_maxsize,
         ),
     )
+
+
+def build_foreign_adapter(
+    tls: "TLSOptions | None",
+    *,
+    verify: bool,
+    response_class: type[Response] = Response,
+    adapter: "DeadlineAdapter | None" = None,
+) -> DeadlineAdapter:
+    """The adapter a redirect to *another* origin is sent through.
+
+    Without ``tls`` a plain one. With it, the policy for how to talk TLS
+    (versions, ciphers, strict chain checking, whether to verify) goes along;
+    what is the origin server's own does not: no client certificate or key
+    password, no CA files or CRLs (a private CA does not vouch for a storage
+    host). ``adapter`` is an existing one to reconfigure
+    in place.
+    """
+    if tls is None:
+        return adapter or DeadlineAdapter(response_class=response_class)
+    context = build_ssl_context(
+        options=replace(tls, ca_files=None, crl_files=None, key_password=None),
+        verify=verify,
+        warn=False,
+    )
+    if isinstance(adapter, SSLContextAdapter):
+        adapter.reconfigure(context, verify=verify)
+        return adapter
+    return SSLContextAdapter(context, verify=verify, response_class=response_class)
 
 
 def check_verify_type(verify: object) -> "bool | str":

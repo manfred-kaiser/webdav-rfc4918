@@ -314,6 +314,84 @@ def test_verify_none_for_one_call_means_the_sessions_own() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The policy of how to talk TLS goes along on a redirect, what is the origin's own does not
+# ---------------------------------------------------------------------------
+
+
+def test_a_redirect_target_that_cannot_meet_the_tls_policy_is_not_reached(
+    certs: Certificates, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SSL_CERT_FILE", str(certs.ca_cert))  # the foreign hop's trust
+    with tls_server(certs, always(OK), max_version=ssl.TLSVersion.TLSv1_2) as (
+        old_url,
+        old_rec,
+    ):
+        with tls_server(certs, lambda _r: redirect(307, f"{old_url}/t")) as (
+            gateway,
+            _g,
+        ):
+            strict = Session(
+                redirect_policy=RedirectPolicy.ALL,
+                tls=TLSOptions(
+                    ca_files=str(certs.ca_cert),
+                    minimum_version=ssl.TLSVersion.TLSv1_3,
+                ),
+                retry=False,
+            )
+            with pytest.raises(requests.exceptions.SSLError):
+                strict.get(f"{gateway}/x")
+            assert old_rec.requests == []
+            # the same without the floor: the hop works, as it always did
+            relaxed = Session(
+                redirect_policy=RedirectPolicy.ALL,
+                tls=TLSOptions(ca_files=str(certs.ca_cert)),
+                retry=False,
+            )
+            assert relaxed.get(f"{gateway}/x").status_code == 204
+            assert len(old_rec.requests) == 1
+
+
+def test_the_foreign_context_takes_policy_and_nothing_of_the_origins_own(
+    certs: Certificates,
+) -> None:
+    session = Session(
+        tls=TLSOptions(
+            ca_files=str(certs.ca_cert),
+            crl_files=str(certs.ca_cert),
+            ciphers="ECDHE+AESGCM",
+            minimum_version=ssl.TLSVersion.TLSv1_3,
+            strict_chain_checking=False,
+            key_password="pw",
+        )
+    )
+    main = session.get_adapter("https://x")._ssl_context  # type: ignore[attr-defined]
+    foreign = session._foreign_adapter._ssl_context  # type: ignore[attr-defined]
+    assert main.verify_flags & ssl.VERIFY_CRL_CHECK_LEAF
+    assert not foreign.verify_flags & ssl.VERIFY_CRL_CHECK_LEAF
+    assert foreign.minimum_version == ssl.TLSVersion.TLSv1_3
+    assert not foreign.verify_flags & ssl.VERIFY_X509_STRICT
+    assert foreign.verify_mode == ssl.CERT_REQUIRED
+
+
+def test_the_foreign_adapter_follows_verify_false_and_a_changed_verify(
+    certs: Certificates,
+) -> None:
+    with pytest.warns(exceptions.TLSHardeningDisabledWarning):
+        session = Session(verify=False, tls=TLSOptions())
+    adapter = session._foreign_adapter
+    assert adapter.verifies is False  # type: ignore[attr-defined]
+    session.verify = str(certs.ca_cert)
+    assert session._foreign_adapter is adapter
+    assert adapter.verifies is True  # type: ignore[attr-defined]
+
+
+def test_without_tls_the_foreign_adapter_is_the_plain_one() -> None:
+    from webdav.transport.deadline import DeadlineAdapter
+
+    assert type(Session()._foreign_adapter) is DeadlineAdapter
+
+
+# ---------------------------------------------------------------------------
 # The query of a signed URL is not in a transport error
 # ---------------------------------------------------------------------------
 
