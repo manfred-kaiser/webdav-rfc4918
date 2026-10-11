@@ -44,6 +44,11 @@ Tracker = "https://github.com/manfred-kaiser/webdav-rfc4918/issues"
 [tool.hatch.build.targets.wheel]
 packages = [ "src/webdav" ]
 
+[tool.hatch.build.targets.sdist]
+# tests/ and docs/ stay (packagers run the suite); CI definitions, the maintainer's tooling and
+# the audit notes are of no use to a source distribution.
+exclude = [ ".github", "tools", "FINDINGS.md" ]
+
 [tool.hatch.envs.hatch-test]
 dependencies = [ "hypothesis", "pytest", "pytest-cov", "pytest-xdist", "typing-extensions" ]
 # pandas, dask, pyarrow, zarr and xarray: the programs that use the fsspec filesystem, run in
