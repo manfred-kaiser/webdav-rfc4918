@@ -77,7 +77,9 @@ def start(*, timeout: float = 180.0) -> None:
             "--name",
             CONTAINER_NAME,
             "-p",
-            f"{PORT}:80",
+            # Loopback only: Docker publishes on every interface otherwise (past the host firewall),
+            # with the known admin password below.
+            f"{HOST}:{PORT}:80",
             "-e",
             "SQLITE_DATABASE=nc.db",
             "-e",

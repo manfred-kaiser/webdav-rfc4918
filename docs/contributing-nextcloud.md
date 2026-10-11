@@ -28,7 +28,8 @@ the distros this project otherwise uses.
 
 - **Docker usable** (`docker info` works for the invoking user, see
   `tests/nextcloud_instance.py`): `pytest` starts a throwaway container
-  (the pinned `nextcloud:35.0.1-apache` image, sqlite backend, port 8767),
+  (the pinned `nextcloud:35.0.1-apache` image, sqlite backend, port 8767 on
+  127.0.0.1 only),
   waits up to 180 seconds for it to finish installing, runs the tests and
   removes the container again.
 - **Not usable**: the file is skipped, with the reason in the
@@ -60,7 +61,7 @@ removes the container again, also on failure or Ctrl-C. With
 
 ```console
 $ docker run -d --name nextcloud-test \
-    -p 8767:80 \
+    -p 127.0.0.1:8767:80 \
     -e SQLITE_DATABASE=nc.db \
     -e NEXTCLOUD_ADMIN_USER=admin \
     -e NEXTCLOUD_ADMIN_PASSWORD=testpass123 \
