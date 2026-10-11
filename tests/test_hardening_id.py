@@ -16,7 +16,7 @@ import fsspec
 import pytest
 
 from tests.credentials import AUTH
-from tests.scripted_server import Seen, scripted_server
+from tests.scripted_server import Seen, always, scripted_server
 from webdav import FileSystem
 from webdav.exceptions import (
     ClientError,
@@ -114,6 +114,51 @@ def test_BUG02_legacy_latin1_without_charset_needs_encoding() -> None:
 
 def test_BUG02_guard_hostile_charset_is_not_used() -> None:
     assert _read_text("text/plain; charset=rot13", "héllo".encode()) == "héllo"
+
+
+# ------------------------------------------------------------------ BUG-03
+def _record_server() -> Any:
+    def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
+        return (404, {}, b"") if seen.method == "PROPFIND" else (204, {}, b"")
+
+    return scripted_server(respond)
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        "/dir/a%2Fb.txt",
+        "/dir/caf%E9.txt",
+        "/dir/x%2fy/",
+        "/dir/a%20b.txt",
+        "/dir/caf%C3%A9.txt",
+        "/dir/100%25.txt",
+    ],
+)
+def test_BUG03_full_url_is_sent_as_written_without_base_url(given: str) -> None:
+    with _record_server() as (url, rec):
+        FileSystem(retry=False).remove(url + given)
+    # ``requests`` itself spells the hex digits of an escape in capitals: the same bytes
+    assert rec.requests[0].path.upper() == given.upper()
+
+
+@pytest.mark.parametrize("given", ["/dir/a%2Fb.txt", "/dir/caf%E9.txt"])
+def test_BUG03_guard_full_url_with_base_url_is_sent_as_written(given: str) -> None:
+    with _record_server() as (url, rec):
+        FileSystem(url, retry=False).remove(url + given)
+    assert rec.requests[0].path == given
+
+
+def test_BUG03_guard_unencoded_space_and_unicode_are_encoded() -> None:
+    with _record_server() as (url, rec):
+        FileSystem(retry=False).remove(url + "/a b/café.txt")
+    assert rec.requests[0].path == "/a%20b/caf%C3%A9.txt"
+
+
+def test_BUG03_guard_mkdir_adds_the_slash_to_the_raw_path() -> None:
+    with scripted_server(always((201, {}, b""))) as (url, rec):
+        FileSystem(retry=False).mkdir(url + "/d%2Fx")
+    assert rec.requests[0].path == "/d%2Fx/"
 
 
 # ------------------------------------------------------------------ BUG-12

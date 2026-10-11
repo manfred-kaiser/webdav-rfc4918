@@ -333,9 +333,10 @@ what a lock does on the server are explained in [Locking](locking.md).
 
 A path is the plain name: `a%20b.txt` is a file called `a%20b.txt`. It is
 percent-encoded exactly once, entirely (`%`, `?`, `#`, `;`, `+`
-included). A full URL is used as written. What `ls` and `walk` return is
-what `info`, `download_file` and the others take. Unicode is never
-re-normalised on the way out.
+included). A full URL is used as written, with or without a base URL:
+`a%2Fb` stays one name, and `caf%E9` stays the bytes the server stores. What
+`ls` and `walk` return is what `info`, `download_file` and the others take.
+Unicode is never re-normalised on the way out.
 
 ### Names from a server are not yours
 

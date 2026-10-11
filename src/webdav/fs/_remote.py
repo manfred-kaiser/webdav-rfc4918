@@ -9,6 +9,7 @@ session's public API, so the file-system layer has no private door into it.
 
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, NamedTuple
+from urllib.parse import urlsplit, urlunsplit
 
 from webdav.dav.multistatus import multistatus_failure
 from webdav.dav.urls import URL, relative_url_to
@@ -68,10 +69,14 @@ class Remote:
             msg = f"{path!r} is not a full http(s) URL and this session has no base_url"
             raise ClientError(msg)
         base = parsed.copy_with(path="/", query="")
-        suffix = "/" if add_trailing_slash and not parsed.path.endswith("/") else ""
-        return Located(
-            str(parsed.copy_with(path=parsed.path + suffix)), base, parsed.path
-        )
+        # A full URL is used as it is written, as ``Session.resolve_url`` does: ``parsed`` is
+        # for comparing only - encoding its decoded path again would turn ``a%2Fb`` into
+        # ``a/b`` and ``caf%E9`` into ``caf%EF%BF%BD``, another object on the server.
+        split = urlsplit(path)
+        raw_path = split.path
+        if add_trailing_slash and not raw_path.endswith("/"):
+            raw_path += "/"
+        return Located(urlunsplit(split._replace(path=raw_path)), base, parsed.path)
 
     def send(
         self,
