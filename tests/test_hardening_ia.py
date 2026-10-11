@@ -468,6 +468,70 @@ def test_bug09_display_name_keeps_its_edge_spaces() -> None:
     assert MultiStatusResponse(body).entries[0].properties.display_name == " a "
 
 
+# -- FS-05: what a message may carry -----------------------------------------
+
+NASTY = "x\n2026 ERROR forged\x1b[2J\x85\u2028\u202eexe.jpg"
+
+
+def test_fs05_redact_url_neutralises_every_control_class() -> None:
+    shown = redact_url(f"https://h.example/{NASTY}?token=secret")
+    assert "secret" not in shown
+    assert not any(c in shown for c in "\n\x1b\x85\u2028\u202e")
+
+
+def test_fs05_a_reason_phrase_cannot_forge_a_log_line() -> None:
+    exc = HTTPStatusError(
+        make_response(403, reason="Forbidden\x1b]0;pwned\x07\r\nforged")
+    )
+    assert not any(c in str(exc) for c in "\x1b\x07\r\n")
+    assert "Forbidden" in str(exc)
+
+
+def test_fs05_a_path_in_a_not_found_message_cannot_forge_a_log_line() -> None:
+    exc = ResourceNotFoundError(make_response(404), path=NASTY)
+    assert not any(c in str(exc) for c in "\n\x1b\x85\u2028\u202e")
+    assert exc.path == NASTY  # the data itself is not altered
+
+
+def test_fs05_a_failing_href_in_a_multistatus_message_cannot_forge_a_log_line() -> None:
+    exc = MultiStatusError({NASTY: "Locked"})
+    assert not any(c in str(exc) for c in "\n\x1b\x85\u2028\u202e")
+
+
+def test_fs05_the_error_path_of_a_redirected_request_is_safe() -> None:
+    response = make_response(
+        404, url="http://dav.example/gone%0a2026-10-11%20ERROR%20x%1b%5b2J"
+    )
+    with pytest.raises(ResourceNotFoundError) as caught:
+        response.raise_for_status()
+    assert "\n" not in str(caught.value)
+    assert "\x1b" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Screenshot 10.00.00\u202fAM.png",
+        "a\u00a0b",
+        "family \U0001f468\u200d\U0001f469\u200d\U0001f467",
+        "\u6f22\u5b57.txt",
+        "\u05e9\u200f\u05dc\u05d5\u05dd",
+        "back\\slash",
+    ],
+)
+def test_fs05_ordinary_unicode_names_are_neither_rejected_nor_changed(
+    name: str,
+) -> None:
+    exc = ResourceNotFoundError(make_response(404), path=name)
+    assert name in str(exc)
+    assert redact_url(f"https://h/{name}").endswith(name.replace("\\", "?"))
+
+
+def test_fs05_names_with_control_characters_are_still_listed() -> None:
+    parsed = MultiStatusResponse(ms(entry("/d/a%0Ab"), entry("/d/%E2%80%AEgpj.exe")))
+    assert [r.path for r in parsed.entries] == ["/d/a\nb", "/d/\u202egpj.exe"]
+
+
 # -- FS-09: two answers for one resource --------------------------------------
 
 

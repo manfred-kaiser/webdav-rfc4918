@@ -76,6 +76,10 @@ Every exception class, with its attributes, is listed in the
   human-readable reason instead of a code. The exception's message names
   the first ten of them (each `href` cut at 200 characters, then "and N
   more"); `statuses` always has every one.
+- Messages show a name from the server with control characters, the
+  bidirectional overrides and the line separators written out as `\x1b`,
+  `\u202e` and so on; the `path` attribute and the names `ls()` returns are
+  not changed.
 - A write (`PUT`, `DELETE`, `MKCOL`, `COPY`, `MOVE`, `PROPPATCH`, `POST`,
   `PATCH`) answered with a 3xx that names no `Location` (300, 304, 305) did
   not do anything: `raise_for_status()` raises

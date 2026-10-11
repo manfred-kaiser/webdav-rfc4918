@@ -27,7 +27,7 @@ from webdav._base_exceptions import ClientError, WebDAVError
 from webdav._xml_guard import check_xml
 from webdav.methods import WRITE_METHODS
 from webdav.transport.body import content_within
-from webdav.url_safety import redact_url
+from webdav.url_safety import escape_text, redact_url
 
 if TYPE_CHECKING:
     import types
@@ -51,7 +51,7 @@ class IsACollectionError(ClientError):
     def __init__(self, path: str, msg: str = "") -> None:
         """Initialize with the path and an optional extra message."""
         self.path = path
-        super().__init__(f"{path} is a collection. {msg}".rstrip())
+        super().__init__(f"{escape_text(path)} is a collection. {msg}".rstrip())
 
 
 class IsAResourceError(ClientError):
@@ -60,7 +60,7 @@ class IsAResourceError(ClientError):
     def __init__(self, path: str, msg: str = "") -> None:
         """Initialize with the path and an optional extra message."""
         self.path = path
-        super().__init__(f"{path} is not a collection. {msg}".rstrip())
+        super().__init__(f"{escape_text(path)} is not a collection. {msg}".rstrip())
 
 
 class TLSConfigError(ClientError):
@@ -143,7 +143,7 @@ class MultiStatusError(WebDAVError):
                 msg += f" (and {len(statuses) - len(shown)} more - see .statuses)"
         else:
             href, status = next(iter(statuses.items()))
-            msg = f"The resource {_clipped(href)} is {status.lower()}"
+            msg = f"The resource {escape_text(_clipped(href))} is {status.lower()}"
         self.msg = msg
         super().__init__(msg)
 
@@ -197,7 +197,7 @@ class HTTPStatusError(WebDAVError, requests.exceptions.HTTPError):
         self.path = path
         self.status_code: int = response.status_code
         self._error_codes: frozenset[str] | None = None
-        reason = response.reason or _phrase_for(response.status_code)
+        reason = escape_text(response.reason or _phrase_for(response.status_code))
         default = f"received {self.status_code} ({reason})"
         if path:
             default += f" for {path!r}"
@@ -304,7 +304,11 @@ class ResourceNotFoundError(HTTPStatusError):
 
     def __init__(self, response: "Response", path: str | None = None) -> None:
         """Instantiate with the failed response and the missing path."""
-        msg = f"The resource {path} could not be found on the server" if path else None
+        msg = (
+            f"The resource {escape_text(path)} could not be found on the server"
+            if path
+            else None
+        )
         super().__init__(response, path=path, msg=msg)
 
 
@@ -356,7 +360,7 @@ class ResourceAlreadyExistsError(PreconditionFailedError):
 
     def __init__(self, response: "Response", path: str | None = None) -> None:
         """Instantiate with the failed response and the existing path."""
-        msg = f"The resource {path} already exists" if path else None
+        msg = f"The resource {escape_text(path)} already exists" if path else None
         super().__init__(response, path=path, msg=msg)
 
 
@@ -496,7 +500,7 @@ class RedirectNotFollowedError(HTTPStatusError):
         if location:
             msg += f", redirecting to {redact_url(location)!r}"
         if reason:
-            msg += f" - not followed: {reason}"
+            msg += f" - not followed: {escape_text(reason)}"
         elif not location:
             msg += " - not followed: the response names no Location, so the request was not carried out"
         else:

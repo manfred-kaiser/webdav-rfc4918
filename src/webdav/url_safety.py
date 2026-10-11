@@ -25,6 +25,14 @@ _DEFAULT_PORTS = {"http": 80, "https": 443}
 #: two different hosts).
 _FORBIDDEN_URL_CHARS = re.compile(r"[\x00-\x1f\x7f\\]")
 
+#: What must never reach a terminal or a log line as itself, whatever else a name
+#: may hold: control characters (C0, DEL, C1 - an ``ESC`` sequence rewrites the
+#: screen, ``NEL`` and the line/paragraph separators end a log line), and the
+#: bidirectional overrides and isolates that make ``gpj.exe`` read as ``exe.jpg``.
+#: Deliberately no more than that: no-break and narrow spaces, joiners and the
+#: left-to-right/right-to-left marks are ordinary parts of real file names.
+_UNSAFE_TEXT = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+
 Origin = tuple[str, str, int]
 
 _URL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
@@ -99,6 +107,21 @@ def _checked_origin(url: str) -> Origin:
     return (scheme, host, port)
 
 
+def escape_text(text: str) -> str:
+    r"""``text`` with the characters of ``_UNSAFE_TEXT`` written as ``\xNN``/``\uNNNN``, for a message or a log line.
+
+    Only for showing: a name from a server is data and stays as it is.
+    """
+    return _UNSAFE_TEXT.sub(
+        lambda m: (
+            f"\\x{ord(m.group()):02x}"
+            if ord(m.group()) < 0x100
+            else f"\\u{ord(m.group()):04x}"
+        ),
+        text,
+    )
+
+
 def redact_url(url: str) -> str:
     """``url`` without userinfo, query and fragment, for log lines and error messages.
 
@@ -114,15 +137,24 @@ def redact_url(url: str) -> str:
     except ValueError:
         return "<unparseable URL>"
     if not parts.scheme and not host:
-        return _FORBIDDEN_URL_CHARS.sub("?", parts.path)[:200]
-    return _FORBIDDEN_URL_CHARS.sub("?", f"{parts.scheme}://{host}{port}{parts.path}")[
-        :200
-    ]
+        return escape_text(_FORBIDDEN_URL_CHARS.sub("?", parts.path)[:200])
+    return escape_text(
+        _FORBIDDEN_URL_CHARS.sub("?", f"{parts.scheme}://{host}{port}{parts.path}")[
+            :200
+        ]
+    )
 
 
 def display_url(path: str) -> str:
-    """``path`` for a message: a URL loses its userinfo, query and fragment."""
-    return redact_url(path) if is_url(path) else path
+    """``path`` for a message: a URL loses its userinfo, query and fragment, and no name carries a control character into it."""
+    return redact_url(path) if is_url(path) else escape_text(path)
 
 
-__all__ = ["Origin", "display_url", "effective_origin", "is_url", "redact_url"]
+__all__ = [
+    "Origin",
+    "display_url",
+    "effective_origin",
+    "escape_text",
+    "is_url",
+    "redact_url",
+]
