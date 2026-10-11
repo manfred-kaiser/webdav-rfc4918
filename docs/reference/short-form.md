@@ -103,7 +103,9 @@ for path, dirs, files in webdav.walk("https://webdav.example.org/Photos", auth=a
 ```
 
 `walk` yields `(path, dirs, files)` for every folder below the URL.
-`max_depth=1` stops one level down.
+`max_depth=1` stops one level down. A folder that cannot be listed raises
+its error; `onerror=` takes a function that is called with the error instead,
+and the walk goes on without that folder, as `os.walk` does.
 
 ## Reading and writing
 

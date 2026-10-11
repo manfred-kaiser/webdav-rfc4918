@@ -136,6 +136,20 @@ for path, dirs, files in fs.walk("Photos"):
 name from `dirs` to skip that subtree. `max_depth=` limits how deep it
 goes. Each folder costs one request.
 
+A folder that cannot be listed (a 403, say) raises its error and ends the
+walk. Pass `onerror=` to go on, as `os.walk` does: the function is called
+with the {class}`~webdav.exceptions.WebDAVError` and that subtree is skipped.
+
+```python
+errors = []
+for path, dirs, files in fs.walk("Photos", onerror=errors.append):
+    ...
+```
+
+A walk gives up with a `ClientError` after 256 levels or 100 000 folders,
+whatever `max_depth` says: a server that invents a new folder in every
+folder never ends.
+
 ## Reading and writing
 
 ```python

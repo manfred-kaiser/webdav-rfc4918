@@ -77,6 +77,7 @@ from webdav.exceptions import (
     PreconditionFailedError,
     ResourceAlreadyExistsError,
     ResourceNotFoundError,
+    WebDAVError,
 )
 from webdav.fs._remote import Remote
 from webdav.fs.streams import IterStream, SizedIterator, write_all
@@ -855,7 +856,11 @@ class FileSystem:
             )
 
     def walk(
-        self, path: str, *, max_depth: "int | None" = None
+        self,
+        path: str,
+        *,
+        max_depth: "int | None" = None,
+        onerror: "Callable[[WebDAVError], Any] | None" = None,
     ) -> "Iterator[tuple[str, list[Resource], list[Resource]]]":
         """Walk a collection tree top-down, like :func:`os.walk`.
 
@@ -873,6 +878,10 @@ class FileSystem:
             path: The collection to start at.
             max_depth: How many levels below ``path`` to descend; ``None``
                 for no limit.
+            onerror: Called with the :class:`~webdav.exceptions.WebDAVError` of a
+                collection that cannot be listed, which is then skipped - as
+                :func:`os.walk` does. Without it (the default) the error is raised
+                and the walk ends.
 
         """
         seen: set[str] = set()
@@ -890,7 +899,13 @@ class FileSystem:
                 )
                 raise ClientError(msg)
             seen.add(key)
-            entries = self.ls(current)
+            try:
+                entries = self.ls(current)
+            except WebDAVError as exc:
+                if onerror is None:
+                    raise
+                onerror(exc)
+                continue
             dirnames = [e for e in entries if e.is_dir]
             files = [e for e in entries if not e.is_dir]
             subdirs = {e.name for e in dirnames}

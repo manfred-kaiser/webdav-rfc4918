@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from xml.etree.ElementTree import Element
 
     from webdav.dav.properties import DAVProperties, PropName
+    from webdav.exceptions import WebDAVError
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -307,13 +308,17 @@ def dav_compliance(path: str = "", **kwargs: Unpack[_Options]) -> set[str]:
 
 
 def walk(
-    path: str, *, max_depth: "int | None" = None, **kwargs: Unpack[_Options]
+    path: str,
+    *,
+    max_depth: "int | None" = None,
+    onerror: "Callable[[WebDAVError], Any] | None" = None,
+    **kwargs: Unpack[_Options],
 ) -> "Iterator[tuple[str, list[Resource], list[Resource]]]":
     """Walk a collection tree top-down, like :func:`os.walk`.
 
     See :meth:`~webdav.fs.client.FileSystem.walk`; ``path`` is a full URL.
     """
-    return _walk(FileSystem.walk, kwargs, path, max_depth=max_depth)
+    return _walk(FileSystem.walk, kwargs, path, max_depth=max_depth, onerror=onerror)
 
 
 def download_file(
