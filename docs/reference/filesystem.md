@@ -317,6 +317,34 @@ included). A full URL is used as written. What `ls` and `walk` return is
 what `info`, `download_file` and the others take. Unicode is never
 re-normalised on the way out.
 
+### Names from a server are not yours
+
+A server chooses the names it lists. A `Resource` is a whole path, not a
+basename, so `os.path.join(directory, resource)` is not a safe way to a local
+file. Use `resource.basename` for the last segment and
+{func}`webdav.resource.safe_local_name` to check it before you create a file
+of that name:
+
+```python
+from webdav.resource import safe_local_name
+
+for resource in fs.ls("Photos"):
+    if not resource.is_dir:
+        fs.download_file(resource, safe_local_name(resource), overwrite=True)
+```
+
+`safe_local_name` always refuses an empty name, `.`, `..`, NUL and other
+control characters. It does not refuse a backslash, a colon or a leading `-`:
+those are ordinary characters of a name on Linux and macOS. The Windows rules
+(device names such as `CON` and `NUL`, a trailing dot or space, a backslash and
+`: " < > | ? *`) apply only with `safe_local_name(name, windows=True)`. Nothing
+turns them on by itself, and `get` does not call this helper: the checks are
+prepared, not enforced, because they cannot be tested on real Windows/macOS
+yet (issue #5, Windows/macOS CI). It is for you, where you create files from
+server names. It does not detect two names that are one file on a
+case-insensitive file system either. Error messages show a name escaped,
+never raw.
+
 ## Errors
 
 A `FileSystem` method raises a {class}`~webdav.exceptions.WebDAVError`

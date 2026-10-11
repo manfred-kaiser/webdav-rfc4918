@@ -234,6 +234,14 @@ for example `fs.get("/Photos", "photos", recursive=True)`.
   or read. It is not a lock: a local user who can swap a directory for a
   symlink in that moment is not stopped. Keep the trees you copy to and from
   to yourself. Windows has no `dir_fd` to close the gap.
+- Names come from the server, and `get` does not vet them for your
+  platform. On Windows a name such as `CON` or `a:b` is not a plain file, and
+  where the file system folds case (Windows, macOS) `A.txt` and `a.txt` are one
+  file, so one replaces the other. That is not checked: the checks are
+  prepared, not enforced, until they can be tested on real Windows/macOS (issue
+  #5). On Linux a backslash or a colon is a name like any other. See [Names
+  from a server](filesystem.md#names-from-a-server-are-not-yours) for the
+  helper that checks a name.
 
 ## Directories
 

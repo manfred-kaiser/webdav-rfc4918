@@ -1,9 +1,56 @@
 """What a listing returns: one type, for one thing."""
 
+import re
 from typing import TYPE_CHECKING, Any, Self
 
 if TYPE_CHECKING:
     from datetime import datetime
+
+#: Names Windows takes for a device, with or without an extension.
+_WINDOWS_DEVICES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"{device}{n}" for device in ("COM", "LPT") for n in "123456789"}
+)
+#: NUL, the other C0 control characters and DEL.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+#: What Windows does not allow in a file name (``:`` opens an alternate data stream).
+_WINDOWS_FORBIDDEN = re.compile(r'[\x00-\x1f<>:"/\\|?*]')
+
+
+def safe_local_name(name: str, *, windows: bool = False) -> str:
+    """The last segment of ``name`` - a name from a server - checked for use as a *local* file name.
+
+    A server chooses the names it lists, and a :class:`Resource` is a whole path, not a
+    basename: ``os.path.join(directory, resource)`` is not a safe way to a file. This takes
+    the last segment (``dir/a.txt`` gives ``a.txt``) and returns it if a file of that name
+    can be created in a directory of your own, else raises :exc:`ValueError` with a message
+    that shows the name escaped, never raw.
+
+    Always refused: an empty name, ``.``, ``..``, NUL and other control characters. A
+    backslash, a colon or a leading ``-`` is an ordinary character of a name on Linux and
+    macOS, and not refused. The Windows rules - device names (``CON``, ``NUL``, ``COM1``,
+    ...), a name that ends in a dot or a space, a backslash and ``: " < > | ? *`` - apply
+    only with ``windows=True``: nothing turns them on by itself, because they could not be
+    tested on real Windows yet (issue #5, Windows/macOS CI). Two names that are one file on
+    a case-insensitive file system are not detected either, and neither does ``get`` check
+    any of this for you: this helper is for callers who create files from server names.
+
+    Raises:
+        ValueError: ``name`` is not usable as a file name.
+
+    """
+    segment = str(name).rstrip("/").rpartition("/")[2]
+    if segment in ("", ".", "..") or _CONTROL.search(segment):
+        msg = f"{str(name)!r} is not usable as a local file name"
+        raise ValueError(msg)
+    if windows and (
+        _WINDOWS_FORBIDDEN.search(segment)
+        or segment[-1] in ". "
+        or segment.split(".", 1)[0].rstrip(" ").upper() in _WINDOWS_DEVICES
+    ):
+        msg = f"{str(name)!r} is not usable on Windows as a local file name"
+        raise ValueError(msg)
+    return segment
 
 
 class Resource(str):  # noqa: SLOT000 - a str subclass cannot have a non-empty __slots__
@@ -69,6 +116,15 @@ class Resource(str):  # noqa: SLOT000 - a str subclass cannot have a non-empty _
     def name(self) -> str:
         """The name, as a plain ``str``."""
         return str(self)
+
+    @property
+    def basename(self) -> str:
+        """The last segment of the name (``dir/a.txt`` gives ``a.txt``) - what the server calls it.
+
+        It is the server's word, not a vetted file name: :func:`safe_local_name` checks it for
+        use as a local one.
+        """
+        return str(self).rstrip("/").rpartition("/")[2]
 
     def as_dict(self) -> dict[str, Any]:
         """All fields as a plain dict (``name`` first)."""

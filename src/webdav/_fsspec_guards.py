@@ -9,6 +9,7 @@ filesystem itself, which is long enough.
 import contextvars
 import errno
 import os
+from pathlib import Path, PurePath
 from typing import Any, cast
 
 from fsspec.callbacks import DEFAULT_CALLBACK
@@ -18,6 +19,7 @@ from fsspec.utils import stringify_path
 from webdav._webdavs_url import authority_of, check_host, host_and_port
 from webdav.exceptions import ClientError
 from webdav.fs import FileSystem
+from webdav.resource import safe_local_name
 
 
 class WalkBudget:
@@ -62,6 +64,7 @@ class GetTree:
         # where it leads. A symlink *below* it that leads out of it is what is refused.
         self.root = os.path.realpath(given)
         self.contained = contained
+        self.written: dict[tuple[int, int], str] = {}
 
     def check(self, local: str) -> None:
         """Refuse ``local`` if a symlink leads it out of the destination.
@@ -79,6 +82,59 @@ class GetTree:
                 "of it (pass follow_symlinks=True to get() to allow it)"
             )
             raise OSError(errno.ELOOP, msg, local)
+
+    # Prepared, not enforced: ``get`` does not call the two checks below, because they
+    # cannot be tested on real Windows/macOS yet (see issue #5, Windows/macOS CI). They are
+    # pure, work on any platform, and are unit-tested on Linux.
+    def check_windows_names(self, local: str) -> None:
+        """Refuse a ``local`` under the tree with a part that is not a file name on Windows.
+
+        Raises:
+            OSError: A part of the path below the tree is not usable on Windows.
+
+        """
+        try:
+            absolute_local = os.path.abspath(local)  # noqa: PTH100
+            parts = PurePath(absolute_local).relative_to(self.given).parts
+        except ValueError:
+            return
+        for part in parts:
+            try:
+                safe_local_name(part, windows=True)
+            except ValueError as exc:
+                raise OSError(errno.EINVAL, str(exc), local) from exc
+
+    def check_collision(self, local: str) -> None:
+        """Refuse ``local`` if it is the file another name of this tree was :meth:`record`-ed for.
+
+        That is what two names differing only in case or Unicode form are on a file system
+        that folds them.
+
+        Raises:
+            OSError: ``local`` is the same file as a different name that was recorded.
+
+        """
+        known = self.written.get(_file_id(local))
+        if known is not None and known != local:
+            msg = (
+                f"{local!r} is the same file as {known!r} on this file system (names that "
+                "differ only in case or in Unicode form): the server has both"
+            )
+            raise OSError(errno.EEXIST, msg, local)
+
+    def record(self, local: str) -> None:
+        """Remember that ``local`` was written (for :meth:`check_collision`)."""
+        if (file_id := _file_id(local)) != (0, 0):
+            self.written[file_id] = local
+
+
+def _file_id(path: str) -> "tuple[int, int]":
+    """The identity of the file at ``path`` (``(0, 0)``: nothing there)."""
+    try:
+        status = Path(path).stat()
+    except OSError:
+        return (0, 0)
+    return status.st_dev, status.st_ino
 
 
 #: What the ``get`` / ``put`` in progress may write to / read from - ``None``: no tree
@@ -242,6 +298,13 @@ class GuardedFileSystem(AbstractFileSystem):
         This is a check of the resolved path just before the file is written: a local user
         who can swap a directory for a symlink in that moment is not stopped. Keep the
         destination to yourself. (Windows has no ``dir_fd`` to write without a race.)
+
+        The names are the server's, and ``get`` does not vet them for the platform: on Windows
+        a name such as ``CON`` or ``a:b`` is not a plain file, and where the file system folds
+        case or Unicode forms (Windows, macOS) two names of the server can be one file, one
+        silently replacing the other. That is not checked yet (checks are prepared, not
+        enforced; see issue #5, Windows/macOS CI). Vet names yourself with
+        :func:`~webdav.resource.safe_local_name` (``windows=True``) if you need that.
         """
         self._own_server(rpath)
         tree = None

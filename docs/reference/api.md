@@ -80,6 +80,8 @@ return `Resource` objects.
 
 .. autoclass:: webdav.resource.Resource
    :members:
+
+.. autofunction:: webdav.resource.safe_local_name
 ```
 
 ## Multi-Status bodies and properties
