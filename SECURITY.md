@@ -10,6 +10,33 @@ Include the version, what a malicious server (or caller) can make the client do,
 minimal reproduction - ideally against a local server such as the one in
 `tests/scripted_server.py`. You will get an answer within a week.
 
+## Supported versions
+
+Security fixes go into the latest release only, which is also what `main`
+is released from. There are no maintenance branches and no backports: if you
+run an older release, upgrade first. A report against an old release is
+welcome, but please check it against the latest release (or `main`) too, and say
+which you tested. The CHANGELOG's "Security" and "Behavior changes" entries
+tell you what to expect from an upgrade.
+
+## Advisories, CVEs and disclosure
+
+A confirmed vulnerability is handled as a coordinated disclosure:
+
+1. You report it privately (see above). It is acknowledged within a week.
+2. The maintainer reproduces and assesses it, and works on a fix in a private
+   branch or fork of the advisory. You are kept informed, and may review the fix.
+3. The fix is released, and a GitHub Security Advisory is published for the
+   repository, with a CVE requested through GitHub as the CNA when the issue
+   warrants one. The advisory names the affected and the fixed releases, a
+   workaround where there is one, and credits the reporter unless you prefer
+   not to be named. The CHANGELOG entry links to it.
+4. Public details are held back until a fixed release is on PyPI. The target is
+   a fix within 90 days of the report; if it is not ready by then, the
+   advisory is published anyway at that point, so that users can protect
+   themselves, and you are told in advance. If the issue is already being exploited, or
+   you must publish earlier for another reason, say so in your report.
+
 ## Scope
 
 This is a client library, so the interesting attacker is an **untrusted or compromised
