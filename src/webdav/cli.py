@@ -473,8 +473,9 @@ def _add_client_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         metavar="PATH",
         help="CA bundle to verify the server certificate against "
-        "(default: the system trust store) - server verification "
-        "itself can never be disabled",
+        "(default: the certifi bundle, or - with another TLS flag - the "
+        "system store, which SSL_CERT_FILE/SSL_CERT_DIR can redirect) - "
+        "server verification itself can never be disabled",
     )
     tls.add_argument(
         "--crl-cert",

@@ -160,6 +160,26 @@ list of defaults:
 - `download_file` writes only to the path you give, through a temporary
   file, and refuses a symlink at that path.
 
+What the defaults do **not** cover (the environment is trusted, a hostile
+server is not):
+
+- **Proxies.** `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` from
+  the environment are used, as with `requests`. The proxy sees what you
+  send. `dav --no-proxy` and the `trust_env` keyword of `Session` turn this off.
+- **Trust store.** Without `tls=`, `verify=True` trusts the `certifi`
+  bundle (distributions may patch it to the system store). With
+  `tls=TLSOptions(...)` (and in `dav` with `--key-password`, `--ciphers`,
+  `--tls-*-version` or `--crl-cert`) it is the operating system's store, and there
+  `SSL_CERT_FILE` and `SSL_CERT_DIR` from the environment can add or
+  replace CAs. Name your CA with `verify=`/`--ca-cert`.
+- **Pickle.** A pickled `Session`/`FileSystem`, `to_json()` output and the
+  `storage_options` Dask sends to its workers hold the credentials in
+  clear text, and so does the `key_password` of `TLSOptions`.
+- **Streaming.** A streamed download has no size or total-time limit. A
+  server that sends one byte per read timeout can hold it open.
+- **Untrusted input.** If a user, not you, chooses the paths or the server:
+  [Using the library with untrusted input](https://webdav.readthedocs.io/en/latest/untrusted-input.html).
+
 **Report a vulnerability:**
 [SECURITY.md](https://github.com/manfred-kaiser/webdav-rfc4918/blob/main/SECURITY.md).
 

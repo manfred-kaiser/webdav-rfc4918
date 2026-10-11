@@ -143,3 +143,24 @@ server can then send a response of any size, or keep a request open
 without end. `0` is rejected, so a typo cannot remove a limit by accident.
 `dav get` streams the download, so neither limit applies to it, see
 [Session: Limits](session.md#limits-on-what-a-server-can-make-the-client-do).
+
+## The environment
+
+`dav` is `requests` underneath, and `requests` reads the environment:
+
+- **Proxies.** `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` apply
+  to every request. A proxy sees a `webdav://` request completely, including
+  the credentials, and for `webdavs://` it sees which host you connect to.
+  `--no-proxy` ignores the proxy variables.
+- **CA bundles.** `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` are ignored.
+  Without a TLS flag, the server is verified against the `certifi` bundle
+  (a distribution may patch it to the system store). With `--key-password`,
+  `--ciphers`, `--tls-min-version`, `--tls-max-version` or `--crl-cert`, it is
+  the operating system's store instead, and OpenSSL's `SSL_CERT_FILE` and
+  `SSL_CERT_DIR` apply: whoever controls your environment can choose the CAs
+  you trust. Use `--ca-cert` to name the CA explicitly.
+- **`~/.netrc`** is not read.
+- **An encrypted client key.** `--key-password` and `$WEBDAV_KEY_PASSWORD`
+  hold the passphrase as plain text. In a library call, the same
+  `key_password` is part of what `pickle` keeps of a `Session`, see
+  [Session: Pickling and copying](session.md#pickling-and-copying).
