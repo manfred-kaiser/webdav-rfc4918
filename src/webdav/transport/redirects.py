@@ -286,6 +286,11 @@ def plan_hop(
         return Refuse("the redirect leads back to a URL already visited (a loop)")
     if not body_replayable:
         return Refuse("the request body cannot be sent a second time")
+    # Not only start -> target: a chain http -> https -> http ends up "same
+    # origin" as its start, but its last step was still a downgrade.
+    here, there = effective_origin(response.url), effective_origin(target)
+    if here and there and here[0] == "https" and there[0] == "http":
+        return Refuse("the redirect would downgrade https to http")
     return may_follow(origin_url or response.url, target, policy, is_trusted=is_trusted)
 
 

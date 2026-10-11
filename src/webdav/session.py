@@ -1314,10 +1314,14 @@ class Session:
         against the page that redirected: after A sends us to B, a further
         redirect to another path on B is still "another origin" as far as
         our credentials are concerned, and gets the same stripped request.
+        And once a chain has left the start origin it stays "away": a hop back
+        to A is sent stripped too (nothing of ours: no credentials, cookies,
+        session headers, lock ``If``), since B decided where it goes.
         """
         origin_url = response.url
         seen = {origin_url}
         hops = 0
+        left_origin = False
         while response.is_redirect or response.is_permanent_redirect:
             if policy == RedirectPolicy.NEVER:
                 refuse(response, "redirects are disabled for this request")
@@ -1365,7 +1369,7 @@ class Session:
             previous.close()
             hops += 1
             seen.add(target)
-            if same_origin:
+            if same_origin and not left_origin:
                 # ``params`` were already merged into the original URL; the
                 # Location is complete, and must not get them appended again.
                 # The lock header is worked out again for *this* URL.
@@ -1378,6 +1382,13 @@ class Session:
                     method, target, allow_redirects=False, **hop_kwargs
                 )
             else:
+                if same_origin:
+                    _LOGGER.info(
+                        "the redirect chain came back to the start origin (%s): "
+                        "sent without credentials, cookies or session headers",
+                        redact_url(target),
+                    )
+                left_origin = True
                 response = self._send_stripped(method, target, kwargs)
             response.history = [*previous.history, previous]
         return response

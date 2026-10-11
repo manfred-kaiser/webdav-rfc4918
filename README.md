@@ -127,8 +127,10 @@ list of defaults:
   an `InsecureTransportWarning`, once per host.
 - Only same-origin redirects are followed
   (`RedirectPolicy.SAME_ORIGIN`). Credentials and cookies are never sent to
-  another origin, even a trusted one.
-- A redirect from `https` to `http` is never followed, under any policy.
+  another origin, even a trusted one, and not on the way back to the origin
+  the request started at either.
+- A redirect from `https` to `http` is never followed, under any policy, at
+  any step of a chain.
 - Proxies from the environment (`HTTP_PROXY`, ...) are used, as in `requests`;
   `trust_env=False` / `dav --no-proxy` turns that off.
 - Buffered responses, including multistatus XML, are size-capped, and so are

@@ -85,12 +85,23 @@ scheme, host and port, so `http` -> `https` on the same host is a
 `https` -> `http` is never followed, not even with `ALL` or to an origin
 listed in `trusted_redirect_origins`. Trusting a host with your
 credentials does not mean accepting that the same bytes then cross the
-network in clear text.
+network in clear text. This holds for every step of a chain, not only for the
+first: `http://a` -> `https://b` -> `http://a/x` stops at the last step.
 ```
 
 Every hop is judged against the origin the request *started at*: after
 A redirects to B, a further redirect to another path on B is still "another
-origin" as far as your credentials are concerned.
+origin" as far as your credentials are concerned. And once a chain has left
+the start origin, nothing of yours goes with it again, **not even on the way
+back**: if B sends the request on to A, A gets it without credentials,
+cookies, session headers and lock tokens (the body, and the headers that
+describe it, still go). A public resource works that way, a protected one
+answers `401`/`403`. When A needs your credentials at the end of such a
+chain, the flow has to be changed (e.g. the gateway returns a URL instead of
+redirecting back); this library does not send them. A hop back to the start
+origin is sent through the adapter for other origins, so with `tls=` it is
+verified against the default trust locations, not your `ca_files`, and
+without your client certificate.
 
 ## Headers on a redirect to another origin
 

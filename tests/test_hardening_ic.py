@@ -392,6 +392,168 @@ def test_without_tls_the_foreign_adapter_is_the_plain_one() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Weak ciphers are warned about, exclusions are not
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "ciphers",
+    [
+        "ECDHE+AESGCM",
+        "HIGH:!aNULL:!MD5:!3DES",
+        "DEFAULT",
+        None,
+        "HIGH:!aNULL:!eNULL:!LOW:!RC4",
+    ],
+)
+def test_sound_cipher_strings_do_not_warn(ciphers: "str | None") -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        Session(tls=TLSOptions(ciphers=ciphers))
+
+
+@pytest.mark.parametrize(
+    "ciphers",
+    ["ALL:aNULL:eNULL:@SECLEVEL=0", "aNULL", "eNULL", "ECDHE+AESGCM:@SECLEVEL=0"],
+)
+def test_weak_cipher_strings_warn(ciphers: str) -> None:
+    with pytest.warns(exceptions.TLSHardeningDisabledWarning, match="ciphers"):
+        Session(tls=TLSOptions(ciphers=ciphers))
+
+
+# ---------------------------------------------------------------------------
+# Pinning
+# ---------------------------------------------------------------------------
+
+
+def test_a_matching_pin_connects_and_a_mismatching_one_does_not(
+    certs: Certificates,
+) -> None:
+    pin = _fingerprint(certs)
+    with tls_server(certs, always(OK)) as (url, rec):
+        ok = Session(
+            verify=str(certs.ca_cert),
+            tls=TLSOptions(pin_sha256=pin.upper()),  # case and colons do not matter
+            retry=False,
+        )
+        assert ok.get(f"{url}/x").status_code == 204
+        wrong = Session(
+            verify=str(certs.ca_cert),
+            tls=TLSOptions(pin_sha256="00" * 32),
+            retry=False,
+        )
+        with pytest.raises(requests.exceptions.SSLError, match="ingerprint") as caught:
+            wrong.get(f"{url}/x")
+        assert any("pin_sha256" in n for n in getattr(caught.value, "__notes__", []))
+        # a pin is on top of verification, not instead of it
+        with pytest.warns(exceptions.TLSHardeningDisabledWarning):
+            unverified = Session(
+                verify=False, tls=TLSOptions(pin_sha256="11" * 32), retry=False
+            )
+            with pytest.raises(requests.exceptions.SSLError):
+                unverified.get(f"{url}/x")
+    assert len(rec.requests) == 1
+
+
+def test_a_pin_follows_a_changed_verify_and_must_be_a_fingerprint(
+    certs: Certificates,
+) -> None:
+    for bad in ("zz", "ab" * 20, "00" * 31):
+        with pytest.raises(TLSConfigError, match="64 hex"):
+            TLSOptions(pin_sha256=bad)
+    pin = _fingerprint(certs)
+    with tls_server(certs, always(OK)) as (url, _rec):
+        session = Session(
+            verify=str(certs.ca_cert), tls=TLSOptions(pin_sha256=pin), retry=False
+        )
+        session.verify = str(certs.ca_cert)
+        assert session.get(f"{url}/x").status_code == 204
+
+
+def test_a_pin_stays_with_the_origin_server(certs: Certificates) -> None:
+    session = Session(tls=TLSOptions(pin_sha256=_fingerprint(certs)))
+    assert session.get_adapter("https://x")._pin == _fingerprint(certs)  # type: ignore[attr-defined]
+    assert session._foreign_adapter._pin is None  # type: ignore[attr-defined]
+
+
+def test_the_default_pin_is_none() -> None:
+    assert TLSOptions().pin_sha256 is None
+
+
+# ---------------------------------------------------------------------------
+# A chain that has left the start origin takes nothing of ours back
+# ---------------------------------------------------------------------------
+
+
+def test_a_chain_that_returns_to_the_start_origin_returns_without_credentials() -> None:
+    with scripted_server(
+        lambda r: redirect(307, f"{b_url}/gateway") if r.path == "/upload" else OK
+    ) as (a_url, a_rec):
+        with scripted_server(lambda _r: redirect(307, f"{a_url}/victim")) as (
+            b_url,
+            b_rec,
+        ):
+            session = Session(
+                a_url,
+                auth=("alice", "s3cret"),
+                headers={"X-Api-Key": "KEY"},
+                redirect_policy=RedirectPolicy.WHITELIST,
+                trusted_redirect_origins=[b_url],
+                retry=False,
+            )
+            session.cookies.set("sid", "S3CRET", domain="127.0.0.1")
+            response = session.put(
+                "/upload", data=b"payload", headers={"If-Match": '"e"'}
+            )
+    assert response.status_code == 204
+    first = a_rec.to("/upload")[0]
+    assert first.headers["authorization"].startswith("Basic ")
+    assert "sid=S3CRET" in first.headers["cookie"]
+    (back,) = a_rec.to("/victim")
+    assert back.body == b"payload"
+    for header in ("authorization", "cookie", "x-api-key", "if"):
+        assert header not in back.headers
+    assert back.headers["if-match"] == '"e"'  # what describes the body still goes
+    (gateway,) = b_rec.to("/gateway")
+    assert "authorization" not in gateway.headers
+
+
+def test_a_same_origin_chain_that_never_left_keeps_its_credentials() -> None:
+    def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
+        return redirect(307, f"{url}/b") if seen.path == "/a" else OK
+
+    with scripted_server(respond) as (url, rec):
+        Session(url, auth=("u", "p"), retry=False).put("/a", data=b"x")
+    assert rec.to("/b")[0].headers["authorization"].startswith("Basic ")
+
+
+def test_a_chain_from_http_over_https_back_to_http_is_not_followed(
+    certs: Certificates,
+) -> None:
+    with scripted_server(
+        lambda r: redirect(307, f"{b_url}/mid") if r.path == "/start" else OK
+    ) as (a_url, a_rec):
+        with tls_server(certs, lambda _r: redirect(307, f"{a_url}/final")) as (
+            b_url,
+            _b,
+        ):
+            session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
+            response = session.get(f"{a_url}/start", verify=str(certs.ca_cert))
+    assert response.status_code == 307
+    assert "downgrade" in (response.redirect_refusal or "")
+    assert a_rec.to("/final") == []
+
+
+def test_http_to_https_with_all_still_follows(certs: Certificates) -> None:
+    with tls_server(certs, always(OK)) as (b_url, b_rec):
+        with scripted_server(lambda _r: redirect(307, f"{b_url}/t")) as (a_url, _a):
+            session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
+            response = session.get(f"{a_url}/start", verify=str(certs.ca_cert))
+    assert response.status_code == 204
+    assert len(b_rec.requests) == 1
+
+
+# ---------------------------------------------------------------------------
 # The query of a signed URL is not in a transport error
 # ---------------------------------------------------------------------------
 
