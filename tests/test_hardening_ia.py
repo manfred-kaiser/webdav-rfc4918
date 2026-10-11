@@ -273,3 +273,149 @@ def test_dos09_a_big_ordinary_listing_is_not_touched() -> None:
         for n in range(20_000)
     ]
     assert len(MultiStatusResponse(ms(*entries)).entries) == 20_000
+
+
+# -- DOS-13: parsing a streamed answer is bound to max_response_size ---------
+
+
+def _multistatus_of(size: int) -> bytes:
+    return ms(*(entry(f"/d/{n}") for n in range(size)))
+
+
+def test_dos13_a_streamed_multistatus_over_the_limit_is_refused() -> None:
+    body = _multistatus_of(500)
+    with scripted_server(lambda _s: (207, {}, body)) as (url, _rec):
+        with Session(url, max_response_size=2000, retry=False) as session:
+            response = session.propfind("/d", depth=1, stream=True)
+            with pytest.raises(ClientError, match="configured limit"):
+                _ = response.multistatus
+
+
+def test_dos13_a_streamed_multistatus_within_the_limit_is_parsed() -> None:
+    body = _multistatus_of(5)
+    with scripted_server(lambda _s: (207, {}, body)) as (url, _rec):
+        with Session(url, retry=False) as session:
+            response = session.propfind("/d", depth=1, stream=True)
+            assert len(response.multistatus.entries) == 5
+
+
+def test_dos13_without_a_limit_a_streamed_multistatus_is_read_whole() -> None:
+    body = _multistatus_of(500)
+    with scripted_server(lambda _s: (207, {}, body)) as (url, _rec):
+        with Session(url, max_response_size=None, retry=False) as session:
+            response = session.propfind("/d", depth=1, stream=True)
+            assert len(response.multistatus.entries) == 500
+
+
+def test_dos13_a_streamed_lock_answer_over_the_limit_is_refused() -> None:
+    body = b"<d:prop " + DAV.encode() + b">" + b"<d:x/>" * 2000 + b"</d:prop>"
+    with scripted_server(lambda _s: (200, {"Lock-Token": "<urn:a>"}, body)) as (
+        url,
+        _rec,
+    ):
+        with Session(url, max_response_size=500, retry=False) as session:
+            response = session.lock("/f", stream=True, track=False)
+            with pytest.raises(ClientError, match="configured limit"):
+                _ = response.active_lock
+
+
+def test_dos13_the_caller_s_own_read_of_a_stream_stays_unbounded() -> None:
+    body = b"x" * 100_000
+    with scripted_server(lambda _s: (200, {}, body)) as (url, _rec):
+        with Session(url, max_response_size=1000, retry=False) as session:
+            assert session.get("/big", stream=True).content == body
+
+
+# -- EXC-01: every href is validated inside the constructor's try ------------
+
+BAD_SECOND_HREF = ms(
+    "<d:response><d:href>/d/</d:href><d:href>http://[::1</d:href>"
+    "<d:status>HTTP/1.1 423 Locked</d:status></d:response>"
+)
+
+
+def test_exc01_a_second_unparseable_href_is_a_malformed_response() -> None:
+    with pytest.raises(MalformedResponseError, match="unusable"):
+        MultiStatusResponse(BAD_SECOND_HREF)
+
+
+def test_exc01_a_423_with_such_a_body_is_still_a_locked_error() -> None:
+    response = make_response(423, BAD_SECOND_HREF, method="DELETE")
+    with pytest.raises(ResourceLockedError):
+        response.raise_for_status()
+
+
+def test_exc01_a_207_with_such_a_body_is_a_malformed_response() -> None:
+    response = make_response(207, BAD_SECOND_HREF, method="DELETE")
+    with pytest.raises(MalformedResponseError):
+        response.raise_for_status()
+
+
+def test_exc01_info_through_the_file_system_stays_in_the_hierarchy() -> None:
+    with scripted_server(lambda _s: (207, {}, BAD_SECOND_HREF)) as (url, _rec):
+        with pytest.raises(WebDAVError):
+            FileSystem(url, retry=False).info("/d")
+
+
+def test_exc01_several_valid_hrefs_of_one_response_still_work() -> None:
+    body = ms(
+        "<d:response><d:href>/a</d:href><d:href>/a/</d:href>"
+        "<d:status>HTTP/1.1 423 Locked</d:status></d:response>"
+    )
+    parsed = MultiStatusResponse(body)
+    assert parsed.entries[0].hrefs == ["/a", "/a/"]
+    assert set(parsed.responses) == {"/a", "/a/"} or "/a" in parsed.responses
+
+
+# -- FS-09: two answers for one resource --------------------------------------
+
+
+def _info_of(*entries: str) -> Any:
+    with scripted_server(lambda _s: (207, {}, ms(*entries))) as (url, _rec):
+        return FileSystem(url, retry=False).info("/d")
+
+
+def test_fs09_a_hidden_collection_is_not_silently_replaced_by_a_file() -> None:
+    with pytest.raises(MalformedResponseError, match="several"):
+        _info_of(entry("/d/", collection=True), entry("/d/."))
+
+
+def test_fs09_get_props_refuses_the_same_ambiguity() -> None:
+    with scripted_server(
+        lambda _s: (207, {}, ms(entry("/d/", collection=True), entry("/d/.")))
+    ) as (url, _rec):
+        with pytest.raises(MalformedResponseError, match="several"):
+            FileSystem(url, retry=False).get_props("/d")
+
+
+def test_fs09_a_plain_info_is_untouched() -> None:
+    assert _info_of(entry("/d/", collection=True)).is_dir
+
+
+def test_fs09_nfc_and_nfd_twins_are_both_listed() -> None:
+    nfc = unicodedata.normalize("NFC", "/d/\u00e9.txt")
+    nfd = unicodedata.normalize("NFD", "/d/\u00e9.txt")
+    assert nfc != nfd
+    body = ms(entry("/d/", collection=True), entry(nfc), entry(nfd))
+    with scripted_server(lambda _s: (207, {}, body)) as (url, _rec):
+        names = [str(r) for r in FileSystem(url, retry=False).ls("/d")]
+    assert len(names) == 2
+    assert MultiStatusResponse(
+        body
+    ).ambiguous_keys  # the lookup is ambiguous, the listing is not
+
+
+def test_fs09_one_response_with_two_hrefs_is_not_a_duplicate() -> None:
+    parsed = MultiStatusResponse(
+        ms(
+            "<d:response><d:href>/a</d:href><d:href>/a/</d:href>"
+            "<d:status>HTTP/1.1 423 Locked</d:status></d:response>"
+        )
+    )
+    assert not parsed.ambiguous_keys
+
+
+def test_fs09_the_same_member_listed_twice_is_listed_twice() -> None:
+    body = ms(entry("/d/", collection=True), entry("/d/a"), entry("/d/a"))
+    with scripted_server(lambda _s: (207, {}, body)) as (url, _rec):
+        assert len(FileSystem(url, retry=False).ls("/d")) == 2
