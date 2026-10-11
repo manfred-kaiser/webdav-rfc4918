@@ -8,7 +8,8 @@ Each one either refuses the request (with the library's own
 - :func:`check_verify` - a server whose certificate will not be checked, or a
   CA bundle that is not there;
 - :class:`CleartextWarner` - credentials about to go out over plain ``http``;
-- :data:`NO_AUTH` - no credentials looked up behind the caller's back.
+- :data:`NO_AUTH` - no credentials looked up behind the caller's back;
+- :func:`scrub_exception` - the query of a signed URL taken out of a transport error.
 """
 
 import ipaddress
@@ -210,11 +211,54 @@ class CleartextWarner:
         )
 
 
+def scrub_exception(exc: BaseException, url: str) -> None:
+    """Take the query of ``url`` out of ``exc``'s text and of every cause it has - in place.
+
+    ``requests`` builds the message of a connection error from the URL it
+    was sending to ("Max retries exceeded with url: /dl/f?X-Amz-Signature=...
+    (Caused by ...)"), and the query of a signed URL is the credential.
+    The exception types, ``__cause__`` and ``.reason`` stay as they are, so
+    that code that looks at them keeps working; only the text changes. The
+    live :class:`~requests.PreparedRequest` on ``exc.request`` is not touched.
+    """
+    try:
+        query = urlsplit(url).query
+    except ValueError:
+        return
+    if not query:
+        return
+    marker, blanked = f"?{query}", "?<redacted>"
+    seen: set[int] = set()
+    stack: list[object] = [exc]
+    while stack:
+        current = stack.pop()
+        if not isinstance(current, BaseException) or id(current) in seen:
+            continue
+        seen.add(id(current))
+        current.args = tuple(
+            a.replace(marker, blanked) if isinstance(a, str) else a
+            for a in current.args
+        )
+        for name in ("url", "_message"):
+            value = getattr(current, name, None)
+            if isinstance(value, str) and marker in value:
+                setattr(current, name, value.replace(marker, blanked))
+        stack.extend(
+            [
+                current.__cause__,
+                current.__context__,
+                getattr(current, "reason", None),
+                *current.args,
+            ]
+        )
+
+
 __all__ = [
     "NO_AUTH",
     "CleartextWarner",
     "check_base_url",
     "check_verify",
     "require_full_url",
+    "scrub_exception",
     "split_url",
 ]

@@ -14,6 +14,7 @@ import logging
 import pickle
 import ssl
 import threading
+import traceback
 import warnings
 from collections.abc import Iterator
 from http.server import HTTPServer
@@ -30,9 +31,10 @@ from tests.scripted_server import (
     Recorder,
     _make_handler,
     always,
+    redirect,
     scripted_server,
 )
-from webdav import Session, exceptions
+from webdav import FileSystem, RedirectPolicy, Session, exceptions
 from webdav.exceptions import ClientError, TLSConfigError
 from webdav.transport.tls import TLSOptions
 
@@ -77,6 +79,14 @@ def tls_server(
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def _closed_port() -> int:
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 # ---------------------------------------------------------------------------
@@ -301,3 +311,58 @@ def test_verify_none_for_one_call_means_the_sessions_own() -> None:
     with scripted_server(always(OK)) as (url, rec):
         Session(retry=False).get(f"{url}/x", verify=None)
     assert len(rec.requests) == 1
+
+
+# ---------------------------------------------------------------------------
+# The query of a signed URL is not in a transport error
+# ---------------------------------------------------------------------------
+
+_SIGNATURE = "SECRETSIG-0123"
+
+
+def _whole(exc: BaseException) -> str:
+    return "".join(traceback.format_exception(exc)) + repr(exc.args)
+
+
+def test_a_connection_error_after_a_redirect_does_not_show_the_signed_query() -> None:
+    target = f"http://127.0.0.1:{_closed_port()}/dl/file?X-Amz-Signature={_SIGNATURE}&token=TOK"
+    with scripted_server(lambda _r: redirect(302, target)) as (url, _rec):
+        session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
+        with pytest.raises(requests.exceptions.ConnectionError) as caught:
+            session.get(f"{url}/x")
+    assert _SIGNATURE not in _whole(caught.value)
+    assert "TOK" not in str(caught.value)
+    assert "<redacted>" in str(caught.value)
+
+
+def test_a_connection_error_for_the_callers_own_query_does_not_show_it() -> None:
+    url = f"http://127.0.0.1:{_closed_port()}/dl?sig={_SIGNATURE}"
+    with pytest.raises(requests.exceptions.ConnectionError) as caught:
+        Session(retry=False).get(url)
+    assert _SIGNATURE not in _whole(caught.value)
+
+
+def test_the_cause_chain_is_cleaned_in_place_not_cut() -> None:
+    import urllib3.exceptions
+
+    url = f"http://127.0.0.1:{_closed_port()}/dl?sig={_SIGNATURE}"
+    with pytest.raises(requests.exceptions.ConnectionError) as caught:
+        Session(retry=False).get(url)
+    inner = caught.value.args[0]
+    assert isinstance(inner, urllib3.exceptions.MaxRetryError)
+    assert isinstance(inner.reason, urllib3.exceptions.NewConnectionError)
+    assert caught.value.request is not None
+    assert caught.value.__cause__ is None or isinstance(
+        caught.value.__cause__, BaseException
+    )
+
+
+def test_a_failed_unlock_logs_no_query(caplog: pytest.LogCaptureFixture) -> None:
+    client = FileSystem(retry=False)
+    with caplog.at_level(logging.WARNING, logger="webdav"):
+        client._unlock_quietly(
+            f"http://127.0.0.1:{_closed_port()}/a?sig={_SIGNATURE}",
+            "opaquelocktoken:1",
+        )
+    assert caplog.records
+    assert _SIGNATURE not in caplog.text

@@ -85,6 +85,7 @@ from webdav.transport.guards import (
     check_base_url,
     check_verify,
     require_full_url,
+    scrub_exception,
 )
 from webdav.transport.limits import (
     DEFAULT_CHUNK_SIZE,
@@ -1170,6 +1171,11 @@ class Session:
         returned as it is, with ``redirect_refusal`` set. The timeout,
         certificate-verification and body-size rules apply as they do to
         every request.
+
+        Raises:
+            requests.RequestException: The request could not be completed
+                (connection, TLS, timeout).
+
         """
         kwargs.setdefault("timeout", self.timeout)
         allow_redirects = kwargs.pop("allow_redirects", True)
@@ -1186,7 +1192,11 @@ class Session:
         method = request.method or ""
         adapter = self.get_adapter(url=request.url or "")
         with enforce(self.max_response_time):
-            response = adapter.send(request, **kwargs)
+            try:
+                response = adapter.send(request, **kwargs)
+            except requests.exceptions.RequestException as exc:
+                self._explain_transport_error(exc, request.url or "")
+                raise
             response.elapsed = timedelta(seconds=time.perf_counter() - started)
             # Before any response hook runs: ``HTTPDigestAuth`` (and any
             # hook of the caller's) reads ``.content`` of a 401 to answer
@@ -1207,6 +1217,10 @@ class Session:
                 "send() sends one request and never follows redirects; use request()",
             )
         return result
+
+    def _explain_transport_error(self, exc: BaseException, url: str) -> None:
+        """Make a transport error safe to show: the query of a signed URL out of its text."""
+        scrub_exception(exc, url)
 
     def _warn_if_insecure(self, url: str, kwargs: dict[str, Any]) -> None:
         """Warn (once per host) when credentials are about to go out over plain ``http``."""
@@ -1344,17 +1358,21 @@ class Session:
         )
         self._require_verification(settings["verify"])
         # Already a webdav.Response: _foreign_adapter is a DeadlineAdapter too.
-        return cast(
-            "Response",
-            self._foreign_adapter.send(
-                prepared,
-                stream=True,
-                timeout=kwargs.get("timeout"),
-                verify=settings["verify"],
-                cert=None,
-                proxies=settings["proxies"],
-            ),
-        )
+        try:
+            return cast(
+                "Response",
+                self._foreign_adapter.send(
+                    prepared,
+                    stream=True,
+                    timeout=kwargs.get("timeout"),
+                    verify=settings["verify"],
+                    cert=None,
+                    proxies=settings["proxies"],
+                ),
+            )
+        except requests.exceptions.RequestException as exc:
+            self._explain_transport_error(exc, prepared.url or url)
+            raise
 
     # -- HTTP verbs, typed to return a webdav Response --------------------
 
