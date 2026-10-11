@@ -80,11 +80,23 @@ Every exception class, with its attributes, is listed in the
   bidirectional overrides and the line separators written out as `\x1b`,
   `\u202e` and so on; the `path` attribute and the names `ls()` returns are
   not changed.
+- Every exception here survives `pickle` and `copy`, so one raised in a
+  `ProcessPoolExecutor` or `multiprocessing` worker reaches the caller. An
+  `HTTPStatusError` comes back with a snapshot as `.response`: status, headers,
+  URL, the request's method, URL and headers (without credentials), and the body
+  - at most 64 KiB, and only if it had been read; pickling never reads a stream.
+  It is not the live response (no `raw`, no `history`). Pickles are for the same
+  version of the library on both sides.
 - A write (`PUT`, `DELETE`, `MKCOL`, `COPY`, `MOVE`, `PROPPATCH`, `POST`,
   `PATCH`) answered with a 3xx that names no `Location` (300, 304, 305) did
   not do anything: `raise_for_status()` raises
   {class}`~webdav.exceptions.RedirectNotFollowedError` for it. A conditional
   `GET` answered `304` is still a success.
+- The request an exception carries (`exc.response.request`, and those of
+  `exc.response.history`) is a copy with `Authorization`, `Cookie` and
+  `Proxy-Authorization` replaced by `[redacted]`; the request you prepared
+  yourself keeps its credentials. Any other header that carries a secret
+  (`X-Api-Key` and the like) is not redacted.
 - The [fsspec](fsspec.md) backend translates the common errors into the
   stdlib exceptions its callers expect: `404` into `FileNotFoundError`,
   `412` into `FileExistsError`, `403` into `PermissionError`, and the

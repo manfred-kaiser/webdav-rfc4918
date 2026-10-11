@@ -13,15 +13,18 @@ WebDAV-specific meaning to (207, 422, 423, 424, 507) in addition to the
 regular HTTP 4xx/5xx codes a WebDAV server commonly returns.
 """
 
+import copy
 import inspect
 import warnings
 import xml.etree.ElementTree as ET
 from http import HTTPStatus
 from itertools import islice
 from types import MappingProxyType
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 import requests.exceptions
+import requests.models
+import requests.structures
 
 from webdav._base_exceptions import ClientError, WebDAVError
 from webdav._xml_guard import check_xml
@@ -93,6 +96,8 @@ class MalformedResponseError(ClientError):
     """
 
 
+_ErrorT = TypeVar("_ErrorT", bound=BaseException)
+
 #: How many failures the message of a :class:`MultiStatusError` names, and how
 #: many characters of each ``href``: the whole list is in ``.statuses``, and a
 #: message is read by a person (or a log) - a server that reports thousands of
@@ -107,6 +112,16 @@ def _clipped(href: str) -> str:
         if len(href) <= _MESSAGE_HREF_LENGTH
         else f"{href[:_MESSAGE_HREF_LENGTH]}..."
     )
+
+
+def _rebuild_error(
+    cls: "type[_ErrorT]", args: "tuple[Any, ...]", state: "dict[str, Any]"
+) -> "_ErrorT":
+    """Recreate an exception without calling ``cls.__init__`` (whose signature is its own)."""
+    exc = cls.__new__(cls)
+    exc.args = args
+    exc.__dict__.update(state)
+    return exc
 
 
 class MultiStatusError(WebDAVError):
@@ -131,6 +146,15 @@ class MultiStatusError(WebDAVError):
                 carried for that failure, if any.
 
         """
+        message: object = statuses
+        if isinstance(message, str):
+            # A pickle made by 1.2 rebuilds with ``cls(message)`` and restores the
+            # attributes afterwards; take the message as it is.
+            self.statuses: dict[str, str] = {}
+            self.error_codes: dict[str, frozenset[str]] = {}
+            self.msg = message
+            super().__init__(message)
+            return
         self.statuses = statuses
         self.error_codes = error_codes or {}
         if len(statuses) > 1:
@@ -147,6 +171,10 @@ class MultiStatusError(WebDAVError):
         self.msg = msg
         super().__init__(msg)
 
+    def __reduce__(self) -> "tuple[Any, ...]":
+        """Pickle (and ``copy``) as it is: ``cls(*args)`` would take the message for ``statuses``."""
+        return _rebuild_error, (type(self), self.args, self.__dict__)
+
 
 #: Request headers redacted on every raised :class:`HTTPStatusError` (see
 #: ``_redact_request_headers``) - a calling application logging or
@@ -158,14 +186,37 @@ _SENSITIVE_REQUEST_HEADERS = frozenset(
 )
 
 
+_REDACTED = "[redacted]"
+
+
+def _redacted(request: Any) -> Any:
+    """``request`` without its credentials: itself if it carries none, else a copy.
+
+    A copy, never the request itself: that is the caller's (``prepare_request()``
+    then ``send()`` - and the same object may be sent again), and it must keep the
+    credentials it was prepared with.
+    """
+    headers: Any = getattr(request, "headers", None)
+    sensitive = [
+        name
+        for name in headers or ()
+        if name.lower() in _SENSITIVE_REQUEST_HEADERS and headers[name] != _REDACTED
+    ]
+    if not sensitive:
+        return request
+    clone = copy.copy(request)
+    clone.headers = headers.copy()
+    for name in sensitive:
+        clone.headers[name] = _REDACTED
+    return clone
+
+
 def _redact_request_headers(response: "Response") -> None:
-    request = getattr(response, "request", None)
-    headers = getattr(request, "headers", None)
-    if not headers:
-        return
-    for name in list(headers):
-        if name.lower() in _SENSITIVE_REQUEST_HEADERS:
-            headers[name] = "[redacted]"
+    """Put a credential-free copy of the request in place on ``response`` and on every hop before it."""
+    for hop in (response, *getattr(response, "history", ())):
+        request = getattr(hop, "request", None)
+        if request is not None:
+            hop.request = _redacted(request)
 
 
 class HTTPStatusError(WebDAVError, requests.exceptions.HTTPError):
@@ -203,6 +254,29 @@ class HTTPStatusError(WebDAVError, requests.exceptions.HTTPError):
             default += f" for {path!r}"
         super().__init__(msg or default, response=response)
 
+    def __reduce__(self) -> "tuple[Any, ...]":
+        """Pickle (and ``copy``) through a snapshot of the response, not the response itself.
+
+        ``BaseException.__reduce__`` would call ``cls(*args)`` - the message
+        landing in the ``response`` parameter - and a live response cannot be
+        pickled without reading its whole (possibly streamed, possibly huge)
+        body, nor can the request it was made with (a file, a generator).
+        """
+        response = self.response
+        response_class = type(response)
+        if not issubclass(response_class, requests.Response):
+            response_class = requests.Response
+        state = {
+            k: v for k, v in self.__dict__.items() if k not in ("response", "request")
+        }
+        return _rebuild_status_error, (
+            type(self),
+            self.args,
+            state,
+            response_class,
+            _snapshot(response),
+        )
+
     @property
     def error_codes(self) -> "frozenset[str]":
         """RFC 4918 §16 precondition/postcondition codes from the response body.
@@ -218,6 +292,63 @@ class HTTPStatusError(WebDAVError, requests.exceptions.HTTPError):
         if self._error_codes is None:
             self._error_codes = _parse_error_codes(self.response)
         return self._error_codes
+
+
+#: The most of a response body a pickled exception carries, and only one that was
+#: already read: pickling never reads a stream.
+_SNAPSHOT_BODY_LIMIT = 64 * 1024
+
+
+def _snapshot(response: "Response") -> "dict[str, Any]":
+    """What of ``response`` survives a pickle: status, headers, URL, the request's method, URL and (redacted) headers, and a body that is already read."""
+    content = getattr(response, "_content", None)
+    consumed = getattr(response, "_content_consumed", False)
+    request = getattr(response, "request", None)
+    return {
+        "status_code": response.status_code,
+        "reason": response.reason,
+        "url": response.url,
+        "headers": dict(response.headers),
+        "content": (
+            bytes(content[:_SNAPSHOT_BODY_LIMIT])
+            if consumed and isinstance(content, bytes)
+            else b""
+        ),
+        "redirect_refusal": getattr(response, "redirect_refusal", None),
+        "method": getattr(request, "method", None),
+        "request_url": getattr(request, "url", None),
+        "request_headers": dict(getattr(request, "headers", None) or {}),
+    }
+
+
+def _rebuild_status_error(
+    cls: "type[HTTPStatusError]",
+    args: "tuple[Any, ...]",
+    state: "dict[str, Any]",
+    response_class: "type[Response]",
+    snapshot: "dict[str, Any]",
+) -> "HTTPStatusError":
+    """Recreate an :class:`HTTPStatusError` around a response rebuilt from ``snapshot``."""
+    # pylint: disable=protected-access
+    response = response_class()
+    response.status_code = snapshot["status_code"]
+    response.reason = snapshot["reason"]
+    response.url = snapshot["url"]
+    response.headers.update(snapshot["headers"])
+    response._content = snapshot["content"]  # noqa: SLF001
+    response._content_consumed = True  # type: ignore[attr-defined]  # noqa: SLF001
+    response.redirect_refusal = snapshot["redirect_refusal"]  # type: ignore[attr-defined]
+    request = requests.models.PreparedRequest()
+    request.method = snapshot["method"]
+    request.url = snapshot["request_url"]
+    request.headers = requests.structures.CaseInsensitiveDict(
+        snapshot["request_headers"]
+    )
+    response.request = request
+    exc = _rebuild_error(cls, args, state)
+    exc.response = response
+    exc.request = request
+    return exc
 
 
 #: Cap for the lazy read in :func:`_bounded_error_body`. A real RFC 4918
