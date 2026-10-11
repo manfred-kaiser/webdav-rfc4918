@@ -323,7 +323,7 @@ class WebdavFileSystem(GuardedFileSystem):
         **kwargs: Any,
     ) -> "list[str] | list[dict[str, Any]]":
         """List members of a collection. See ``fsspec.AbstractFileSystem.ls``."""
-        path = self._strip(path).strip()
+        path = self._strip(path)
         with translate_exceptions():
             try:
                 resources = self.filesystem.ls(path)

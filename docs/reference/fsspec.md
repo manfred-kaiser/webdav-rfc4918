@@ -163,6 +163,8 @@ makes `/dav/` the root. Nothing above it can be reached.
   A file really named `[x]` is removed with `rm_file`, which does not glob.
   So never pass a local path or pattern that someone else chose to `put` or
   `get`: it is a pattern, and it can name any file you can read.
+- Spaces are part of a name: `ls("/data ")` lists the folder `data `, not
+  `data`.
 
 {class}`~webdav.fs.client.FileSystem` names the same file without the
 leading `/` (`Photos/Gorilla.jpg`). It also accepts `/Photos`. The fsspec

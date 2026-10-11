@@ -161,6 +161,33 @@ def test_BUG03_guard_mkdir_adds_the_slash_to_the_raw_path() -> None:
     assert rec.requests[0].path == "/d%2Fx/"
 
 
+# ------------------------------------------------------------------ BUG-04
+def test_BUG04_ls_keeps_a_trailing_space(ffs: WebdavFileSystem, tmp_path: Path) -> None:
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "plain.txt").write_text("1")
+    (tmp_path / "data ").mkdir()
+    (tmp_path / "data " / "spaced.txt").write_text("2")
+    assert ffs.ls("/data ", detail=False) == ["/data /spaced.txt"]
+    assert ffs.ls("/data", detail=False) == ["/data/plain.txt"]
+    assert "/data /spaced.txt" in ffs.find("/")
+
+
+def test_BUG04_file_with_a_trailing_space(
+    ffs: WebdavFileSystem, tmp_path: Path
+) -> None:
+    (tmp_path / "trail ").write_text("x")
+    assert ffs.ls("/trail ", detail=False) == ["/trail "]
+
+
+def test_BUG04_guard_plain_paths(ffs: WebdavFileSystem, tmp_path: Path) -> None:
+    (tmp_path / "d").mkdir()
+    (tmp_path / "d" / "a").write_text("1")
+    assert ffs.ls("d", detail=False) == ["/d/a"]
+    assert ffs.ls("/d/", detail=False) == ["/d/a"]
+    assert ffs.ls("webdavs:///d", detail=False) == ["/d/a"]
+    assert ffs.ls("", detail=False) == ["/d"]
+
+
 # ------------------------------------------------------------------ BUG-12
 def _tree_server(forbidden: "set[str]") -> Any:
     def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
