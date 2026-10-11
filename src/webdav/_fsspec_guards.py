@@ -1,13 +1,17 @@
 """What keeps the fsspec filesystem inside its server and its local trees.
 
 The base class of :class:`~webdav.fsspec.WebdavFileSystem`: fsspec's own methods, with a check in
-front of each - a URL names this filesystem's server (and no other), a ``walk`` has a
-bound. Kept apart from the filesystem itself, which is long enough.
+front of each - a URL names this filesystem's server (and no other), a ``walk`` has a bound, a
+recursive ``get``/``put`` stays inside the local tree it was given. Kept apart from the
+filesystem itself, which is long enough.
 """
 
+import contextvars
+import errno
 import os
 from typing import Any, cast
 
+from fsspec.callbacks import DEFAULT_CALLBACK
 from fsspec.spec import AbstractFileSystem
 from fsspec.utils import stringify_path
 
@@ -48,10 +52,50 @@ class WalkBudget:
         self.depth -= 1
 
 
+class GetTree:
+    """The destination tree of one ``get``: what it may write to."""
+
+    def __init__(self, given: str, *, contained: bool) -> None:
+        """The tree is ``given`` (a directory, or a symlink to one); ``contained``: stay inside it."""
+        self.given = os.path.abspath(given)  # noqa: PTH100 - normalised, symlinks kept
+        # The root may itself be a symlink (``~/data -> /mnt/storage``): what is compared is
+        # where it leads. A symlink *below* it that leads out of it is what is refused.
+        self.root = os.path.realpath(given)
+        self.contained = contained
+
+    def check(self, local: str) -> None:
+        """Refuse ``local`` if a symlink leads it out of the destination.
+
+        Raises:
+            OSError: ``local`` leads out of the destination through a symlink.
+
+        """
+        if not self.contained:
+            return
+        real = os.path.realpath(local)
+        if os.path.commonpath([self.root, real]) != self.root:
+            msg = (
+                "refusing to write outside the destination: a symlink inside it leads out "
+                "of it (pass follow_symlinks=True to get() to allow it)"
+            )
+            raise OSError(errno.ELOOP, msg, local)
+
+
+#: What the ``get`` / ``put`` in progress may write to / read from - ``None``: no tree
+#: (a list of paths names every file itself). A context variable: ``get_file``/``put_file``
+#: are called by fsspec's own ``get``/``put``, which know nothing of it.
+GET_TREE: "contextvars.ContextVar[GetTree | None]" = contextvars.ContextVar(
+    "webdav_get_tree", default=None
+)
+PUT_ROOT: "contextvars.ContextVar[str | None]" = contextvars.ContextVar(
+    "webdav_put_root", default=None
+)
+
+
 # The rest of the abstract methods is the subclass's.
 # pylint: disable-next=abstract-method
 class GuardedFileSystem(AbstractFileSystem):
-    """``fsspec``'s base class, for one server: see :meth:`_own_server`, :meth:`walk`."""
+    """``fsspec``'s base class, for one server: see :meth:`_own_server`, :meth:`walk`, :meth:`get`, :meth:`put`."""
 
     filesystem: FileSystem
     walk_max_depth: "int | None"
@@ -173,5 +217,85 @@ class GuardedFileSystem(AbstractFileSystem):
                 raise ClientError(msg) from exc
         finally:
             budget.leave()
+
+    def get(
+        self,
+        rpath: Any,
+        lpath: Any,
+        recursive: bool = False,
+        callback: Any = DEFAULT_CALLBACK,
+        maxdepth: "int | None" = None,
+        *,
+        follow_symlinks: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        """``fsspec``'s ``get`` - which does not write through a symlink out of the destination.
+
+        With a destination directory (``lpath``) a symlink *below* it that leads out of it is
+        refused with an ``OSError`` - a remote tree, or a name in it, does not get to choose
+        where on your disk it lands. The destination itself may be a symlink
+        (``~/data -> /mnt/storage``), and so may anything that leads to somewhere inside it;
+        ``follow_symlinks=True`` allows symlinks that lead anywhere, as before. A list of
+        destinations names every file itself and is not checked. (A file at ``lpath`` that
+        is a symlink is refused either way, see ``get_file``.)
+
+        This is a check of the resolved path just before the file is written: a local user
+        who can swap a directory for a symlink in that moment is not stopped. Keep the
+        destination to yourself. (Windows has no ``dir_fd`` to write without a race.)
+        """
+        self._own_server(rpath)
+        tree = None
+        if isinstance(lpath, str | os.PathLike):
+            tree = GetTree(os.fspath(lpath), contained=not follow_symlinks)
+        token = GET_TREE.set(tree)
+        try:
+            return super().get(rpath, lpath, recursive, callback, maxdepth, **kwargs)
+        finally:
+            GET_TREE.reset(token)
+
+    def put(
+        self,
+        lpath: Any,
+        rpath: Any,
+        recursive: bool = False,
+        callback: Any = DEFAULT_CALLBACK,
+        maxdepth: "int | None" = None,
+        *,
+        follow_symlinks: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        """``fsspec``'s ``put`` - which does not follow a symlink out of the tree it uploads.
+
+        ``lpath`` is a directory (``recursive``) or a pattern: a symlink *in* it that leads
+        out of it is refused with an ``OSError`` rather than uploaded - a file you did not
+        mean to send. The root it must stay in is the directory before the first ``*``, ``?``
+        or ``[`` of ``lpath`` (and may itself be a symlink); symlinks that lead to somewhere
+        inside it are fine, a file named by ``lpath`` itself is yours to choose, and so is
+        every path of a list. ``follow_symlinks=True`` uploads whatever a symlink leads to,
+        as before.
+
+        This is a check of the resolved path just before the file is opened: a local user
+        who can replace a file by a symlink in that moment is not stopped, and neither is one
+        who can change what a symlink leads to between the check and the read. Keep the tree
+        you upload to yourself. (Windows has no ``dir_fd`` to open it without a race.) And
+        ``*``, ``?`` and ``[`` in ``lpath`` are patterns, as fsspec reads them: never pass
+        a local path or pattern that someone else chose.
+        """
+        self._own_server(rpath)
+        root = None
+        if not follow_symlinks and isinstance(lpath, str | os.PathLike):
+            text = os.fspath(lpath)
+            magic = min(
+                (i for i in (text.find(c) for c in "*?[") if i >= 0), default=-1
+            )
+            # The directory before the first pattern character: ``dirname`` keeps the one
+            # in ``src/*.txt`` (``Path("src/").parent`` would be above it).
+            head = os.path.dirname(text[:magic]) or "."  # noqa: PTH120
+            root = os.path.realpath(text if magic < 0 else head)
+        token = PUT_ROOT.set(root)
+        try:
+            return super().put(lpath, rpath, recursive, callback, maxdepth, **kwargs)
+        finally:
+            PUT_ROOT.reset(token)
 
     # pylint: enable=signature-differs

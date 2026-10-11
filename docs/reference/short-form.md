@@ -107,6 +107,8 @@ for path, dirs, files in webdav.walk("https://webdav.example.org/Photos", auth=a
 its error; `onerror=` takes a function that is called with the error instead,
 and the walk goes on without that folder, as `os.walk` does.
 
+`upload_file` takes `follow_symlinks=False` to refuse a symlink at the local path.
+
 ## Reading and writing
 
 ```python

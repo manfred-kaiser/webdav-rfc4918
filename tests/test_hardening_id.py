@@ -210,6 +210,189 @@ def test_EXC06_guard_ordinary_authorities(
     assert host_and_port(authority) == expected
 
 
+# ------------------------------------------------------------------ FS-01 (recursive get)
+def _two_dirs(
+    tmp_path_factory: pytest.TempPathFactory, name: str
+) -> "tuple[Path, Path, Path]":
+    base = tmp_path_factory.mktemp(name)
+    outside = base / "outside"
+    outside.mkdir()
+    dst = base / "dst"
+    dst.mkdir()
+    return base, outside, dst
+
+
+@pytest.mark.parametrize("source", ["/d/", "/d"])
+def test_FS01_recursive_get_does_not_follow_a_symlink_out_of_the_destination(
+    ffs: WebdavFileSystem, tmp_path_factory: pytest.TempPathFactory, source: str
+) -> None:
+    ffs.pipe_file("/d/sub/f.txt", b"REMOTE")
+    ffs.pipe_file("/d/top.txt", b"top")
+    _base, outside, dst = _two_dirs(tmp_path_factory, "get")
+    (dst / ("sub" if source.endswith("/") else "d")).symlink_to(outside)
+    with pytest.raises(OSError, match="follow_symlinks=True"):
+        ffs.get(source, str(dst), recursive=True)
+    assert not list(outside.iterdir())
+
+
+def test_FS01_follow_symlinks_restores_the_old_behaviour(
+    ffs: WebdavFileSystem, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    ffs.pipe_file("/d/photos/f.txt", b"REMOTE")
+    _base, big, dst = _two_dirs(tmp_path_factory, "get")
+    (dst / "photos").symlink_to(big)
+    ffs.get("/d/", str(dst), recursive=True, follow_symlinks=True)
+    assert (big / "f.txt").read_bytes() == b"REMOTE"
+
+
+def test_FS01_guard_the_destination_root_may_be_a_symlink(
+    ffs: WebdavFileSystem, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    ffs.pipe_file("/d/sub/f.txt", b"REMOTE")
+    base = tmp_path_factory.mktemp("get")
+    (base / "mnt").mkdir()
+    (base / "data").symlink_to(base / "mnt")
+    ffs.get("/d/", str(base / "data"), recursive=True)
+    assert (base / "mnt" / "sub" / "f.txt").read_bytes() == b"REMOTE"
+
+
+def test_FS01_guard_a_symlink_inside_the_tree_that_points_inside(
+    ffs: WebdavFileSystem, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    ffs.pipe_file("/d/sub/f.txt", b"REMOTE")
+    dst = tmp_path_factory.mktemp("get") / "dst"
+    (dst / "real").mkdir(parents=True)
+    (dst / "sub").symlink_to(dst / "real")
+    ffs.get("/d/", str(dst), recursive=True)
+    assert (dst / "real" / "f.txt").read_bytes() == b"REMOTE"
+
+
+def test_FS01_guard_a_single_file_and_lists_follow_the_callers_paths(
+    ffs: WebdavFileSystem, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    ffs.pipe_file("/one.txt", b"1")
+    ffs.pipe_file("/two.txt", b"2")
+    base = tmp_path_factory.mktemp("get")
+    real = base / "real.txt"
+    (base / "link.txt").symlink_to(real)
+    real.write_bytes(b"old")
+    # the caller named the file itself; the download replaces the link's *name* only if it is
+    # a plain file - download_file refuses to write through a symlink at the target
+    with pytest.raises(OSError):
+        ffs.get("/one.txt", str(base / "link.txt"))
+    outside = base / "outside"
+    outside.mkdir()
+    ffs.get(["/one.txt", "/two.txt"], [str(outside / "a"), str(outside / "b")])
+    assert (outside / "a").read_bytes() == b"1"
+
+
+def test_FS01_guard_a_plain_recursive_get(
+    ffs: WebdavFileSystem, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    ffs.pipe_file("/d/a/1.txt", b"1")
+    ffs.pipe_file("/d/2.txt", b"2")
+    dst = tmp_path_factory.mktemp("get") / "dst"
+    ffs.get("/d/", str(dst), recursive=True)
+    assert (dst / "a" / "1.txt").read_bytes() == b"1"
+    assert (dst / "2.txt").read_bytes() == b"2"
+
+
+# ------------------------------------------------------------------ FS-02 (put, upload_file)
+def test_FS02_upload_file_can_refuse_a_symlink(
+    fs: FileSystem, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    base = tmp_path_factory.mktemp("up")
+    (base / "secret.txt").write_text("TOP-SECRET")
+    (base / "innocent.txt").symlink_to(base / "secret.txt")
+    with pytest.raises(OSError):
+        fs.upload_file(base / "innocent.txt", "/innocent.txt", follow_symlinks=False)
+
+
+def test_FS02_guard_upload_file_follows_a_symlink_by_default(
+    fs: FileSystem, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    base = tmp_path_factory.mktemp("up")
+    (base / "real.txt").write_text("data")
+    (base / "link.txt").symlink_to(base / "real.txt")
+    fs.upload_file(base / "link.txt", "/link.txt")
+    assert (tmp_path / "link.txt").read_text() == "data"
+
+
+def test_FS02_the_module_function_has_the_parameter(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    import inspect
+
+    import webdav
+
+    assert "follow_symlinks" in inspect.signature(webdav.upload_file).parameters
+
+
+def test_FS02_recursive_put_refuses_a_symlink_out_of_the_tree(
+    ffs: WebdavFileSystem, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    base = tmp_path_factory.mktemp("up")
+    (base / "src").mkdir()
+    (base / "src" / "ok.txt").write_text("ok")
+    (base / "secret.txt").write_text("TOP-SECRET")
+    (base / "src" / "innocent.txt").symlink_to(base / "secret.txt")
+    with pytest.raises(OSError, match="follow_symlinks=True"):
+        ffs.put(str(base / "src") + "/", "/dest/", recursive=True)
+    assert not (tmp_path / "dest" / "innocent.txt").exists()
+
+
+def test_FS02_a_glob_put_checks_against_the_directory_before_the_glob(
+    ffs: WebdavFileSystem, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    base = tmp_path_factory.mktemp("up")
+    (base / "src").mkdir()
+    (base / "secret.txt").write_text("TOP-SECRET")
+    (base / "src" / "innocent.txt").symlink_to(base / "secret.txt")
+    with pytest.raises(OSError):
+        ffs.put(str(base / "src" / "*.txt"), "/dest/")
+    assert not (tmp_path / "dest" / "innocent.txt").exists()
+
+
+def test_FS02_follow_symlinks_restores_the_old_behaviour(
+    ffs: WebdavFileSystem, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    base = tmp_path_factory.mktemp("up")
+    (base / "src").mkdir()
+    (base / "secret.txt").write_text("DATA")
+    (base / "src" / "link.txt").symlink_to(base / "secret.txt")
+    ffs.put(str(base / "src") + "/", "/dest/", recursive=True, follow_symlinks=True)
+    assert (tmp_path / "dest" / "link.txt").read_text() == "DATA"
+
+
+def test_FS02_guard_symlinks_inside_the_tree_and_a_named_symlink_work(
+    ffs: WebdavFileSystem, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    base = tmp_path_factory.mktemp("up")
+    (base / "src").mkdir()
+    (base / "src" / "real.txt").write_text("data")
+    (base / "src" / "link.txt").symlink_to(base / "src" / "real.txt")
+    ffs.put(str(base / "src") + "/", "/dest/", recursive=True)
+    assert (tmp_path / "dest" / "link.txt").read_text() == "data"
+    ffs.put(str(base / "src" / "link.txt"), "/named.txt")  # the caller's own choice
+    assert (tmp_path / "named.txt").read_text() == "data"
+    (base / "elsewhere.txt").write_text("e")
+    ffs.put(
+        [str(base / "elsewhere.txt")], ["/listed.txt"]
+    )  # a list: every path is the caller's
+    assert (tmp_path / "listed.txt").read_text() == "e"
+
+
+def test_FS02_guard_the_source_root_may_be_a_symlink(
+    ffs: WebdavFileSystem, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    base = tmp_path_factory.mktemp("up")
+    (base / "real").mkdir()
+    (base / "real" / "a.txt").write_text("a")
+    (base / "link").symlink_to(base / "real")
+    ffs.put(str(base / "link") + "/", "/dest/", recursive=True)
+    assert (tmp_path / "dest" / "a.txt").read_text() == "a"
+
+
 # ------------------------------------------------------------------ FS-06
 def test_FS06_webdavs_url_against_a_plain_http_base_url_is_refused() -> None:
     with pytest.raises(ValueError, match="webdav://"):
@@ -274,6 +457,8 @@ def seeded(ffs: WebdavFileSystem) -> WebdavFileSystem:
         lambda fs: fs.du("webdavs://other.example/"),
         lambda fs: fs.pipe_file("webdavs://other.example/new", b"x"),
         lambda fs: fs.pipe("webdavs://other.example/new", b"x"),
+        lambda fs: fs.get(FOREIGN, "/nonexistent/dst"),
+        lambda fs: fs.put(__file__, "webdavs://other.example/new"),
         lambda fs: fs.copy(FOREIGN, "/copy.txt"),
         lambda fs: fs.copy("/secret.txt", "webdavs://other.example/copy.txt"),
         lambda fs: fs.mv("/secret.txt", "webdavs://other.example/moved.txt"),

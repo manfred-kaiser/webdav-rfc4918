@@ -353,6 +353,7 @@ def upload_file(
     chunk_size: int | None = None,
     callback: "Callable[[int], Any] | None" = None,
     headers: dict[str, str] | None = None,
+    follow_symlinks: bool = True,
     **kwargs: Unpack[_UploadOptions],
 ) -> None:
     """Upload a local file to a remote path.
@@ -368,6 +369,7 @@ def upload_file(
         chunk_size=chunk_size,
         callback=callback,
         headers=headers,
+        follow_symlinks=follow_symlinks,
     )
 
 

@@ -173,10 +173,12 @@ module. It can also be used directly for a custom conditional request.
 .. autoclass:: webdav.fsspec.WebdavFileSystem
    :members:
 
-The methods of fsspec's own base class that this filesystem guards - a ``walk`` has a
-bound:
+The methods of fsspec's own base class that this filesystem guards - a URL for another
+server is refused, a ``walk`` has a bound, ``get`` and ``put`` stay inside their tree:
 
 .. automethod:: webdav._fsspec_guards.GuardedFileSystem.walk
+.. automethod:: webdav._fsspec_guards.GuardedFileSystem.get
+.. automethod:: webdav._fsspec_guards.GuardedFileSystem.put
 ```
 
 ## Exceptions

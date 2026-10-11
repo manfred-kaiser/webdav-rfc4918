@@ -178,6 +178,10 @@ Uploads take `(local_path, path)`, downloads `(path, local_path)`. Without
 download goes to a temporary file first and only a complete one is moved
 into place. It never writes through a symlink.
 
+- `upload_file` follows a symlink at `local_path`, as `open` does: you named
+  it. `follow_symlinks=False` refuses one, for a path that is not your own
+  choice.
+
 `open` takes the modes of the builtin `open`. A write is uploaded only when
 the `with` block ends without an exception, so a failed block never leaves
 a half-written file on the server. `"x"` creates the file only if nothing

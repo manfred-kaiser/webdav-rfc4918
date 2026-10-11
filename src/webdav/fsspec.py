@@ -49,6 +49,7 @@ Credentials in a URL are refused.
 
 import errno
 import io
+import os
 import tempfile
 from http import HTTPStatus
 from pathlib import Path
@@ -70,7 +71,7 @@ from fsspec import Callback
 from fsspec.spec import AbstractBufferedFile
 from fsspec.utils import stringify_path
 
-from webdav._fsspec_guards import GuardedFileSystem
+from webdav._fsspec_guards import GET_TREE, PUT_ROOT, GuardedFileSystem
 from webdav._fsspec_ranges import UNKNOWN, fetch_range
 from webdav._fsspec_support import absolute, info_of, is_root, translate_exceptions
 from webdav._webdavs_url import (
@@ -816,6 +817,15 @@ class WebdavFileSystem(GuardedFileSystem):
             self.makedirs(rpath, exist_ok=True)
             return
 
+        root = PUT_ROOT.get()
+        if root is not None:
+            real = os.path.realpath(os.fspath(lpath))
+            if os.path.commonpath([root, real]) != root:
+                msg = (
+                    "refusing to upload a file from outside the source tree: a symlink "
+                    "inside it leads out of it (pass follow_symlinks=True to put() to allow it)"
+                )
+                raise OSError(errno.ELOOP, msg, os.fspath(lpath))
         with Path(lpath).open(mode="rb") as fobj:
             kwargs.setdefault("overwrite", True)
             kwargs.setdefault("size", None)
@@ -838,6 +848,9 @@ class WebdavFileSystem(GuardedFileSystem):
         ``get`` means in fsspec, so ``overwrite`` is on.)
         """
         rpath = self._strip(rpath)
+        tree = GET_TREE.get()
+        if tree is not None and not hasattr(lpath, "write"):
+            tree.check(os.fspath(lpath))
         if hasattr(lpath, "write"):  # fsspec passes an open file as ``lpath`` too
             outfile = cast("BinaryIO", lpath)
         elif self.isdir(rpath):  # a collection becomes a local directory

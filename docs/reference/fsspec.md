@@ -161,6 +161,8 @@ makes `/dav/` the root. Nothing above it can be reached.
 - fsspec expands `[...]`, `*` and `?` as a glob wherever it accepts a path,
   [as every fsspec backend does](https://filesystem-spec.readthedocs.io/en/latest/features.html#glob).
   A file really named `[x]` is removed with `rm_file`, which does not glob.
+  So never pass a local path or pattern that someone else chose to `put` or
+  `get`: it is a pattern, and it can name any file you can read.
 
 {class}`~webdav.fs.client.FileSystem` names the same file without the
 leading `/` (`Photos/Gorilla.jpg`). It also accepts `/Photos`. The fsspec
@@ -219,7 +221,19 @@ for example `fs.get("/Photos", "photos", recursive=True)`.
   [Directories](#directories).
 - `get` replaces an existing local file. It writes to a temporary file
   first, so a failed download leaves the old local file as it was, and a
-  symlink at the destination is never followed.
+  symlink at the destination file is refused.
+- A recursive `get`, or one with a pattern, does not write through a symlink
+  *below* the destination directory that leads out of it, and a recursive
+  `put` does not upload a file a symlink in the source tree leads out of.
+  Both raise an `OSError` that names `follow_symlinks=True`, which allows
+  what they refused (`fs.get(..., follow_symlinks=True)`). The directory you
+  name may itself be a symlink (`~/data -> /mnt/storage`), symlinks that lead
+  to somewhere inside the tree are fine, a single file you name is yours to
+  choose, and a list of paths is not checked.
+- That check is made on the resolved path just before the file is written
+  or read. It is not a lock: a local user who can swap a directory for a
+  symlink in that moment is not stopped. Keep the trees you copy to and from
+  to yourself. Windows has no `dir_fd` to close the gap.
 
 ## Directories
 

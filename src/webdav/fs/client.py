@@ -1045,9 +1045,17 @@ class FileSystem:
         chunk_size: "int | None" = None,
         callback: "Callable[[int], Any] | None" = None,
         headers: "dict[str, str] | None" = None,
+        follow_symlinks: bool = True,
     ) -> None:
-        """Upload a local file to a remote path."""
-        with pathlib.Path(local_path).open(mode="rb") as fobj:
+        """Upload a local file to a remote path.
+
+        A symlink at ``local_path`` is followed, as ``open`` does - the caller named it.
+        ``follow_symlinks=False`` refuses one (``OSError``), for a path that is not the
+        caller's own choice (one taken from a directory listing, say); that is a check of
+        ``local_path`` itself, a symlink in a directory of the path is still followed.
+        """
+        flags = os.O_RDONLY | (0 if follow_symlinks else getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(os.open(local_path, flags), "rb") as fobj:
             self.upload_fileobj(
                 fobj,
                 path,
