@@ -19,9 +19,11 @@ from tests.scripted_server import (
     Seen,
     scripted_server,
 )
-from webdav import FileSystem, Session
+from webdav import FileSystem, RedirectPolicy, Session
 from webdav.exceptions import ClientError
 from webdav.fsspec import WebdavFileSystem
+from webdav.transport import retry as retry_module
+from webdav.transport.deadline import DeadlineAdapter
 
 _PROPFIND = (
     b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/f</d:href>'
@@ -201,6 +203,28 @@ def test_identity_is_no_content_encoding() -> None:
         sink = Sink()
         FileSystem(url).download_fileobj("/f", sink)  # type: ignore[arg-type]
         assert sink.data == b"hello"
+
+
+# ---------------------------------------------------------------------------
+# an address urllib3 cannot parse is an InvalidURL
+# ---------------------------------------------------------------------------
+
+
+def test_a_redirect_to_an_unparseable_host_is_an_invalid_url() -> None:
+    with scripted_server(lambda _s: (302, {"Location": "http://a..b/"}, b"")) as (
+        url,
+        _rec,
+    ):
+        session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
+        with pytest.raises(requests.exceptions.InvalidURL) as excinfo:
+            session.get(f"{url}/x")
+    assert isinstance(excinfo.value, ValueError)
+
+
+def test_the_adapter_turns_a_location_error_into_an_invalid_url() -> None:
+    prepared = requests.Request("GET", "http://a..b/").prepare()
+    with pytest.raises(requests.exceptions.InvalidURL):
+        DeadlineAdapter().send(prepared, timeout=1)
 
 
 # ---------------------------------------------------------------------------

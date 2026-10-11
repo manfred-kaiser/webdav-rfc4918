@@ -33,6 +33,8 @@ import time
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, cast
 
+import requests.exceptions
+import urllib3.exceptions
 from requests.adapters import HTTPAdapter
 from urllib3.connection import HTTPConnection, HTTPSConnection
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
@@ -326,6 +328,19 @@ class DeadlineAdapter(HTTPAdapter):
         response = super().build_response(req, resp)
         response.__class__ = self._response_class
         return cast("Response", response)
+
+    def send(self, *args: Any, **kwargs: Any) -> Any:
+        """Send a request - an address ``urllib3`` cannot parse is an ``InvalidURL``, not its own error.
+
+        ``HTTPAdapter`` translates that error only where it looks up the pool;
+        the one raised when the connection is opened (an empty or too long
+        host label, ``http://a..b/``) escapes it - as a ``urllib3`` error no
+        caller of this library expects.
+        """
+        try:
+            return super().send(*args, **kwargs)
+        except urllib3.exceptions.LocationValueError as exc:
+            raise requests.exceptions.InvalidURL(exc) from exc
 
     def init_poolmanager(self, *args: Any, **kwargs: Any) -> None:
         """Build the pool manager, with tracked connections."""
