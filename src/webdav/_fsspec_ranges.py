@@ -14,6 +14,7 @@ import requests.exceptions
 
 from webdav.exceptions import ClientError, raise_for_status
 from webdav.methods import Method
+from webdav.transport.body import reject_content_encoding
 
 if TYPE_CHECKING:
     from requests import Response as HTTPResponse
@@ -141,6 +142,7 @@ def fetch_range(
         response = session.request(Method.GET, path, headers=headers, stream=True)
         try:
             raise_for_status(response)
+            reject_content_encoding(response)
             validators = _validate(response, start, end, whole=whole, known=known)
             data = _read_exactly(response, end - start, 65536)
             return RangeRead(

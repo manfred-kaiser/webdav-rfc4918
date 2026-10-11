@@ -24,6 +24,34 @@ if TYPE_CHECKING:
 _READ_CHUNK = 64 * 1024
 
 
+def reject_content_encoding(response: requests.Response) -> None:
+    """Refuse a streamed response whose body has a ``Content-Encoding``, and close it.
+
+    A streamed read asks for ``Accept-Encoding: identity``: the bytes counted,
+    written and addressed by ``Range`` are those of the file. A server that
+    answers with another coding anyway would have them decoded on the way (a
+    few kilobytes becoming gigabytes), or the file and the bytes of the wire
+    mixed up.
+
+    Raises:
+        ClientError: The response carries a coding other than ``identity``.
+
+    """
+    codings = [
+        c.strip().lower()
+        for c in response.headers.get("Content-Encoding", "").split(",")
+    ]
+    if any(c not in ("", "identity") for c in codings):
+        response.close()
+        shown = response.headers["Content-Encoding"]
+        msg = (
+            f"the server answered with Content-Encoding: {shown} although Accept-Encoding: "
+            "identity was sent; the bytes cannot be streamed as the file's. Read the "
+            "response yourself with Session.get(url, stream=True) if you want them"
+        )
+        raise ClientError(msg)
+
+
 def iter_body(response: requests.Response, chunk_size: int) -> "Iterator[bytes]":
     """Yield a streamed body in whatever pieces arrive, without waiting to fill ``chunk_size``.
 
@@ -174,4 +202,10 @@ def read_response(
     read_bounded(response, max_size=max_size, max_time=max_time)
 
 
-__all__ = ["content_within", "iter_body", "read_bounded", "read_response"]
+__all__ = [
+    "content_within",
+    "iter_body",
+    "read_bounded",
+    "read_response",
+    "reject_content_encoding",
+]

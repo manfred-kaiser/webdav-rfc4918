@@ -168,8 +168,8 @@ has `href`, `created`, `modified`, `etag`, `content_type`,
 - `cat_file` with a range asks for exactly those bytes.
 - A whole file is one request.
 - A server that answers a range request with the whole file (`200`) is
-  refused, and so is a file whose `ETag` changes between two blocks. Both
-  raise a `ClientError`.
+  refused, and so is a file whose `ETag` changes between two blocks and a
+  response with a `Content-Encoding`. All raise a `ClientError`.
 
 `open()` asks for the size with one `PROPFIND` first, so a resource
 without a size cannot be read this way. For a dataset of many small files,
