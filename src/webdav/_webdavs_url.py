@@ -74,7 +74,9 @@ def host_and_port(authority: str) -> "tuple[str, int | None]":
         port = tail.removeprefix(":")
     else:
         host, _, port = authority.partition(":")
-    if port and not port.isdigit():
+    # ASCII digits only: ``isdigit()`` also takes "\u00b2" (``int()`` then fails) and the
+    # digits of other scripts, which ``int()`` reads as a number.
+    if port and not (port.isascii() and port.isdigit()):
         msg = f"{authority!r} is not a host[:port]"
         raise ValueError(msg)
     return host, int(port) if port else None
