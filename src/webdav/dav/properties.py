@@ -53,14 +53,26 @@ def _parse_active_locks(lockdiscovery_el: Element | None) -> "list[ActiveLock]":
     if lockdiscovery_el is None:
         return []
     locks: list[ActiveLock] = []
+    skipped = 0
+    first_error: MalformedResponseError | None = None
     for el in lockdiscovery_el.findall(dav("activelock")):
         try:
             locks.append(ActiveLock.from_element(el))
-        except MalformedResponseError:
+        except MalformedResponseError as exc:
             # One malformed <d:activelock> must not discard the whole
             # property lookup, same rationale as multistatus.py's
             # per-<d:response> handling.
-            logger.warning("skipping unparseable <d:activelock> entry", exc_info=True)
+            skipped += 1
+            first_error = first_error or exc
+    if skipped:
+        # One line per property, not one (with a traceback) per element: the
+        # server decides how many there are.
+        logger.warning(
+            "skipped %d unparseable <d:activelock> entr%s (the first: %s)",
+            skipped,
+            "y" if skipped == 1 else "ies",
+            first_error,
+        )
     return locks
 
 

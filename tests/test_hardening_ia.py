@@ -175,6 +175,78 @@ def test_dos01_ordinary_documents_parse_as_before(body: bytes) -> None:
     assert list(MultiStatusResponse(body).responses) == ["/a"]
 
 
+# -- DOS-05: one log line, not one per element -------------------------------
+
+
+def test_dos05_defective_activelocks_log_once_without_a_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    prop = "<d:lockdiscovery>" + "<d:activelock/>" * 5000 + "</d:lockdiscovery>"
+    with caplog.at_level(logging.WARNING, logger="webdav.dav.properties"):
+        response = MultiStatusResponse(ms(entry("/a", extra=prop)))
+    assert response.responses["/a"].properties.active_locks == []
+    records = [r for r in caplog.records if r.name == "webdav.dav.properties"]
+    assert 1 <= len(records) <= 2
+    assert all(r.exc_info is None for r in records)
+    assert "5000" in records[0].getMessage()
+
+
+def test_dos05_good_activelocks_are_still_read_and_silent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    prop = (
+        "<d:lockdiscovery><d:activelock><d:locktoken><d:href>opaquelocktoken:x</d:href>"
+        "</d:locktoken></d:activelock></d:lockdiscovery>"
+    )
+    with caplog.at_level(logging.WARNING, logger="webdav.dav.properties"):
+        response = MultiStatusResponse(ms(entry("/a", extra=prop)))
+    assert [
+        lock.token for lock in response.responses["/a"].properties.active_locks
+    ] == ["opaquelocktoken:x"]
+    assert not caplog.records
+
+
+# -- DOS-06: depth of a property value ---------------------------------------
+
+
+def _nested(levels: int) -> str:
+    return "<d:p>" * levels + "x" + "</d:p>" * levels
+
+
+def test_dos06_a_property_nested_absurdly_deep_is_refused() -> None:
+    body = ms(entry("/a", extra=f'<x:prop xmlns:x="urn:x">{_nested(3000)}</x:prop>'))
+    with pytest.raises(MalformedResponseError, match="MAX_PROPERTY_DEPTH"):
+        MultiStatusResponse(body)
+
+
+def test_dos06_a_realistically_nested_property_is_read() -> None:
+    body = ms(entry("/a", extra=f'<x:prop xmlns:x="urn:x">{_nested(40)}</x:prop>'))
+    props = MultiStatusResponse(body).responses["/a"].properties
+    assert props.element("urn:x", "prop") is not None
+
+
+def test_dos06_the_limit_can_be_lifted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(properties, "MAX_PROPERTY_DEPTH", None)
+    body = ms(entry("/a", extra=f'<x:prop xmlns:x="urn:x">{_nested(500)}</x:prop>'))
+    assert MultiStatusResponse(body).responses["/a"].properties.elements
+
+
+def _deep_element(levels: int) -> Any:
+    from xml.etree.ElementTree import Element, SubElement
+
+    root = node = Element("{urn:x}p")
+    for _ in range(levels):
+        node = SubElement(node, "{urn:x}p")
+    return root
+
+
+def test_dos06_serialising_a_too_deep_tree_is_a_value_error() -> None:
+    with pytest.raises(ValueError, match="nested too deeply"):
+        to_xml_string(_deep_element(5000))
+    with pytest.raises(ValueError, match="nested too deeply"):
+        build_proppatch_body({("urn:x", "p"): _deep_element(5000)})
+
+
 # -- DOS-09: the cost of one document ----------------------------------------
 
 
