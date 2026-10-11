@@ -196,6 +196,13 @@ def read_response(
     """
     status = response.status_code
     if method.upper() == Method.HEAD or status in (204, 304) or 100 <= status < 200:
+        # ``requests`` gives the connection back to the pool when the response
+        # is closed but closes the socket's response only if its content was not
+        # "consumed" - which setting the body below says it was. Read to the
+        # end (nothing is there) first, or the pooled connection is still busy
+        # with this response and the next request on it fails.
+        if isinstance(response.raw, urllib3.response.BaseHTTPResponse):
+            response.raw.drain_conn()
         _set_body(response, b"")
         response.close()
         return

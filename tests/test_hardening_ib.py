@@ -19,7 +19,7 @@ from tests.scripted_server import (
     Seen,
     scripted_server,
 )
-from webdav import FileSystem
+from webdav import FileSystem, Session
 from webdav.exceptions import ClientError
 from webdav.fsspec import WebdavFileSystem
 
@@ -201,3 +201,32 @@ def test_identity_is_no_content_encoding() -> None:
         sink = Sink()
         FileSystem(url).download_fileobj("/f", sink)  # type: ignore[arg-type]
         assert sink.data == b"hello"
+
+
+# ---------------------------------------------------------------------------
+# a held bodyless response does not poison the connection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("method", ["put", "delete", "head"])
+def test_a_held_bodyless_response_does_not_break_the_next_request(method: str) -> None:
+    def handler(_server: RawServer, conn: socket.socket, seen: Seen) -> None:
+        if seen.method == "HEAD":
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n")
+        elif seen.method in ("PUT", "DELETE"):
+            conn.sendall(b"HTTP/1.1 204 No Content\r\n\r\n")
+        else:
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+
+    with raw_server(handler) as server:
+        session = Session(server.url, retry=False)
+        held = []
+        for call in (method, "put", "head", "delete", "get", "put", "get"):
+            kwargs = {"data": b"x"} if call == "put" else {}
+            held.append(getattr(session, call)("/f", **kwargs))
+        assert [r.status_code for r in held] == [
+            204 if m in ("put", "delete") else 200
+            for m in (method, "put", "head", "delete", "get", "put", "get")
+        ]
+        assert held[-1].text == "ok"
+        assert server.connections == 1  # and the connection was kept alive, not dropped
