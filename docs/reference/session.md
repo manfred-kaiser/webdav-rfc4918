@@ -296,6 +296,13 @@ These limits apply to a `Session`, a `FileSystem` and the short form alike.
 
 - `max_response_size` (default 64 MiB) caps a response body after
   decompression. A response with stacked content-codings is refused.
+- XML from the server is parsed with entity declarations refused and a ceiling
+  of 64 million `<` per document (`webdav.dav.xml_utils.MAX_MARKUP`, `None` to
+  lift it). A `multistatus` has at most 200 000 `<d:response>` elements
+  (`webdav.dav.multistatus.MAX_RESPONSES`). These limits bound what one
+  document can make the client build, not how much memory a document up to
+  `max_response_size` costs: that is about 25 times its size for a document of
+  nothing but tiny elements.
 - `max_response_time` (default 300 s) is a deadline for the whole request:
   connecting, headers, interim `1xx` answers, body and trailers. Every
   socket wait is capped to the time left, so no extra thread is started.

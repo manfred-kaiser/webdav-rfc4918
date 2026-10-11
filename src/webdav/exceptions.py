@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, ClassVar
 import requests.exceptions
 
 from webdav._base_exceptions import ClientError, WebDAVError
+from webdav._xml_guard import check_xml
 from webdav.transport.body import content_within
 from webdav.url_safety import redact_url
 
@@ -206,7 +207,8 @@ def _parse_error_codes(response: "Response") -> "frozenset[str]":
         return frozenset()
     try:
         # See webdav.dav.xml_utils's module docstring: stdlib expat never resolves
-        # external entities and rejects entity-amplification by default.
+        # external entities; a document that declares one is refused (a ValueError).
+        check_xml(content)
         tree = ET.fromstring(content)  # noqa: S314 # nosec B314
     except (ET.ParseError, LookupError, ValueError, UnicodeError):
         return frozenset()

@@ -2,9 +2,11 @@
 
 Centralizes the XML-security invariant every parser in this codebase
 relies on: stdlib :mod:`xml.etree.ElementTree` never resolves external
-entities, and modern expat (>=2.4.0) rejects billion-laughs-style entity
-amplification by default - verified empirically against the versions this
-project supports, not just assumed.
+entities, and modern expat (>=2.4.0) rejects the worst entity amplification
+by default - but only past 8 MiB of output, and it counts bytes, not the
+objects a tree of tiny elements costs. A document that declares an entity is
+therefore refused outright (a WebDAV server sends none), and a document with
+absurdly many elements is refused before it is parsed (:data:`MAX_MARKUP`).
 """
 
 import re
@@ -12,9 +14,20 @@ from xml.etree.ElementTree import Element, ParseError, SubElement
 from xml.etree.ElementTree import fromstring as _fromstring
 from xml.etree.ElementTree import tostring as _tostring
 
+from webdav._xml_guard import UnsafeXMLError, check_xml
 from webdav.exceptions import MalformedResponseError
 
 DAV_NAMESPACE = "DAV:"
+
+#: The most ``<`` a document may carry (two per element, so about half as many
+#: elements), counted before it is parsed. Far above what a real answer holds -
+#: 200 000 ``<d:response>`` (``multistatus.MAX_RESPONSES``) of a Nextcloud
+#: ``allprop`` listing, the richest seen, are 13.6 million; of Apache's, 8.4
+#: million - and well beyond what the default ``max_response_size`` (64 MiB:
+#: at most 16.8 million of ``<a/>``) can carry, so it only ever matters to a
+#: session that raised or lifted that limit. Not a size limit: a listing of
+#: any number of ordinary entries stays far below. ``None`` turns it off.
+MAX_MARKUP: "int | None" = 64_000_000
 
 
 def clark(namespace: str, local_name: str) -> str:
@@ -42,16 +55,22 @@ def parse_xml(content: str | bytes) -> Element:
     """Parse XML content into an :class:`~xml.etree.ElementTree.Element`.
 
     See the module docstring for why this is safe against XXE/entity
-    expansion attacks without any extra hardening.
+    expansion attacks.
 
     Raises:
-        MalformedResponseError: ``content`` is not well-formed XML - wraps
+        MalformedResponseError: ``content`` is not well-formed XML, declares
+            an entity, or has more than :data:`MAX_MARKUP` ``<`` - wraps
             the stdlib's bare :class:`~xml.etree.ElementTree.ParseError` so
             every exception this library raises stays a
             :class:`~webdav.exceptions.WebDAVError`, per the promise in
             :mod:`webdav.exceptions`.
 
     """
+    try:
+        check_xml(content, MAX_MARKUP)
+    except UnsafeXMLError as exc:
+        msg = f"refusing the server's XML: {exc}"
+        raise MalformedResponseError(msg) from exc
     try:
         # Safe against XXE/entity expansion: see the module docstring. (bandit reads every
         # word after "nosec" as a test id, so the reason cannot sit on that line.)

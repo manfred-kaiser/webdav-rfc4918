@@ -136,9 +136,16 @@ list of defaults:
 - A streamed download (`stream=True`, `download_file`) is bounded per read
   only. Neither `max_response_size` nor `max_response_time` applies to it.
 - XML from the server is parsed with the standard library's expat parser.
-  External entities are never resolved, and expat 2.4.0 or newer rejects
-  entity expansion attacks such as "billion laughs". A multistatus or lock
-  response that tries either raises `MalformedResponseError`.
+  External entities are never resolved. A document that declares an entity
+  at all (`<!ENTITY ...>`) is refused before it is parsed, because expat's
+  own protection against "billion laughs" only starts at 8 MiB of output and
+  counts bytes, not the objects a tree of tiny elements costs. A document
+  with more than 64 million `<` is refused too (far above what any real
+  answer holds). A multistatus or lock response that does either raises
+  `MalformedResponseError`. Not covered: a hostile body just under
+  `max_response_size` still costs memory in proportion (about 1.6 GB for 64
+  MiB of nothing but empty elements); lower the limit for a server you do
+  not trust.
 - Credentials do not end up in exception messages, warnings or logs: the
   userinfo of a URL and the query of a signed URL are redacted.
 - `download_file` writes only to the path you give, through a temporary
