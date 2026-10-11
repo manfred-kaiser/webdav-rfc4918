@@ -129,6 +129,8 @@ list of defaults:
   (`RedirectPolicy.SAME_ORIGIN`). Credentials and cookies are never sent to
   another origin, even a trusted one.
 - A redirect from `https` to `http` is never followed, under any policy.
+- Proxies from the environment (`HTTP_PROXY`, ...) are used, as in `requests`;
+  `trust_env=False` / `dav --no-proxy` turns that off.
 - Buffered responses, including multistatus XML, are size-capped, and so are
   redirect chains. Exact limits:
   [Session reference](https://webdav.readthedocs.io/en/latest/reference/session.html#limits-on-what-a-server-can-make-the-client-do).

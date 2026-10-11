@@ -272,10 +272,9 @@ session = webdav.Session(
 )
 ```
 
-The options of this library are `redirect_policy`,
-`trusted_redirect_origins`, `max_response_size`, `max_response_time`,
-`max_redirects`, `retry`, `chunk_size`, `raise_on_error` and
-`response_class`. `FileSystem(...)` and every short-form function take
+The options of this library are `redirect_policy`, `trusted_redirect_origins`,
+`trust_env`, `max_response_size`, `max_response_time`, `max_redirects`,
+`retry`, `chunk_size`, `raise_on_error` and `response_class`. `FileSystem(...)` and every short-form function take
 them too. The next sections explain the limits and retries. Redirects and
 certificates have their own pages: [Redirects](redirects.md) and
 [TLS and mTLS](tls.md).
@@ -323,6 +322,15 @@ the network path can read them. The session warns once per host
 (`InsecureTransportWarning`, except for localhost) but still sends the
 request. Use an `https://` URL.
 ```
+
+### Proxies
+
+`HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` from the environment are used, as in
+`requests`. A proxy sees plain `http://` requests in full, `Authorization`
+included; for `https://` it only sees the host and port. `trust_env=False`
+(`dav --no-proxy`) ignores the environment's proxies. A connection error
+through a proxy says so in a note on the exception and in the log, because the
+usual cause is a stale `HTTP_PROXY`.
 
 ## Retries
 

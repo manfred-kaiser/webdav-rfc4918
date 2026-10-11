@@ -220,6 +220,15 @@ def _client_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         kwargs["max_redirects"] = args.max_redirects
     if args.trusted_redirect_origin:
         kwargs["trusted_redirect_origins"] = args.trusted_redirect_origin
+    kwargs.update(_trust_kwargs(args))
+    return kwargs
+
+
+def _trust_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    """The session options that say whom to talk to and how carefully: ``--allowed-origin``, ``--allow-insecure``, ``--no-proxy``."""
+    kwargs: dict[str, Any] = {}
+    if args.no_proxy:
+        kwargs["trust_env"] = False
     return kwargs
 
 
@@ -418,6 +427,11 @@ def _add_client_args(parser: argparse.ArgumentParser) -> None:
     )
 
     conn = parser.add_argument_group("connection")
+    conn.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="ignore HTTP_PROXY/HTTPS_PROXY/NO_PROXY from the environment",
+    )
     conn.add_argument(
         "--max-response-size",
         type=_size_cap,

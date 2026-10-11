@@ -85,6 +85,7 @@ $ dav ls --help
 | `--max-response-time` | Seconds for the whole request, or `none`. Default: 300 |
 | `--chunk-size` | Bytes. Default: 4 MiB |
 | `--no-retry` | Do not retry a transient failure automatically |
+| `--no-proxy` | Ignore `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` from the environment |
 
 `none` (or `unlimited`) removes the limit completely. A faulty or hostile
 server can then send a response of any size, or keep a request open

@@ -603,6 +603,55 @@ def test_send_without_a_base_url_still_sends_to_any_http_url() -> None:
 
 
 # ---------------------------------------------------------------------------
+# trust_env
+# ---------------------------------------------------------------------------
+
+
+def test_trust_env_false_ignores_the_environment_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with scripted_server(always(OK)) as (proxy, proxy_rec):
+        monkeypatch.setenv("HTTP_PROXY", proxy)
+        monkeypatch.setenv("http_proxy", proxy)
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
+        Session(retry=False).get(
+            "http://dav.invalid/x"
+        )  # the default: through the proxy
+        assert len(proxy_rec.requests) == 1
+        with pytest.raises(requests.exceptions.ConnectionError):
+            Session(retry=False, trust_env=False, timeout=(0.5, 0.5)).get(
+                "http://dav.invalid/x"
+            )
+        assert len(proxy_rec.requests) == 1
+
+
+def test_trust_env_is_a_bool_and_an_option_everywhere() -> None:
+    with pytest.raises(TypeError):
+        Session(trust_env=0)  # type: ignore[arg-type]
+    assert Session().trust_env is True
+    assert FileSystem("http://dav.example", trust_env=False).session.trust_env is False
+    assert pickle.loads(pickle.dumps(Session(trust_env=False))).trust_env is False
+
+
+def test_a_connection_error_through_an_environment_proxy_says_so(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    dead = f"http://proxyuser:proxypw@127.0.0.1:{_closed_port()}"
+    monkeypatch.setenv("HTTP_PROXY", dead)
+    monkeypatch.setenv("http_proxy", dead)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    with caplog.at_level(logging.WARNING, logger="webdav"):
+        with pytest.raises(requests.exceptions.ConnectionError) as caught:
+            Session(retry=False).get("http://dav.invalid/x")
+    notes = " ".join(getattr(caught.value, "__notes__", []))
+    assert "trust_env=False" in notes
+    assert "trust_env=False" in caplog.text
+    assert "proxypw" not in notes + caplog.text
+
+
+# ---------------------------------------------------------------------------
 # A Digest challenge that cannot be used
 # ---------------------------------------------------------------------------
 

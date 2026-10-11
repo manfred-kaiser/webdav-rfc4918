@@ -35,7 +35,9 @@ All security defaults, TLS and otherwise, are listed in the
 [README](https://github.com/manfred-kaiser/webdav-rfc4918#security).
 
 `REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` from the environment are ignored (they
-would replace the CA you configured), and so is `~/.netrc`.
+would replace the CA you configured), and so is `~/.netrc`. Proxies from the
+environment (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) are used, as in
+`requests`; `trust_env=False` (`dav --no-proxy`) turns that off.
 
 ```{warning}
 All of this needs an `https://` `base_url`. Over plain `http://` there is

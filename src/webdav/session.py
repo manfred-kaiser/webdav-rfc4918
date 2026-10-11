@@ -49,7 +49,7 @@ import requests.adapters
 import requests.auth
 from requests.cookies import extract_cookies_to_jar
 from requests.hooks import dispatch_hook
-from requests.utils import default_headers, resolve_proxies
+from requests.utils import default_headers, resolve_proxies, select_proxy
 
 from webdav.dav.body import prepare_body
 from webdav.dav.features import FeatureDetection
@@ -269,6 +269,7 @@ class ConnectionOptions(TypedDict, total=False):
     timeout: "float | tuple[float | None, float | None] | None"
     redirect_policy: RedirectPolicy
     trusted_redirect_origins: "Iterable[str] | Callable[[str], bool] | None"
+    trust_env: bool
     max_response_size: "int | None"
     max_response_time: "float | None"
     max_redirects: int
@@ -304,7 +305,7 @@ class Session:
 
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913  # pylint: disable=too-many-arguments,too-many-locals
         self,
         base_url: "str | None" = None,
         *,
@@ -316,6 +317,7 @@ class Session:
         timeout: "float | tuple[float | None, float | None] | None" = DEFAULT_TIMEOUT,
         redirect_policy: RedirectPolicy = RedirectPolicy.SAME_ORIGIN,
         trusted_redirect_origins: "Iterable[str] | Callable[[str], bool] | None" = None,
+        trust_env: bool = True,
         max_response_size: "int | None" = DEFAULT_MAX_RESPONSE_SIZE,
         max_response_time: "float | None" = DEFAULT_MAX_RESPONSE_TIME,
         max_redirects: int = MAX_REDIRECTS,
@@ -382,6 +384,10 @@ class Session:
                 (``"https://host"``) or a ``Callable[[str], bool]`` given
                 the full target URL. Required with ``WHITELIST`` and
                 rejected with any other policy.
+            trust_env: ``False`` ignores ``HTTP_PROXY``/``HTTPS_PROXY``/
+                ``NO_PROXY`` from the environment (and ``~/.netrc``, which is
+                never consulted anyway). The default ``True`` is what
+                ``requests`` does.
             max_response_size: Reject a non-streamed response whose body
                 exceeds this many bytes (declared ``Content-Length``, and the
                 bytes actually read after decoding). ``None`` disables the
@@ -445,6 +451,7 @@ class Session:
             raise TypeError(msg)
         verify = check_verify_type(verify)
         self._transport = requests.Session()
+        self.trust_env = trust_env
         self.auth = auth
         if headers:
             self.headers.update(headers)
@@ -1213,7 +1220,7 @@ class Session:
             try:
                 response = adapter.send(request, **kwargs)
             except requests.exceptions.RequestException as exc:
-                self._explain_transport_error(exc, request.url or "")
+                self._explain_transport_error(exc, request.url or "", kwargs)
                 raise
             response.elapsed = timedelta(seconds=time.perf_counter() - started)
             # Before any response hook runs: ``HTTPDigestAuth`` (and any
@@ -1236,9 +1243,24 @@ class Session:
             )
         return result
 
-    def _explain_transport_error(self, exc: BaseException, url: str) -> None:
-        """Make a transport error safe to show: the query of a signed URL out of its text."""
+    def _explain_transport_error(
+        self, exc: BaseException, url: str, kwargs: "Mapping[str, Any]"
+    ) -> None:
+        """Make a transport error safe to show: the query of a signed URL out of its text, and a proxy named if one was in the way."""
         scrub_exception(exc, url)
+        if not isinstance(
+            exc, requests.exceptions.ConnectionError | requests.exceptions.Timeout
+        ):
+            return
+        proxy = select_proxy(url, kwargs.get("proxies"))
+        if proxy:
+            hint = (
+                f"the request went through the proxy {redact_url(proxy)} (HTTP_PROXY/"
+                "HTTPS_PROXY/NO_PROXY from the environment, or proxies=); pass "
+                "trust_env=False (dav: --no-proxy) to ignore the environment's"
+            )
+            exc.add_note(hint)
+            _LOGGER.warning("%s", hint)
 
     def _warn_if_insecure(self, url: str, kwargs: dict[str, Any]) -> None:
         """Warn (once per host) when credentials are about to go out over plain ``http``."""
@@ -1389,7 +1411,9 @@ class Session:
                 ),
             )
         except requests.exceptions.RequestException as exc:
-            self._explain_transport_error(exc, prepared.url or url)
+            self._explain_transport_error(
+                exc, prepared.url or url, {"proxies": settings["proxies"]}
+            )
             raise
 
     # -- HTTP verbs, typed to return a webdav Response --------------------
