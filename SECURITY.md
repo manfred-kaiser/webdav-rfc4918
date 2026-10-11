@@ -56,10 +56,16 @@ and port only.
 
 XML from the server (multistatus, lock and error bodies) is parsed with the standard
 library's expat parser. External entities are never resolved, so a response cannot make
-the client read a local file or send a request. Expat 2.4.0 and newer rejects entity
-expansion attacks ("billion laughs"). A multistatus or lock response that tries either
-raises `MalformedResponseError`. If your Python links an older system expat, check
-`pyexpat.EXPAT_VERSION`.
+the client read a local file or send a request. A document that declares an entity at all
+is refused before it is parsed, so the protection against "billion laughs" does not depend
+on the expat your Python links. A multistatus or lock response that does either raises
+`MalformedResponseError`.
+
+The parser itself is still expat's: the Python floor is 3.11, and a Python that links an
+old system expat (a distribution's, or a container image's) lacks the fixes of later
+releases. If you parse responses from servers you do not trust, make sure
+`pyexpat.EXPAT_VERSION` is current; the library does not check this at import, and the
+responsibility for it lies with whoever provides the Python.
 
 The complete list of security defaults is in the
 [README](https://github.com/manfred-kaiser/webdav-rfc4918#security). The redirect, TLS
