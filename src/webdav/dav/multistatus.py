@@ -363,13 +363,21 @@ def parse_multistatus_response(
     Raises:
         MalformedResponseError: ``http_response`` isn't a 207 response (a
             plain web server, a proxy or a captive portal answering the
-            PROPFIND) or its body is not a well-formed multistatus.
+            PROPFIND), its body is not a well-formed multistatus or its
+            root element is not ``{DAV:}multistatus``.
 
     """
     if http_response.status_code != requests.codes.multi_status:
         msg = f"the server answered {http_response.status_code}, not a 207 Multi-Status - is this a WebDAV server?"
         raise MalformedResponseError(msg)
-    return multistatus_class(http_response.content)
+    parsed = multistatus_class(http_response.content)
+    # Not in the constructor, which is public and takes what a caller gives it: here
+    # it is an answer from a server, and a 207 that is no multistatus (another
+    # namespace, an error page) reports nothing - a failure it hid would pass as success.
+    if parsed.tree.tag != dav("multistatus"):
+        msg = f"the server's 207 body is not a DAV: multistatus document (its root is <{parsed.tree.tag}>)"
+        raise MalformedResponseError(msg)
+    return parsed
 
 
 def multistatus_failure(http_response: "HTTPResponse") -> "MultiStatusResponse | None":

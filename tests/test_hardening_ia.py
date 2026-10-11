@@ -367,6 +367,33 @@ def test_exc01_several_valid_hrefs_of_one_response_still_work() -> None:
     assert set(parsed.responses) == {"/a", "/a/"} or "/a" in parsed.responses
 
 
+# -- PROTO-05: the root element of a multistatus -------------------------------
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"<multistatus><response><href>/a</href><status>HTTP/1.1 423 Locked</status></response></multistatus>",
+        b'<m:multistatus xmlns:m="urn:x"/>',
+        b"<html><body>hello</body></html>",
+    ],
+)
+def test_proto05_a_207_with_another_root_is_refused(body: bytes) -> None:
+    with pytest.raises(MalformedResponseError, match="multistatus"):
+        parse_multistatus_response(make_response(207, body, method="DELETE"))
+    with pytest.raises(MalformedResponseError):
+        make_response(207, body, method="DELETE").raise_for_status()
+
+
+def test_proto05_an_empty_correct_multistatus_is_still_empty() -> None:
+    parsed = parse_multistatus_response(make_response(207, ms(), method="PROPFIND"))
+    assert parsed.entries == []
+
+
+def test_proto05_the_public_constructor_takes_any_root_as_before() -> None:
+    assert MultiStatusResponse(b"<anything/>").entries == []
+
+
 # -- BUG-09: whitespace around an href or an ETag ----------------------------
 
 
