@@ -83,6 +83,7 @@ from webdav.transport.guards import (
     NO_AUTH,
     CleartextWarner,
     check_base_url,
+    check_insecure_transport,
     check_verify,
     require_full_url,
     scrub_exception,
@@ -192,6 +193,7 @@ _PICKLED = (
     "redirect_forward_headers",
     "_retry_arg",
     "_trusted_arg",
+    "insecure_transport",
     # The raw TLS arguments, not the adapter/SSLContext they build: unlike
     # those, they are plain, picklable values, and _init_derived() rebuilds
     # the adapter fresh from them - the same way it already rebuilds locks
@@ -217,6 +219,13 @@ _TRANSPORT_PICKLED = (
     "stream",
     "trust_env",
 )
+
+
+#: What an older pickle of a session does not have (and ``__init__`` is not run
+#: to give it): the default each option has in the constructor.
+_STATE_DEFAULTS: "dict[str, Any]" = {
+    "insecure_transport": "error",
+}
 
 
 def _merge_arguments(args: "tuple[Any, ...]", kwargs: "dict[str, Any]") -> None:
@@ -270,6 +279,7 @@ class ConnectionOptions(TypedDict, total=False):
     timeout: "float | tuple[float | None, float | None] | None"
     redirect_policy: RedirectPolicy
     trusted_redirect_origins: "Iterable[str] | Callable[[str], bool] | None"
+    insecure_transport: str
     trust_env: bool
     max_response_size: "int | None"
     max_response_time: "float | None"
@@ -288,7 +298,7 @@ class SessionOptions(ConnectionOptions, total=False):
     chunk_size: int
 
 
-class Session:
+class Session:  # pylint: disable=too-many-public-methods  # grows with its options (each a getter or a getter and setter), see pyproject max-public-methods
     """A WebDAV client built on ``requests``, with the API you already know from it.
 
     Not a :class:`requests.Session` subclass - it holds one (``auth``,
@@ -318,6 +328,7 @@ class Session:
         timeout: "float | tuple[float | None, float | None] | None" = DEFAULT_TIMEOUT,
         redirect_policy: RedirectPolicy = RedirectPolicy.SAME_ORIGIN,
         trusted_redirect_origins: "Iterable[str] | Callable[[str], bool] | None" = None,
+        insecure_transport: str = "error",
         trust_env: bool = True,
         max_response_size: "int | None" = DEFAULT_MAX_RESPONSE_SIZE,
         max_response_time: "float | None" = DEFAULT_MAX_RESPONSE_TIME,
@@ -388,6 +399,13 @@ class Session:
                 (``"https://host"``) or a ``Callable[[str], bool]`` given
                 the full target URL. Required with ``WHITELIST`` and
                 rejected with any other policy.
+            insecure_transport: What to do when credentials (``auth``, an
+                ``Authorization``/``Cookie`` header, ``cookies=``) would go over
+                plain ``http`` to a host that is not loopback: ``"error"`` (the
+                default) refuses the request, ``"warn"`` sends it with an
+                :class:`~webdav.exceptions.InsecureTransportWarning` (once per
+                host), ``"allow"`` sends it without. Loopback counts as such only
+                when no proxy is in use for it.
             trust_env: ``False`` ignores ``HTTP_PROXY``/``HTTPS_PROXY``/
                 ``NO_PROXY`` from the environment (and ``~/.netrc``, which is
                 never consulted anyway). The default ``True`` is what
@@ -444,7 +462,8 @@ class Session:
                 disagree - see :func:`~webdav.transport.redirects.validate_policy` -
                 or ``base_url``, ``timeout``, ``max_response_size``,
                 ``max_response_time``, ``max_redirects``, ``pool_connections``,
-                ``pool_maxsize`` or ``chunk_size`` is not a usable value.
+                ``pool_maxsize`` or ``chunk_size`` is not a usable value, or
+                ``insecure_transport`` is wrong.
 
         """
         validate_policy(redirect_policy, trusted_redirect_origins)
@@ -460,6 +479,7 @@ class Session:
         if headers:
             self.headers.update(headers)
         self._trusted_arg = trusted_redirect_origins
+        self.insecure_transport = insecure_transport
         # Immutable once set: internal code paths (releasing a lock on
         # cleanup, Session._record_granted, ...) replay an absolute URL they
         # captured earlier and trust it was already validated against this
@@ -888,6 +908,20 @@ class Session:
             names = [names]
         self._redirect_forward_headers = frozenset(n.strip().lower() for n in names)
 
+    @property
+    def insecure_transport(self) -> str:
+        """``"error"``, ``"warn"`` or ``"allow"``: what happens to credentials about to go over plain ``http`` to a host that is not loopback.
+
+        Raises:
+            ValueError: When set to anything else.
+
+        """
+        return self._insecure_transport
+
+    @insecure_transport.setter
+    def insecure_transport(self, value: str) -> None:
+        self._insecure_transport = check_insecure_transport(value)
+
     def __enter__(self) -> "Self":
         """Usable as a context manager, exactly like :class:`requests.Session`."""
         return self
@@ -1279,14 +1313,26 @@ class Session:
             _LOGGER.warning("%s", hint)
 
     def _warn_if_insecure(self, url: str, kwargs: dict[str, Any]) -> None:
-        """Warn (once per host) when credentials are about to go out over plain ``http``."""
+        """Refuse, or warn (once per host), when credentials are about to go out over plain ``http`` - see ``insecure_transport``."""
         per_call_auth = kwargs.get("auth")
+
+        def proxied() -> bool:
+            probe = requests.PreparedRequest()
+            probe.url = url
+            proxies = resolve_proxies(
+                probe, {**self.proxies, **(kwargs.get("proxies") or {})}, self.trust_env
+            )
+            return bool(select_proxy(url, proxies))
+
         self._cleartext.check(
             url,
+            mode=self.insecure_transport,
             call_headers=kwargs.get("headers"),
             session_headers=self.headers,
-            has_auth=(per_call_auth is not None and per_call_auth is not NO_AUTH)
+            has_auth=(bool(per_call_auth) and per_call_auth is not NO_AUTH)
             or bool(self.auth),
+            has_cookies=lambda: bool(kwargs.get("cookies")),
+            proxied=proxied,
         )
 
     # -- redirects ------------------------------------------------------

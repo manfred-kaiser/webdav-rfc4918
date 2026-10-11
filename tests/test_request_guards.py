@@ -226,7 +226,12 @@ def test_the_warnings_of_a_disabled_certificate_check_point_at_the_caller() -> N
 
 
 def test_the_cleartext_credentials_warning_points_at_the_caller() -> None:
-    session = Session(auth=("user", "secret"), retry=False, timeout=(0.05, 0.05))
+    session = Session(
+        auth=("user", "secret"),
+        retry=False,
+        timeout=(0.05, 0.05),
+        insecure_transport="warn",
+    )
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         with contextlib.suppress(requests.RequestException):
@@ -239,7 +244,12 @@ def test_the_cleartext_credentials_warning_points_at_the_caller() -> None:
 
 
 def test_a_copy_of_a_session_does_not_share_what_was_warned_about() -> None:
-    session = Session(auth=("user", "secret"), retry=False, timeout=(0.05, 0.05))
+    session = Session(
+        auth=("user", "secret"),
+        retry=False,
+        timeout=(0.05, 0.05),
+        insecure_transport="warn",
+    )
     duplicate = copy.copy(session)
     for each in (session, duplicate):
         with warnings.catch_warnings(record=True) as caught:

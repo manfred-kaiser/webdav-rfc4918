@@ -123,8 +123,11 @@ list of defaults:
   `auth=`, no credentials are sent.
 - A URL with credentials in it (`https://user:pw@host/`) is refused. Pass
   `auth=` instead. [Why](https://webdav.readthedocs.io/en/latest/reference/url-credentials.html).
-- Credentials sent over plain `http` to a host other than localhost trigger
-  an `InsecureTransportWarning`, once per host.
+- Credentials (`auth=`, cookies, an `Authorization` header) over plain `http`
+  to a host other than localhost are refused (`insecure_transport="error"`);
+  `"warn"` sends them with an `InsecureTransportWarning`, `"allow"` silently.
+  Unlike URLs you name, which are the configuration (set `allowed_origins`
+  when they come from untrusted input), this one has an effect by default.
 - Only same-origin redirects are followed
   (`RedirectPolicy.SAME_ORIGIN`). Credentials and cookies are never sent to
   another origin, even a trusted one, and not on the way back to the origin

@@ -225,8 +225,10 @@ def _client_kwargs(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _trust_kwargs(args: argparse.Namespace) -> dict[str, Any]:
-    """The session options that say whom to talk to and how carefully: ``--allowed-origin``, ``--allow-insecure``, ``--no-proxy``."""
+    """The session options that say whom to talk to and how carefully: ``--allow-insecure``, ``--no-proxy``."""
     kwargs: dict[str, Any] = {}
+    if args.allow_insecure:
+        kwargs["insecure_transport"] = "warn"
     if args.no_proxy:
         kwargs["trust_env"] = False
     return kwargs
@@ -427,6 +429,13 @@ def _add_client_args(parser: argparse.ArgumentParser) -> None:
     )
 
     conn = parser.add_argument_group("connection")
+    conn.add_argument(
+    conn.add_argument(
+        "--allow-insecure",
+        action="store_true",
+        help="send credentials over plain http to a host that is not "
+        "loopback, with a warning (refused by default)",
+    )
     conn.add_argument(
         "--no-proxy",
         action="store_true",

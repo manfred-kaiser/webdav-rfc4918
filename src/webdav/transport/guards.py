@@ -7,12 +7,14 @@ Each one either refuses the request (with the library's own
 - :func:`require_full_url` - one full, credential-free ``http(s)`` URL;
 - :func:`check_verify` - a server whose certificate will not be checked, or a
   CA bundle that is not there;
-- :class:`CleartextWarner` - credentials about to go out over plain ``http``;
+- :class:`CleartextWarner` - credentials about to go out over plain ``http``
+  (refused, warned about or allowed - ``insecure_transport=``);
 - :data:`NO_AUTH` - no credentials looked up behind the caller's back;
 - :func:`scrub_exception` - the query of a signed URL taken out of a transport error.
 """
 
 import ipaddress
+import logging
 import pathlib
 import threading
 from typing import TYPE_CHECKING
@@ -30,7 +32,12 @@ from webdav.url_safety import effective_origin, is_url, redact_url
 
 if TYPE_CHECKING:
     import urllib.parse
-    from collections.abc import Mapping
+    from collections.abc import Callable, Iterable, Mapping
+
+_LOGGER = logging.getLogger("webdav")
+
+#: What ``insecure_transport=`` takes.
+INSECURE_TRANSPORT_MODES = ("warn", "error", "allow")
 
 _CREDENTIAL_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie"})
 
@@ -149,66 +156,17 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
-class CleartextWarner:
-    """Warns, once per host, when credentials are about to go out over plain ``http``.
+def check_insecure_transport(value: object) -> str:
+    """``value`` if it is one of ``"warn"``, ``"error"`` and ``"allow"``.
 
-    Holds what it has already warned about, so it belongs to one session: a
-    copy of a session starts with a fresh one (see ``Session._init_derived``).
+    Raises:
+        ValueError: It is anything else - a typo here would silently pick the wrong one.
+
     """
-
-    def __init__(self) -> None:
-        """Start with nothing warned about."""
-        self._warned: set[str] = set()
-        self._lock = threading.Lock()
-
-    def check(
-        self,
-        url: str,
-        *,
-        call_headers: "Mapping[str, str] | None",
-        session_headers: "Mapping[str, str]",
-        has_auth: bool,
-    ) -> None:
-        """Warn if a request to ``url`` would send credentials in clear text.
-
-        Args:
-            url: Where the request goes.
-            call_headers: The headers this request carries on top of the
-                session's own.
-            session_headers: The session's default headers.
-            has_auth: The request or the session has ``auth`` set.
-
-        Raises:
-            ClientError: ``url`` cannot be parsed.
-
-        """
-        parts = split_url(url)
-        if (
-            parts.scheme.lower() != "http"
-            or not parts.hostname
-            or _is_loopback(parts.hostname)
-        ):
-            return
-        names = {k.lower() for k in (call_headers or {})} | {
-            k.lower() for k in session_headers
-        }
-        if not (has_auth or parts.username is not None or names & _CREDENTIAL_HEADERS):
-            return
-        # Host and port only: the netloc may carry the very password being warned about.
-        host = (
-            f"{parts.hostname.lower()}:{parts.port}"
-            if parts.port
-            else parts.hostname.lower()
-        )
-        with self._lock:
-            if host in self._warned:
-                return
-            self._warned.add(host)
-        warn_at_caller(
-            f"sending credentials to {host} over plain http - anyone on the network "
-            "path can read them; use an https URL",
-            InsecureTransportWarning,
-        )
+    if value not in INSECURE_TRANSPORT_MODES:
+        msg = f"insecure_transport must be one of {INSECURE_TRANSPORT_MODES}, got {value!r}"
+        raise ValueError(msg)
+    return str(value)
 
 
 def scrub_exception(exc: BaseException, url: str) -> None:
@@ -257,6 +215,7 @@ __all__ = [
     "NO_AUTH",
     "CleartextWarner",
     "check_base_url",
+    "check_insecure_transport",
     "check_verify",
     "require_full_url",
     "scrub_exception",

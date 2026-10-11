@@ -275,6 +275,9 @@ session = webdav.Session(
 The options of this library are `redirect_policy`, `trusted_redirect_origins`,
 `trust_env`, `max_response_size`, `max_response_time`, `max_redirects`,
 `retry`, `chunk_size`, `raise_on_error` and `response_class`. `FileSystem(...)` and every short-form function take
+`allowed_origins`, `insecure_transport`, `sensitive_headers`, `trust_env`,
+`max_response_size`, `max_response_time`, `max_redirects`, `retry`,
+`chunk_size`, `raise_on_error` and `response_class`. `FileSystem(...)` and every short-form function take
 them too. The next sections explain the limits and retries. Redirects and
 certificates have their own pages: [Redirects](redirects.md) and
 [TLS and mTLS](tls.md).
@@ -314,14 +317,30 @@ These limits apply to a `Session`, a `FileSystem` and the short form alike.
 Both limits are constructor arguments and can also be set later as
 attributes, e.g. `session.max_response_time = 60`.
 
-```{warning}
+### Credentials over plain `http://`
+
 `auth=` is only encrypted on the wire if `base_url` (or the URL you call) is
-`https://`. Over plain `http://`, the username and password go out in clear
-text with the very first request, not only after a redirect, and anyone on
-the network path can read them. The session warns once per host
-(`InsecureTransportWarning`, except for localhost) but still sends the
-request. Use an `https://` URL.
-```
+`https://`. Over plain `http://` the username and password go out in clear
+text with the very first request, and anyone on the network path can read
+them. So the session **refuses** such a request by default (a `ClientError`
+that names the option), unless the host is loopback (`127.0.0.1`, `::1`,
+`localhost`) and no proxy would carry the request.
+`insecure_transport` says what to do instead:
+
+| Value | Effect |
+|---|---|
+| `"error"` (default) | Refuse the request |
+| `"warn"` | Send it, with an `InsecureTransportWarning` (once per host, also logged); `dav --allow-insecure` |
+| `"allow"` | Send it silently |
+
+What counts as a credential: `auth=`, an `Authorization`, `Proxy-Authorization`
+or `Cookie` header, a cookie you put in `session.cookies` or pass as
+`cookies=` (not one the server set itself), and any header named in
+`sensitive_headers=` (`sensitive_headers=["X-Api-Key"]`). Loopback counts as
+loopback only without a proxy: with `HTTP_PROXY` set, a request to
+`localhost` goes to the proxy, in clear text. Credentials in a URL are refused
+anyway. A trusted `http://` intranet or NAS needs `insecure_transport="warn"`
+or `"allow"`; the better fix is `https://`.
 
 ### Proxies
 

@@ -765,6 +765,160 @@ def test_a_normal_cookie_session_still_works_end_to_end() -> None:
 
 
 # ---------------------------------------------------------------------------
+# insecure_transport
+# ---------------------------------------------------------------------------
+
+_REMOTE = "http://192.0.2.1:9/x"  # TEST-NET: never answers; the error must come before a connection
+
+
+def test_credentials_over_plain_http_to_a_remote_host_are_refused_by_default() -> None:
+    session = Session(auth=("u", "p"), retry=False, timeout=(0.05, 0.05))
+    with pytest.raises(ClientError) as caught:
+        session.get(_REMOTE)
+    text = str(caught.value)
+    assert "insecure_transport" in text
+    assert '"allow"' in text
+    assert '"warn"' in text
+    assert "192.0.2.1:9" in text
+
+
+def test_the_refusal_is_the_same_for_a_filesystem() -> None:
+    client = FileSystem("http://192.0.2.1:9", auth=("u", "p"), retry=False)
+    with pytest.raises(ClientError, match="insecure_transport"):
+        client.ls("/")
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        lambda s: s.headers.update({"Authorization": "Bearer x"}),
+        lambda s: s.headers.update({"Cookie": "a=b"}),
+        lambda s: s.cookies.set("sid", "S", domain="192.0.2.1"),
+        lambda s: setattr(s, "auth", ("u", "p")),
+    ],
+)
+def test_every_kind_of_credential_counts(setup: Any) -> None:
+    session = Session(retry=False, timeout=(0.05, 0.05))
+    setup(session)
+    with pytest.raises(ClientError, match="insecure_transport"):
+        session.get(_REMOTE)
+
+
+def test_a_per_call_cookie_and_a_sensitive_header_count() -> None:
+    session = Session(
+        retry=False, timeout=(0.05, 0.05), sensitive_headers=["X-Api-Key"]
+    )
+    with pytest.raises(ClientError, match="insecure_transport"):
+        session.get(_REMOTE, cookies={"sid": "S"})
+    with pytest.raises(ClientError, match="insecure_transport"):
+        session.get(_REMOTE, headers={"x-api-key": "K"})
+    plain = Session(retry=False, timeout=(0.05, 0.05))
+    with contextlib.suppress(
+        requests.RequestException
+    ):  # an unknown header is not a credential
+        plain.get(_REMOTE, headers={"x-api-key": "K"})
+
+
+def test_without_credentials_there_is_nothing_to_refuse() -> None:
+    session = Session(retry=False, timeout=(0.05, 0.05))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        session._warn_if_insecure(_REMOTE, {})
+
+
+def test_a_cookie_a_server_set_is_not_a_credential_the_user_gave() -> None:
+    session = Session(retry=False, timeout=(0.05, 0.05))
+    _accepted("192.0.2.1", session.cookies, "SERVERID=lb1")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        session._warn_if_insecure(_REMOTE, {})
+
+
+def test_warn_sends_with_a_warning_once_and_logs_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session = Session(
+        auth=("u", "p"), retry=False, timeout=(0.05, 0.05), insecure_transport="warn"
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with caplog.at_level(logging.WARNING, logger="webdav"):
+            for _ in range(2):
+                with contextlib.suppress(requests.RequestException):
+                    session.get(_REMOTE)
+    assert [w.category for w in caught] == [exceptions.InsecureTransportWarning]
+    assert "plain http" in caplog.text
+
+
+def test_allow_is_silent() -> None:
+    session = Session(
+        auth=("u", "p"), retry=False, timeout=(0.05, 0.05), insecure_transport="allow"
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", exceptions.InsecureTransportWarning)
+        with contextlib.suppress(requests.RequestException):
+            session.get(_REMOTE)
+
+
+def test_a_pickle_of_the_previous_release_gets_the_default_mode() -> None:
+    session = pickle.loads(base64.b64decode("".join(old.PLAIN)))
+    assert session.insecure_transport == "error"
+    assert session.sensitive_headers == frozenset()
+
+
+def test_the_mode_is_validated_and_can_be_changed() -> None:
+    with pytest.raises(ValueError, match="insecure_transport"):
+        Session(insecure_transport="yes")
+    session = Session()
+    assert session.insecure_transport == "error"
+    session.insecure_transport = "warn"
+    assert pickle.loads(pickle.dumps(session)).insecure_transport == "warn"
+
+
+def test_loopback_http_with_credentials_is_untouched() -> None:
+    with scripted_server(always(OK)) as (url, rec):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            Session(url, auth=("u", "p"), retry=False).get("/x")
+    assert len(rec.requests) == 1
+
+
+def test_loopback_does_not_count_when_a_proxy_would_carry_it() -> None:
+    session = Session(auth=("u", "p"), retry=False, timeout=(0.05, 0.05))
+    session.proxies = {"http": "http://127.0.0.1:9"}
+    with pytest.raises(ClientError, match="insecure_transport"):
+        session.get("http://127.0.0.1:12345/x")
+
+
+def test_loopback_does_not_count_for_an_environment_proxy_either(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    with pytest.raises(ClientError, match="insecure_transport"):
+        Session(auth=("u", "p"), retry=False, timeout=(0.05, 0.05)).get(
+            "http://localhost:12345/x"
+        )
+    # trust_env=False: no proxy, so loopback is loopback again
+    with scripted_server(always(OK)) as (url, _rec):
+        Session(auth=("u", "p"), retry=False, trust_env=False).get(f"{url}/x")
+
+
+def test_the_cli_flag_allows_what_the_default_refuses(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from webdav import cli
+
+    args = ["ls", "http://u:p@192.0.2.1:9/", "--timeout", "0.05", "--no-retry"]
+    assert cli.main(args) == 1
+    assert "refusing to send credentials" in capsys.readouterr().err
+    assert cli.main([*args, "--allow-insecure"]) == 1
+    assert "refusing to send credentials" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
 # A copy shares no containers with its original
 # ---------------------------------------------------------------------------
 

@@ -297,7 +297,7 @@ def test_credentials_in_a_url_do_not_reach_messages_or_warnings() -> None:
 def test_the_insecure_transport_warning_names_no_password_and_sees_url_credentials() -> (
     None
 ):
-    session = Session(retry=False)
+    session = Session(retry=False, insecure_transport="warn")
     with pytest.warns(exceptions.InsecureTransportWarning) as caught:
         session._warn_if_insecure("http://bob:PWD2@192.0.2.1:9/x", {})
     assert "PWD2" not in str(caught[0].message)
@@ -305,7 +305,7 @@ def test_the_insecure_transport_warning_names_no_password_and_sees_url_credentia
 
 
 def test_a_cookie_header_counts_as_a_credential_for_the_warning() -> None:
-    session = Session(retry=False)
+    session = Session(retry=False, insecure_transport="warn")
     with pytest.warns(exceptions.InsecureTransportWarning):
         session._warn_if_insecure(
             "http://192.0.2.1/x", {"headers": {"Cookie": "sid=1"}}

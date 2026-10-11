@@ -20,9 +20,10 @@ itself still refuses credentials in a URL, see
 [Session: Limits](session.md#limits-on-what-a-server-can-make-the-client-do).
 
 ```{warning}
-A `webdav://` or `http://` URL sends the username and password in clear
-text. Anyone on the network path can read them. Use `webdavs://` or
-`https://`.
+A `webdav://` or `http://` URL would send the username and password in
+clear text, and anyone on the network path could read them. `dav` refuses
+that for every host but loopback, and says so; `--allow-insecure` sends them
+anyway, with a warning. Use `webdavs://` or `https://`.
 
 `--password` is visible to other local users via the process list. A
 password in the URL (`user:pass@host`) is part of the command line as
@@ -85,6 +86,8 @@ $ dav ls --help
 | `--max-response-time` | Seconds for the whole request, or `none`. Default: 300 |
 | `--chunk-size` | Bytes. Default: 4 MiB |
 | `--no-retry` | Do not retry a transient failure automatically |
+| `--allowed-origin` | Repeatable. Talk only to this origin; a request or redirect to another server is refused |
+| `--allow-insecure` | Send credentials over plain `http://` to a host that is not loopback, with a warning |
 | `--no-proxy` | Ignore `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` from the environment |
 
 `none` (or `unlimited`) removes the limit completely. A faulty or hostile

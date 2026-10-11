@@ -631,7 +631,7 @@ def test_ls_entries_have_the_documented_keys(server_url: str) -> None:
 
 
 def test_credentials_over_plain_http_to_a_remote_host_warn_once() -> None:
-    session = Session(auth=("u", "p"), retry=False)
+    session = Session(auth=("u", "p"), retry=False, insecure_transport="warn")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         session._warn_if_insecure("http://dav.example.org/a", {})
