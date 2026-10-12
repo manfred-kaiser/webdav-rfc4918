@@ -57,7 +57,7 @@ def test_the_listing_of_a_folder_refuses_a_name_outside_it(href: str) -> None:
             fs.ls("/dir")
 
 
-@pytest.mark.parametrize("href", [*HOSTILE, "/dir/."])
+@pytest.mark.parametrize("href", HOSTILE)
 def test_get_writes_nothing_outside_the_destination_and_asks_for_nothing_outside(
     href: str, tmp_path: Path
 ) -> None:

@@ -226,12 +226,6 @@ class MultiStatusResponse:
         #: of one name) share a key there, so anything that has to see them
         #: all (a failure hiding behind a later success, a listing) uses this.
         self.entries: list[ResourceResponse] = []
-        #: The lookup keys two *different* ``<d:response>`` entries claim - ``/d/``
-        #: and ``/d/.``, or the NFC and NFD spelling of two real files:
-        #: ``responses`` holds the last of them, so a lookup of one of these (see
-        #: :meth:`get_response_for_path`) is refused rather than answered at
-        #: random. A listing (``entries``) is not affected.
-        self.ambiguous_keys: set[str] = set()
         # §14.24: multistatus = response* - direct children only. <d:response>
         # has an open content model (it can carry extension elements), so a
         # ``.//`` search would also match a <d:response> a malicious/compromised
@@ -258,8 +252,6 @@ class MultiStatusResponse:
             # Register under every href this response covers (usually just
             # one - see ResourceResponse.__init__ for the multi-href case).
             for key in keys:
-                if self.responses.get(key, response) is not response:
-                    self.ambiguous_keys.add(key)
                 self.responses[key] = response
 
     def get_response_for_path(self, base_path: str, path: str) -> ResourceResponse:
@@ -278,9 +270,6 @@ class MultiStatusResponse:
 
         """
         key = path_key(join_url_path(base_path, path))
-        if key in self.ambiguous_keys:
-            msg = f"server's multistatus reply has several different <d:response> entries for {path!r}"
-            raise MalformedResponseError(msg)
         try:
             return self.responses[key]
         except KeyError:

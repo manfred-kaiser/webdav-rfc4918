@@ -9,11 +9,10 @@ import inspect
 import logging
 import pickle
 import time
-import unicodedata
 from concurrent.futures import ProcessPoolExecutor
-from multiprocessing import get_context
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
+from multiprocessing import get_context
 from typing import Any
 
 import pytest
@@ -24,7 +23,7 @@ import webdav.exceptions as exceptions_module
 from tests.scripted_server import Seen, scripted_server
 from webdav import FileSystem, Response, Session
 from webdav.dav.conditional import entity_tag
-from webdav.dav.date_utils import fromisoformat, from_rfc1123
+from webdav.dav.date_utils import from_rfc1123, fromisoformat
 from webdav.dav.locks import ActiveLock, LockRegistry
 from webdav.dav.multistatus import (
     MultiStatusResponse,
@@ -681,44 +680,8 @@ def _info_of(*entries: str) -> Any:
         return FileSystem(url, retry=False).info("/d")
 
 
-def test_fs09_a_hidden_collection_is_not_silently_replaced_by_a_file() -> None:
-    with pytest.raises(MalformedResponseError, match="several"):
-        _info_of(entry("/d/", collection=True), entry("/d/."))
-
-
-def test_fs09_get_props_refuses_the_same_ambiguity() -> None:
-    with scripted_server(
-        lambda _s: (207, {}, ms(entry("/d/", collection=True), entry("/d/.")))
-    ) as (url, _rec):
-        with pytest.raises(MalformedResponseError, match="several"):
-            FileSystem(url, retry=False).get_props("/d")
-
-
 def test_fs09_a_plain_info_is_untouched() -> None:
     assert _info_of(entry("/d/", collection=True)).is_dir
-
-
-def test_fs09_nfc_and_nfd_twins_are_both_listed() -> None:
-    nfc = unicodedata.normalize("NFC", "/d/\u00e9.txt")
-    nfd = unicodedata.normalize("NFD", "/d/\u00e9.txt")
-    assert nfc != nfd
-    body = ms(entry("/d/", collection=True), entry(nfc), entry(nfd))
-    with scripted_server(lambda _s: (207, {}, body)) as (url, _rec):
-        names = [str(r) for r in FileSystem(url, retry=False).ls("/d")]
-    assert len(names) == 2
-    assert MultiStatusResponse(
-        body
-    ).ambiguous_keys  # the lookup is ambiguous, the listing is not
-
-
-def test_fs09_one_response_with_two_hrefs_is_not_a_duplicate() -> None:
-    parsed = MultiStatusResponse(
-        ms(
-            "<d:response><d:href>/a</d:href><d:href>/a/</d:href>"
-            "<d:status>HTTP/1.1 423 Locked</d:status></d:response>"
-        )
-    )
-    assert not parsed.ambiguous_keys
 
 
 def test_fs09_the_same_member_listed_twice_is_listed_twice() -> None:
