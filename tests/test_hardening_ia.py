@@ -20,24 +20,19 @@ import pytest
 import requests
 from requests.structures import CaseInsensitiveDict
 
-import webdav.dav.locks as locks_module
-from webdav.dav import xml_utils
 import webdav.exceptions as exceptions_module
 from tests.scripted_server import Seen, scripted_server
 from webdav import FileSystem, Response, Session
-from webdav.dav import multistatus, properties
 from webdav.dav.conditional import entity_tag
 from webdav.dav.date_utils import fromisoformat, from_rfc1123
-from webdav.dav.locks import ActiveLock, HeldLock, LockRegistry
+from webdav.dav.locks import ActiveLock, LockRegistry
 from webdav.dav.multistatus import (
     MultiStatusResponse,
     multistatus_failure,
     parse_multistatus_response,
 )
-from webdav.dav.properties import build_proppatch_body
-from webdav.dav.xml_utils import parse_xml, to_xml_string
+from webdav.dav.xml_utils import parse_xml
 from webdav.exceptions import (
-    ClientError,
     HTTPStatusError,
     MalformedResponseError,
     MultiStatusError,

@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- A server's XML that declares an entity is refused (`MalformedResponseError`).
+- A redirect chain that returns to the starting origin no longer takes credentials, cookies or lock tokens back with it. `http` -> `https` -> `http` is refused.
+- A redirect to another origin uses the session's TLS policy.
+- Credentials over plain `http://` to a host other than loopback are refused (`insecure_transport`).
+- `verify` accepts only `True`, `False` or a CA bundle path.
+- `auth=False` no longer reads `~/.netrc`.
+- The query of a signed URL is removed from connection errors. Control characters in server text are escaped in messages and logs.
+- `Session.send()` refuses another origin than the `base_url`'s and a URL with credentials in it.
+- Recursive `get`/`put` refuse a symlink that leads out of the tree (`follow_symlinks=True` allows it).
+- fsspec refuses a URL for another server in every method.
+- Downloads are written `0600` until complete.
+- A log warning for an `expat` older than 2.7.2.
+
+### Added
+
+- `insecure_transport="warn"|"error"|"allow"` and `dav --allow-insecure`.
+- `trust_env` and `dav --no-proxy` to ignore `HTTP_PROXY`/`NO_PROXY`.
+- `dav --password-stdin`, `--password-file` and a password prompt.
+- `BasicAuth(user, password, encoding=)`.
+- `FileSystem.walk(onerror=)`, `follow_symlinks` on `upload_file`, `safe_local_name()`, `Resource.basename`, `ActiveLock.timeout_raw`.
+
+### Changed
+
+- Basic authentication sends non-ASCII credentials as UTF-8, not ISO-8859-1.
+- Text mode without a declared charset reads UTF-8, not ISO-8859-1.
+- A `207` whose root is not `DAV:multistatus`, and a `3xx` answering a write, raise instead of counting as success.
+- HTTP dates without a zone are timezone-aware UTC.
+- `fs.transaction` uploads at the commit and discards on error. Pipe uploads are sent chunked.
+- The `dav` URL userinfo is percent-decoded; a password without a user is an error.
+
+### Fixed
+
+- `HTTPDigestAuth` as `auth` is refused with a `ClientError`; an upload with it never worked.
+- A user name with a colon is a `ClientError`.
+- A held `204`/`HEAD`/`304` response no longer breaks the next request on the same connection.
+- With several locks, the `If` header carries all tokens. Lock tokens go only to the server that issued them.
+- `%2F` and invalid UTF-8 in a full URL are sent as written. `ls("/data ")` keeps the space.
+- `mkdir` accepts `202` and `204`. Uploads work from a pipe and from the middle of a file object.
+- Pretty-printed XML hrefs and ETags are read. An unparseable second `<d:href>` no longer hides a `423`.
+- `IterStream.seek(n, 1)` no longer buffers what it skips. A resumed download checks the whole `Content-Range`.
+- Session `params` are not added twice on a redirect.
+- `verify` and `cert` set after construction survive copies and pickles.
+- `copy.copy(session)` and unpickling no longer share `headers`, `cookies` or `params`.
+- Every exception can be pickled and copied. Errors redact the request on a copy.
+- fsspec `get` refuses Windows-invalid names on Windows, two names that are one file, and names with control characters.
+- An error body that was already read is parsed only up to 1 MiB.
+
 ## [1.2.0] - 2026-10-09
 
 ### Added

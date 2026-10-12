@@ -1057,5 +1057,3 @@ def test_FS07_guard_fsspec_front_doors(server_url: str) -> None:
         for x in fsspec.open_files(f"webdavs://{netloc}/d/*.txt", "rb", **options)
     ] == ["/d/a.txt"]
     filesystem.filesystem.close()
-
-

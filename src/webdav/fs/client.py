@@ -586,9 +586,9 @@ class FileSystem:
             )
         except HTTPStatusError as exc:
             # RFC 4918 sec. 9.3.1: 405 is "already mapped". But a server without MKCOL (a
-            # read-only one) answers 405 for everything: "exists" only if it is there.
-            if exc.status_code == HTTPStatus.METHOD_NOT_ALLOWED and (
-                self._remote.exists_quietly(path.rstrip("/"))
+            # read-only one) answers 405 for everything: so not "exists" if it says it is missing.
+            if exc.status_code == HTTPStatus.METHOD_NOT_ALLOWED and not (
+                self._remote.is_missing(path.rstrip("/"))
             ):
                 raise ResourceAlreadyExistsError(exc.response, path) from exc
             # Apache's mod_dav 2.4 answers 400, not 405, when the trailing

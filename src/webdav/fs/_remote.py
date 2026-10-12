@@ -13,7 +13,12 @@ from urllib.parse import urlsplit, urlunsplit
 
 from webdav.dav.multistatus import multistatus_failure
 from webdav.dav.urls import URL, relative_url_to
-from webdav.exceptions import ClientError, WebDAVError, raise_for_status
+from webdav.exceptions import (
+    ClientError,
+    ResourceNotFoundError,
+    WebDAVError,
+    raise_for_status,
+)
 from webdav.methods import Method
 from webdav.url_safety import display_url, is_url
 
@@ -140,6 +145,19 @@ class Remote:
         # custom Response.multistatus_class (see Session's response_class)
         # is honoured here too.
         return response.multistatus
+
+    def is_missing(self, path: str) -> bool:
+        """Whether a ``PROPFIND`` (depth 0) says ``path`` is not there: a ``404``, and nothing less.
+
+        A server that cannot answer (``401``, ``403``, a ``PROPFIND`` it refuses) has not said so.
+        """
+        try:
+            self.propfind(path, headers={"Depth": "0"})
+        except ResourceNotFoundError:
+            return True
+        except WebDAVError:
+            return False
+        return False
 
     def exists_quietly(self, path: str) -> bool:
         """Whether a ``PROPFIND`` (depth 0) finds ``path`` - ``False`` for any failure, not only a 404.

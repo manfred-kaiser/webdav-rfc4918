@@ -9,7 +9,6 @@ import io
 import socket
 import threading
 import tracemalloc
-import types
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -27,7 +26,6 @@ from webdav import FileSystem, RedirectPolicy, Session
 from webdav.exceptions import ClientError
 from webdav.fs.streams import IterStream
 from webdav.fsspec import WebdavFileSystem
-from webdav.transport import retry as retry_module
 from webdav.transport.deadline import DeadlineAdapter
 
 _PROPFIND = (
@@ -488,5 +486,3 @@ def test_a_block_with_the_right_content_range_is_taken() -> None:
             fetch_range(Session(url, retry=False), "/f", 0, 5, total=20).data
             == b"abcde"
         )
-
-

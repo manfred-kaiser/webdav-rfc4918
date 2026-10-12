@@ -16,8 +16,7 @@ Security fixes go into the latest release only, which is also what `main`
 is released from. There are no maintenance branches and no backports: if you
 run an older release, upgrade first. A report against an old release is
 welcome, but please check it against the latest release (or `main`) too, and say
-which you tested. The CHANGELOG's "Security" and "Behavior changes" entries
-tell you what to expect from an upgrade.
+which you tested. The CHANGELOG tells you what to expect from an upgrade.
 
 ## Advisories, CVEs and disclosure
 
@@ -32,10 +31,9 @@ A confirmed vulnerability is handled as a coordinated disclosure:
    workaround where there is one, and credits the reporter unless you prefer
    not to be named. The CHANGELOG entry links to it.
 4. Public details are held back until a fixed release is on PyPI. The target is
-   a fix within 90 days of the report; if it is not ready by then, the
-   advisory is published anyway at that point, so that users can protect
-   themselves, and you are told in advance. If the issue is already being exploited, or
-   you must publish earlier for another reason, say so in your report.
+   a fix within 90 days of the report; if that is not possible, a date is agreed
+   with you. If the issue is already being exploited, or you must publish
+   earlier for another reason, say so in your report.
 
 ## Scope
 
@@ -66,8 +64,9 @@ on the expat your Python links. A multistatus or lock response that does either 
 The parser itself is still expat's: the Python floor is 3.11, and a Python that links an
 old system expat (a distribution's, or a container image's) lacks the fixes of later
 releases. If you parse responses from servers you do not trust, make sure
-`pyexpat.EXPAT_VERSION` is current; the library does not check this at import, and the
-responsibility for it lies with whoever provides the Python.
+`pyexpat.EXPAT_VERSION` is 2.7.2 or newer (the Python documentation's threshold). The
+library logs a warning, once, when it parses a response with an older one; keeping the
+Python current is up to whoever provides it.
 
 The complete list of security defaults is in the
 [README](https://github.com/manfred-kaiser/webdav-rfc4918#security). The redirect, TLS
