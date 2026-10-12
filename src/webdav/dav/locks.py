@@ -536,6 +536,26 @@ class LockRegistry:
             )
         )
 
+    def if_header_for_unlock(self, url: str, token: str) -> str | None:
+        """The ``If`` header an ``UNLOCK`` of ``token`` on ``url`` may need, or ``None``.
+
+        Every *other* lock held that covers ``url`` (a lock on its parent
+        collection above all), tagged with the resource it is on. A server that
+        keeps lock-null resources (RFC 4918 sec. 7.3, appendix D: allowed, though
+        deprecated) removes one from its parent when the lock goes, and sec. 7.4
+        and 7.5 want the lock token of that parent submitted for it. Apache's
+        mod_dav checks this (``dav_method_unlock``, ``DAV_VALIDATE_PARENT``).
+        """
+        others = [held for held in self.covering(url) if held.token != token]
+        if not others:
+            return None
+        return merge_if_headers(
+            *(
+                build_if_header_single([Condition(token=h.token)], resource=h.url)
+                for h in others
+            )
+        )
+
     def headers_for(
         self, method: str, url: str, headers: "Mapping[str, str]"
     ) -> dict[str, str]:

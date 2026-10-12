@@ -111,6 +111,14 @@ hold a lock; Apache enforces those. \
   the dummy `If` header `dav_validate_request` builds from `Lock-Token`).
   The lock stays. \
   *Test: `test_apache_unlock_with_anything_but_the_right_token_is_a_400`.*
+- **`UNLOCK` of a lock-null resource needs the token of a locked parent.**
+  Apache checks the parent for it, because the resource leaves the parent
+  collection (`dav_method_unlock`, `DAV_VALIDATE_PARENT`). Without the parent's
+  token the answer is a `207` naming the member with `424`, with it `204`. The
+  client sends the plain `UNLOCK` first and repeats it with the parent's token
+  in an `If` header when it holds one. RFC 4918 sec. 7.4 and 7.5 ask for that
+  token; appendix D keeps lock-null resources legal. \
+  *Test: `test_apache_unlocking_a_lock_null_resource_needs_the_lock_of_its_locked_parent`.*
 - **Shared locks.** Several coexist, also for one principal, and any *one*
   token is enough to write. Exclusive and shared locks exclude each other.
   A `LOCK` without `Depth` is `infinity`. \

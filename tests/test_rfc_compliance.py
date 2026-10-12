@@ -1177,3 +1177,87 @@ def test_move_onto_an_existing_destination_is_resourcealreadyexists(
     fs.upload_fileobj(io.BytesIO(b"dst"), "owm_dst.txt")
     with pytest.raises(ResourceAlreadyExistsError):
         fs.move("owm_src.txt", "owm_dst.txt", overwrite=False)
+
+
+# ---------------------------------------------------------------------------
+# UNLOCK of a lock-null resource under a locked parent (RFC 4918 sec. 7.3/7.4/7.5, appendix D)
+# ---------------------------------------------------------------------------
+
+
+def _unlock_server(parent_needed: bool, *, repeat_status: int = 204):
+    def respond(seen: Seen) -> Reply:
+        if seen.method != "UNLOCK":
+            return 200, {}, b""
+        if "if" in seen.headers:
+            return repeat_status, {}, b""
+        return (423, {}, b"") if parent_needed else (204, {}, b"")
+
+    return scripted_server(respond)
+
+
+def test_an_unlock_refused_for_want_of_a_parent_lock_is_repeated() -> None:
+    """Appendix D: a lock-null resource goes when its lock does, which removes a member of the locked parent."""
+    server = _unlock_server(parent_needed=True)
+    with server as (url, rec):
+        session = Session()
+        session.locks.add(f"{url}/d/", "urn:parent", "0")
+        session.locks.add(f"{url}/d/child", "urn:child", "0")
+        response = session.unlock(f"{url}/d/child", "urn:child")
+        unlocks = [r for r in rec.requests if r.method == "UNLOCK"]
+    assert response.status_code == 204
+    assert len(unlocks) == 2
+    assert "if" not in unlocks[0].headers
+    assert "urn:parent" in unlocks[1].headers["if"]
+    assert "urn:child" not in unlocks[1].headers["if"]
+    assert unlocks[1].headers["lock-token"] == "<urn:child>"
+    assert [h.token for h in session.locks.held()] == ["urn:parent"]
+
+
+def test_an_unlock_that_needs_no_parent_lock_is_sent_once() -> None:
+    server = _unlock_server(parent_needed=False)
+    with server as (url, rec):
+        session = Session()
+        session.locks.add(f"{url}/d/", "urn:parent", "0")
+        session.locks.add(f"{url}/d/child", "urn:child", "0")
+        assert session.unlock(f"{url}/d/child", "urn:child").status_code == 204
+        assert len([r for r in rec.requests if r.method == "UNLOCK"]) == 1
+
+
+def test_an_unlock_refused_with_no_other_lock_held_is_not_repeated() -> None:
+    server = _unlock_server(parent_needed=True)
+    with server as (url, rec):
+        session = Session()
+        session.locks.add(f"{url}/d/child", "urn:child", "0")
+        response = session.unlock(f"{url}/d/child", "urn:child")
+        assert response.status_code == 423
+        assert len([r for r in rec.requests if r.method == "UNLOCK"]) == 1
+        assert [h.token for h in session.locks.held()] == ["urn:child"]
+
+
+def test_when_the_repeat_fails_too_the_first_answer_is_the_one_returned() -> None:
+    """A parent token the server no longer knows must leave the result as it was."""
+    server = _unlock_server(parent_needed=True, repeat_status=412)
+    with server as (url, rec):
+        session = Session()
+        session.locks.add(f"{url}/d/", "urn:parent", "0")
+        session.locks.add(f"{url}/d/child", "urn:child", "0")
+        response = session.unlock(f"{url}/d/child", "urn:child")
+        assert response.status_code == 423
+        assert len([r for r in rec.requests if r.method == "UNLOCK"]) == 2
+        assert {h.token for h in session.locks.held()} == {"urn:parent", "urn:child"}
+
+
+def test_raise_on_error_is_applied_to_the_answer_after_the_repeat() -> None:
+    server = _unlock_server(parent_needed=True)
+    with server as (url, _rec):
+        session = Session()
+        session.locks.add(f"{url}/d/", "urn:parent", "0")
+        session.locks.add(f"{url}/d/child", "urn:child", "0")
+        assert session.unlock(f"{url}/d/child", "urn:child", raise_on_error=True).ok
+    server = _unlock_server(parent_needed=True, repeat_status=412)
+    with server as (url, _rec):
+        session = Session()
+        session.locks.add(f"{url}/d/", "urn:parent", "0")
+        session.locks.add(f"{url}/d/child", "urn:child", "0")
+        with pytest.raises(HTTPStatusError):
+            session.unlock(f"{url}/d/child", "urn:child", raise_on_error=True)

@@ -2699,3 +2699,29 @@ def test_apache_with_add_encoding_stores_and_serves_a_gz_file_as_it_is(
         fsspec_fs = WebdavFileSystem(url, auth=_Apache.auth)
         assert fsspec_fs.cat_file("/a.txt.gz") == payload
         assert fsspec_fs.cat_file("/a.txt.gz", start=3, end=20) == payload[3:20]
+
+
+# ---------------------------------------------------------------------------
+# UNLOCK of a lock-null resource whose parent is locked as well: mod_dav checks the
+# parent for it (mod_dav.c dav_method_unlock, DAV_VALIDATE_PARENT), RFC 4918 sec. 7.4/7.5
+# ---------------------------------------------------------------------------
+
+
+def test_apache_unlocking_a_lock_null_resource_needs_the_lock_of_its_locked_parent(
+    apache_client: FileSystem, scratch: str
+) -> None:
+    child = f"{scratch}/ln-parent.txt"
+    with apache_client.locked(child) as child_lock:
+        with apache_client.locked(scratch, depth="0") as parent_lock:
+            session = apache_client.session
+            child_url = apache_client._remote.locate(child).url
+            # Without the parent's token the server refuses: that is what makes the repeat necessary.
+            bare = _http(
+                "UNLOCK", child, headers={"Lock-Token": f"<{child_lock.token}>"}
+            )
+            assert bare.status_code != 204
+            response = session.unlock(child_url, child_lock.token)
+            assert response.status_code == 204
+            assert child_lock.token not in {h.token for h in session.locks.held()}
+            assert parent_lock.token in {h.token for h in session.locks.held()}
+        assert not apache_client.exists(child)

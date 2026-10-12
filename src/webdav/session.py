@@ -158,6 +158,12 @@ _LOGGER = logging.getLogger("webdav")
 #: responses that send a (truthful) Content-Length.
 DEFAULT_MAX_RESPONSE_SIZE = 64 * 1024 * 1024  # 64 MiB
 
+#: The answers to an ``UNLOCK`` that a missing parent lock token can cause: 423
+#: Locked, 207 Multi-Status naming the locked parent, and 424 Failed Dependency.
+_UNLOCK_NEEDS_PARENT_LOCK = frozenset(
+    {HTTPStatus.LOCKED, HTTPStatus.MULTI_STATUS, HTTPStatus.FAILED_DEPENDENCY}
+)
+
 #: Default deadline for the whole body of a non-streamed response, in
 #: seconds. Generous for a big PROPFIND on a slow line; finite, because
 #: ``timeout`` alone lets a server that drips bytes hold a request forever.
@@ -1935,8 +1941,18 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
 
         """
         token = validate_token(token.strip("<>"))
+        # The answer is judged here, so the first request must not raise on a
+        # failure a second one can put right.
+        raise_flag = kwargs.pop("raise_on_error", None)
+        if raise_flag is not None:
+            check_flag("raise_on_error", raise_flag)
+        lock_token = {"Lock-Token": f"<{token}>"}
+        caller_headers = dict(kwargs.get("headers") or {})
         response = self._with_headers(
-            Method.UNLOCK, url, kwargs, {"Lock-Token": f"<{token}>"}
+            Method.UNLOCK, url, dict(kwargs), lock_token, raise_on_error=False
+        )
+        response = self._unlock_with_parent_locks(
+            response, url, token, kwargs, caller_headers, lock_token
         )
         status = response.status_code
         if HTTPStatus.OK <= status < HTTPStatus.MULTIPLE_CHOICES:
@@ -1944,6 +1960,49 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
         elif status in (HTTPStatus.NOT_FOUND, HTTPStatus.CONFLICT):
             with suppress(ClientError):
                 self.locks.discard_token(token, url=self.resolve_url(url))
+        if self.raise_on_error if raise_flag is None else raise_flag:
+            response.raise_for_status()
+        return response
+
+    def _unlock_with_parent_locks(
+        self,
+        response: Response,
+        url: str,
+        token: str,
+        kwargs: dict[str, Any],
+        caller_headers: dict[str, str],
+        lock_token: dict[str, str],
+    ) -> Response:
+        """``response`` to an ``UNLOCK`` - or, if only a parent's lock token was missing, the answer to a repeat with it.
+
+        One repeat, and only when this session holds another lock covering ``url``
+        (see :meth:`LockRegistry.if_header_for_unlock`) and the caller sent no ``If``
+        header of their own. The repeat is not sent up front: a parent token
+        the server has already dropped would make an UNLOCK fail that works
+        without it. If the repeat does not succeed either, the first answer is
+        the one returned.
+        """
+        if response.status_code not in _UNLOCK_NEEDS_PARENT_LOCK or any(
+            name.lower() == "if" for name in caller_headers
+        ):
+            return response
+        try:
+            header = self.locks.if_header_for_unlock(self.resolve_url(url), token)
+        except ClientError:
+            return response
+        if header is None:
+            return response
+        again = self._with_headers(
+            Method.UNLOCK,
+            url,
+            {**kwargs, "headers": caller_headers},
+            {**lock_token, "If": header},
+            raise_on_error=False,
+        )
+        if HTTPStatus.OK <= again.status_code < HTTPStatus.MULTIPLE_CHOICES:
+            response.close()
+            return again
+        again.close()
         return response
 
     def features_for(self, path: str = "") -> FeatureDetection:
