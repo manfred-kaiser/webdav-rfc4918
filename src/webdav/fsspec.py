@@ -218,7 +218,7 @@ class WebdavFileSystem(GuardedFileSystem):
         )
 
     @server_aware
-    def _strip_protocol(  # pylint: disable=no-self-argument
+    def _strip_protocol(  # pylint: disable=no-self-argument,arguments-differ
         cls,  # noqa: N805 - a class method, see server_aware
         path: "str | list[str]",
     ) -> "str | list[str]":
