@@ -70,6 +70,35 @@ returns {class}`~webdav.resource.Resource` objects: each one is a string
 with the resource's name, so you can pass it straight to `download_file`
 or `remove`. See [FileSystem](reference/filesystem.md).
 
+## A server without TLS (`http://`)
+
+An `http://` server works. What the library will not do by default is send a
+password to one: RFC 4918 section 20.1 forbids Basic authentication over a
+connection that is not secure, and anyone on the network path can read the
+password. Without credentials (an open server, or one that checks the client
+certificate), nothing changes. With credentials and a host other than
+loopback, the first request raises a `ClientError` that names the way out:
+
+```python
+import webdav
+
+# Python: one keyword, on every entry point
+fs = webdav.FileSystem("http://nas.local", auth=("user", "password"), insecure_transport="warn")
+webdav.ls("http://nas.local/", auth=("user", "password"), insecure_transport="warn")
+
+# fsspec and pandas
+pd.read_csv("webdav://nas.local/data.csv", storage_options={"auth": ("user", "password"), "insecure_transport": "warn"})
+```
+
+```console
+$ dav ls --allow-insecure webdav://user:password@nas.local/
+```
+
+`"warn"` sends the password and warns once per host (`InsecureTransportWarning`,
+also logged); `"allow"` sends it without a word. A server on `https://` with
+its own certificate is the better fix: see
+[TLS and mTLS](reference/tls.md#an-intranet-server-with-its-own-certificate).
+
 ## Handling errors
 
 ```python
@@ -137,7 +166,8 @@ Give the password through `$WEBDAV_PASSWORD`, `--password-stdin` or
 |---|---|
 | `HTTPStatusError` with `status_code` 401 | Wrong username or password. See [Exceptions](reference/exceptions.md). |
 | `requests.exceptions.SSLError` on a server with a self-signed certificate | Pass the CA: `verify="ca.pem"`. See [TLS and mTLS](reference/tls.md). |
-| `InsecureTransportWarning` | The URL is `http://`/`webdav://`, so the password goes out in clear text. See [Session](reference/session.md#limits-on-what-a-server-can-make-the-client-do). |
+| `ClientError`: "refusing to send credentials ... over plain http" | The URL is `http://`/`webdav://` and has credentials. Pass `insecure_transport="warn"` (`dav --allow-insecure`), or use `https://`. See [A server without TLS](#a-server-without-tls-http). |
+| `InsecureTransportWarning` | You allowed it: the password goes out in clear text. See [Session](reference/session.md#credentials-over-plain-http). |
 | Which URL for Nextcloud? | The WebDAV URL is `https://<host>/remote.php/dav/files/<user>`. See [Nextcloud](nextcloud-compliance-check.md). |
 | `ResourceConflictError` (409) on upload or `mkdir` | The parent folder does not exist. Create it with `mkdir` first. |
 | `ResourceAlreadyExistsError` on upload | The file exists. Pass `overwrite=True` to replace it. |

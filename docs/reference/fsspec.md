@@ -72,6 +72,12 @@ are not its own (`mode`, `encoding`, ...), go to the filesystem
 constructor - `timeout`, `verify`, `retry` and the rest are in the [API
 reference](api.md#fsspec).
 
+A `webdav://` server with credentials needs the same opt-in as everywhere
+(RFC 4918 section 20.1, see [Credentials over plain `http://`](session.md#credentials-over-plain-http)):
+`fsspec.open("webdav://nas.local/f", auth=auth, insecure_transport="warn")`, or
+`"insecure_transport": "warn"` in the `storage_options` of pandas and Dask. Without it
+the first request raises a `ClientError` that says so.
+
 ## pandas and Dask
 
 pandas and Dask take the same `storage_options` as above:
