@@ -21,6 +21,7 @@ _PACKAGE_ALL = [
     "FileSystem",
     "ForbiddenError",
     "HTTPStatusError",
+    "InsecureTransport",
     "InsecureTransportWarning",
     "InsufficientStorageError",
     "IsACollectionError",

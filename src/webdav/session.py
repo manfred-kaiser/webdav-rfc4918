@@ -77,12 +77,13 @@ from webdav.exceptions import (
 )
 from webdav.methods import RETRYABLE_METHODS, Method
 from webdav.response import Response
-from webdav.transport.basic_auth import as_basic
+from webdav.transport.basic_auth import BasicAuth, as_basic
 from webdav.transport.body import read_bounded, read_response
 from webdav.transport.deadline import DeadlineAdapter, enforce
 from webdav.transport.guards import (
     NO_AUTH,
     CleartextWarner,
+    InsecureTransport,
     check_auth,
     check_base_url,
     check_insecure_transport,
@@ -226,8 +227,18 @@ _TRANSPORT_PICKLED = (
 #: What an older pickle of a session does not have (and ``__init__`` is not run
 #: to give it): the default each option has in the constructor.
 _STATE_DEFAULTS: "dict[str, Any]" = {
-    "insecure_transport": "error",
+    "insecure_transport": InsecureTransport.ERROR,
 }
+
+
+def _is_basic(auth: object, headers: "Mapping[str, str] | None") -> bool:
+    """Whether ``auth``, or an ``Authorization`` header in ``headers``, is HTTP Basic."""
+    if isinstance(as_basic(auth), BasicAuth):
+        return True
+    value = next(
+        (v for k, v in (headers or {}).items() if k.lower() == "authorization"), ""
+    )
+    return value.lower().startswith("basic ")
 
 
 def _merge_arguments(args: "tuple[Any, ...]", kwargs: "dict[str, Any]") -> None:
@@ -281,7 +292,7 @@ class ConnectionOptions(TypedDict, total=False):
     timeout: "float | tuple[float | None, float | None] | None"
     redirect_policy: RedirectPolicy
     trusted_redirect_origins: "Iterable[str] | Callable[[str], bool] | None"
-    insecure_transport: str
+    insecure_transport: "InsecureTransport | str"
     trust_env: bool
     max_response_size: "int | None"
     max_response_time: "float | None"
@@ -330,7 +341,7 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
         timeout: "float | tuple[float | None, float | None] | None" = DEFAULT_TIMEOUT,
         redirect_policy: RedirectPolicy = RedirectPolicy.SAME_ORIGIN,
         trusted_redirect_origins: "Iterable[str] | Callable[[str], bool] | None" = None,
-        insecure_transport: str = "error",
+        insecure_transport: "InsecureTransport | str" = InsecureTransport.ERROR,
         trust_env: bool = True,
         max_response_size: "int | None" = DEFAULT_MAX_RESPONSE_SIZE,
         max_response_time: "float | None" = DEFAULT_MAX_RESPONSE_TIME,
@@ -402,12 +413,15 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
                 (``"https://host"``) or a ``Callable[[str], bool]`` given
                 the full target URL. Required with ``WHITELIST`` and
                 rejected with any other policy.
-            insecure_transport: What to do when credentials (``auth``, an
+            insecure_transport: An :class:`~webdav.transport.guards.InsecureTransport`
+                (or its string): what to do when credentials (``auth``, an
                 ``Authorization``/``Cookie`` header, ``cookies=``) would go over
-                plain ``http`` to a host that is not loopback: ``"error"`` (the
-                default) refuses the request, ``"warn"`` sends it with an
+                plain ``http`` to a host that is not loopback. ``ERROR`` (the
+                default) refuses the request: RFC 4918 section 20.1 says Basic
+                authentication MUST NOT be used unless the connection is secure.
+                ``WARN`` sends it with an
                 :class:`~webdav.exceptions.InsecureTransportWarning` (once per
-                host), ``"allow"`` sends it without. Loopback counts as such only
+                host), ``ALLOW`` sends it without. Loopback counts as such only
                 when no proxy is in use for it.
             trust_env: ``False`` ignores ``HTTP_PROXY``/``HTTPS_PROXY``/
                 ``NO_PROXY`` from the environment (and ``~/.netrc``, which is
@@ -913,17 +927,17 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
         self._redirect_forward_headers = frozenset(n.strip().lower() for n in names)
 
     @property
-    def insecure_transport(self) -> str:
-        """``"error"``, ``"warn"`` or ``"allow"``: what happens to credentials about to go over plain ``http`` to a host that is not loopback.
+    def insecure_transport(self) -> InsecureTransport:
+        """What happens to credentials about to go over plain ``http`` to a host that is not loopback (see :class:`~webdav.transport.guards.InsecureTransport`).
 
         Raises:
-            ValueError: When set to anything else.
+            ValueError: When set to anything but an ``InsecureTransport`` or its string.
 
         """
         return self._insecure_transport
 
     @insecure_transport.setter
-    def insecure_transport(self, value: str) -> None:
+    def insecure_transport(self, value: "InsecureTransport | str") -> None:
         self._insecure_transport = check_insecure_transport(value)
 
     def __enter__(self) -> "Self":
@@ -1345,6 +1359,8 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
             session_headers=self.headers,
             has_auth=(bool(per_call_auth) and per_call_auth is not NO_AUTH)
             or bool(self.auth),
+            basic=_is_basic(per_call_auth, kwargs.get("headers"))
+            or _is_basic(self.auth, self.headers),
             has_cookies=lambda: bool(kwargs.get("cookies")),
             proxied=proxied,
         )

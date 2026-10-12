@@ -124,8 +124,9 @@ list of defaults:
   `auth=` instead. [Why](https://webdav.readthedocs.io/en/latest/reference/url-credentials.html).
 - Credentials (`auth=`, an `Authorization` or `Cookie` header, `cookies=`) over
   plain `http` to a host other than localhost are refused
-  (`insecure_transport="error"`, RFC 4918 section 20.1); `"warn"` sends them with
-  an `InsecureTransportWarning`, `"allow"` silently.
+  (`InsecureTransport.ERROR`; RFC 4918 section 20.1: Basic authentication MUST NOT
+  be used unless the connection is secure); `InsecureTransport.WARN` sends them
+  with an `InsecureTransportWarning`, `ALLOW` silently.
 - Only same-origin redirects are followed (`RedirectPolicy.SAME_ORIGIN`).
   Credentials and cookies are never sent to another origin, even a trusted one,
   and not on the way back to the origin the request started at either.

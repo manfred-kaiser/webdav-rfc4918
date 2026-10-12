@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `insecure_transport="warn"|"error"|"allow"` and `dav --allow-insecure`.
+- `insecure_transport=InsecureTransport.WARN` (also `"warn"`, `ERROR`, `ALLOW`) and `dav --allow-insecure`. The refusal quotes RFC 4918 section 20.1.
 - `trust_env` and `dav --no-proxy` to ignore `HTTP_PROXY`/`NO_PROXY`.
 - `dav --password-stdin`, `--password-file` and a password prompt.
 - `BasicAuth(user, password, encoding=)`.

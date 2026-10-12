@@ -61,6 +61,7 @@ from webdav.resource import Resource
 from webdav.response import Response
 from webdav.session import Session
 from webdav.transport.basic_auth import BasicAuth
+from webdav.transport.guards import InsecureTransport
 from webdav.transport.redirects import RedirectPolicy
 from webdav.transport.tls import TLSOptions
 
@@ -75,6 +76,7 @@ __all__ = [
     "FileSystem",
     "ForbiddenError",
     "HTTPStatusError",
+    "InsecureTransport",
     "InsecureTransportWarning",
     "InsufficientStorageError",
     "IsACollectionError",

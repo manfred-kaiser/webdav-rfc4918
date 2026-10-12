@@ -13,10 +13,12 @@ Each one either refuses the request (with the library's own
 - :func:`scrub_exception` - the query of a signed URL taken out of a transport error.
 """
 
+import contextlib
 import ipaddress
 import logging
 import pathlib
 import threading
+from enum import StrEnum
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -37,8 +39,30 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger("webdav")
 
-#: What ``insecure_transport=`` takes.
-INSECURE_TRANSPORT_MODES = ("warn", "error", "allow")
+
+class InsecureTransport(StrEnum):
+    """What a session does with credentials that would go over plain ``http://``.
+
+    RFC 4918 section 20.1: "Basic authentication MUST NOT be used to authenticate a
+    WebDAV client to a server unless the connection is secure" (TLS is its example of a
+    secure connection). So the default is :data:`ERROR`; a trusted network that has no TLS
+    is a decision to make on purpose, with :data:`WARN` or :data:`ALLOW`. Members are
+    strings: ``"warn"`` works wherever ``InsecureTransport.WARN`` does.
+
+    - :data:`ERROR` (the default): refuse the request with a
+      :class:`~webdav.exceptions.ClientError`.
+    - :data:`WARN`: send it, with an :class:`~webdav.exceptions.InsecureTransportWarning`
+      (once per host, also logged). ``dav --allow-insecure``.
+    - :data:`ALLOW`: send it without a word.
+
+    Loopback (``127.0.0.1``, ``::1``, ``localhost``) is not affected, unless a proxy would
+    carry the request. A request without credentials is not either.
+    """
+
+    ERROR = "error"
+    WARN = "warn"
+    ALLOW = "allow"
+
 
 _CREDENTIAL_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie"})
 
@@ -184,17 +208,21 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
-def check_insecure_transport(value: object) -> str:
-    """``value`` if it is one of ``"warn"``, ``"error"`` and ``"allow"``.
+def check_insecure_transport(value: object) -> InsecureTransport:
+    """``value`` as an :class:`InsecureTransport` - a member, or one of ``"warn"``, ``"error"``, ``"allow"``.
 
     Raises:
         ValueError: It is anything else - a typo here would silently pick the wrong one.
 
     """
-    if value not in INSECURE_TRANSPORT_MODES:
-        msg = f"insecure_transport must be one of {INSECURE_TRANSPORT_MODES}, got {value!r}"
-        raise ValueError(msg)
-    return str(value)
+    if isinstance(value, str):
+        with contextlib.suppress(ValueError):
+            return InsecureTransport(value)
+    msg = (
+        "insecure_transport must be an InsecureTransport or one of "
+        f"{[mode.value for mode in InsecureTransport]}, got {value!r}"
+    )
+    raise ValueError(msg)
 
 
 class CleartextWarner:
@@ -213,10 +241,11 @@ class CleartextWarner:
         self,
         url: str,
         *,
-        mode: str = "warn",
+        mode: "InsecureTransport | str" = InsecureTransport.WARN,
         call_headers: "Mapping[str, str] | None",
         session_headers: "Mapping[str, str]",
         has_auth: bool,
+        basic: bool = False,
         has_cookies: "Callable[[], bool]" = lambda: False,
         proxied: "Callable[[], bool]" = lambda: False,
     ) -> None:
@@ -224,12 +253,13 @@ class CleartextWarner:
 
         Args:
             url: Where the request goes.
-            mode: ``"error"`` refuses the request, ``"warn"`` warns (once per
-                host) and sends it, ``"allow"`` does neither.
+            mode: What to do (see :class:`InsecureTransport`).
             call_headers: The headers this request carries on top of the
                 session's own.
             session_headers: The session's default headers.
             has_auth: The request or the session has ``auth`` set.
+            basic: The credentials are HTTP Basic (an ``auth`` pair, a ``BasicAuth``, an
+                ``Authorization: Basic`` header): what RFC 4918 section 20.1 forbids.
             has_cookies: Whether a cookie the caller set goes along (asked
                 only when nothing else already said so).
             proxied: Whether the request goes through a proxy (asked only for
@@ -241,7 +271,8 @@ class CleartextWarner:
                 and credentials would be sent in clear text.
 
         """
-        if mode == "allow":
+        mode = InsecureTransport(mode)
+        if mode is InsecureTransport.ALLOW:
             return
         parts = split_url(url)
         if parts.scheme.lower() != "http" or not parts.hostname:
@@ -264,12 +295,21 @@ class CleartextWarner:
             if parts.port
             else parts.hostname.lower()
         )
-        if mode == "error":
+        rfc = (
+            "RFC 4918 section 20.1: Basic authentication MUST NOT be used unless the "
+            "connection is secure"
+        )
+        if mode is InsecureTransport.ERROR:
+            why = (
+                f"{rfc}, and anyone on the network path can read it"
+                if basic
+                else ("anyone on the network path can read them")
+            )
             msg = (
-                f"refusing to send credentials to {host} over plain http - anyone on the "
-                "network path can read them. Use an https URL; or, for a network you "
-                'trust, pass insecure_transport="warn" (send, with a warning; dav: '
-                '--allow-insecure) or insecure_transport="allow" (send, silently)'
+                f"refusing to send credentials to {host} over plain http ({why}). Use an "
+                "https URL; or, for a network you trust, pass "
+                'insecure_transport=InsecureTransport.WARN ("warn": send, with a warning; '
+                'dav: --allow-insecure) or InsecureTransport.ALLOW ("allow": send, silently)'
             )
             raise ClientError(msg)
         with self._lock:
@@ -278,7 +318,7 @@ class CleartextWarner:
             self._warned.add(host)
         message = (
             f"sending credentials to {host} over plain http - anyone on the network "
-            "path can read them; use an https URL"
+            "path can read them; use an https URL" + (f" ({rfc})" if basic else "")
         )
         _LOGGER.warning(message)
         warn_at_caller(message, InsecureTransportWarning)
@@ -329,6 +369,7 @@ def scrub_exception(exc: BaseException, url: str) -> None:
 __all__ = [
     "NO_AUTH",
     "CleartextWarner",
+    "InsecureTransport",
     "check_auth",
     "check_base_url",
     "check_insecure_transport",

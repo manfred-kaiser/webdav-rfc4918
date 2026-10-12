@@ -319,23 +319,38 @@ attributes, e.g. `session.max_response_time = 60`.
 `auth=` is only encrypted on the wire if `base_url` (or the URL you call) is
 `https://`. Over plain `http://` the username and password go out in clear
 text with the very first request, and anyone on the network path can read
-them. So the session **refuses** such a request by default (a `ClientError`
-that names the option), unless the host is loopback (`127.0.0.1`, `::1`,
-`localhost`) and no proxy would carry the request.
-`insecure_transport` says what to do instead:
+them. RFC 4918 section 20.1 says it for Basic authentication: "Basic
+authentication MUST NOT be used to authenticate a WebDAV client to a server
+unless the connection is secure" (a TLS connection is its example). So the
+session **refuses** such a request by default (a `ClientError` that quotes the
+RFC and names the option), unless the host is loopback (`127.0.0.1`, `::1`,
+`localhost`) and no proxy would carry the request. A request without
+credentials is not affected.
+
+`insecure_transport` takes an `InsecureTransport` (or its string) and says what
+to do instead:
 
 | Value | Effect |
 |---|---|
-| `"error"` (default) | Refuse the request |
-| `"warn"` | Send it, with an `InsecureTransportWarning` (once per host, also logged); `dav --allow-insecure` |
-| `"allow"` | Send it silently |
+| `InsecureTransport.ERROR` (`"error"`, default) | Refuse the request |
+| `InsecureTransport.WARN` (`"warn"`) | Send it, with an `InsecureTransportWarning` (once per host, also logged); `dav --allow-insecure` |
+| `InsecureTransport.ALLOW` (`"allow"`) | Send it silently |
+
+```python
+from webdav import InsecureTransport, Session
+
+session = Session("http://nas.local", auth=("user", "password"), insecure_transport=InsecureTransport.WARN)
+```
 
 What counts as a credential: `auth=`, an `Authorization`, `Proxy-Authorization`
-or `Cookie` header, and a cookie passed as `cookies=`. Loopback counts as
+or `Cookie` header, and a cookie passed as `cookies=`. The RFC sentence is quoted
+in the message when the credentials are Basic (an `auth` pair, a `BasicAuth`, an
+`Authorization: Basic` header); a token or a cookie is refused for the same
+reason, without the quote. Loopback counts as
 loopback only without a proxy: with `HTTP_PROXY` set, a request to
 `localhost` goes to the proxy, in clear text. Credentials in a URL are refused
-anyway. A trusted `http://` intranet or NAS needs `insecure_transport="warn"`
-or `"allow"`; the better fix is `https://`.
+anyway. A trusted `http://` intranet or NAS needs `WARN` or `ALLOW`; the better
+fix is `https://`.
 
 ### Proxies
 

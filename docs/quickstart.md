@@ -73,8 +73,8 @@ or `remove`. See [FileSystem](reference/filesystem.md).
 ## A server without TLS (`http://`)
 
 An `http://` server works. What the library will not do by default is send a
-password to one: RFC 4918 section 20.1 forbids Basic authentication over a
-connection that is not secure, and anyone on the network path can read the
+password to one: RFC 4918 section 20.1 says Basic authentication MUST NOT be
+used unless the connection is secure, and anyone on the network path can read the
 password. Without credentials (an open server, or one that checks the client
 certificate), nothing changes. With credentials and a host other than
 loopback, the first request raises a `ClientError` that names the way out:
@@ -94,9 +94,10 @@ pd.read_csv("webdav://nas.local/data.csv", storage_options={"auth": ("user", "pa
 $ dav ls --allow-insecure webdav://user:password@nas.local/
 ```
 
-`"warn"` sends the password and warns once per host (`InsecureTransportWarning`,
-also logged); `"allow"` sends it without a word. A server on `https://` with
-its own certificate is the better fix: see
+`InsecureTransport.WARN` (or the string `"warn"`, which `storage_options` and JSON can
+carry) sends the password and warns once per host (`InsecureTransportWarning`,
+also logged); `InsecureTransport.ALLOW` (`"allow"`) sends it without a word.
+A server on `https://` with its own certificate is the better fix: see
 [TLS and mTLS](reference/tls.md#an-intranet-server-with-its-own-certificate).
 
 ## Handling errors

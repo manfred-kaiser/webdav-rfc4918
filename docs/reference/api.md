@@ -165,6 +165,10 @@ module. It can also be used directly for a custom conditional request.
 ```{eval-rst}
 .. autoclass:: webdav.BasicAuth
 
+.. autoclass:: webdav.InsecureTransport
+   :members:
+   :undoc-members:
+
 .. autoclass:: webdav.transport.tls.TLSOptions
    :members:
 
