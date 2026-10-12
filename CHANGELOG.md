@@ -57,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - fsspec `get` refuses Windows-invalid names on Windows, two names that are one file, and names with control characters.
 - An error body that was already read is parsed only up to 1 MiB.
 - `UNLOCK` of a lock-null resource under a locked parent is repeated with the parent's lock token.
+- `Second-`, `Infinite` and `infinity` are read in any letter case in lock timeouts and depths.
 
 ## [1.2.0] - 2026-10-09
 

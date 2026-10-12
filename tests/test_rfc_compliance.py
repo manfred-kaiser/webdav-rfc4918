@@ -578,6 +578,39 @@ def test_parse_timeout_takes_the_first_of_a_preference_list() -> None:
     assert parse_timeout("Second-3600, Infinite") == 3600
 
 
+@pytest.mark.parametrize(
+    ("text", "seconds"),
+    [
+        ("second-300", 300),
+        ("SECOND-300", 300),
+        ("Second-300", 300),
+        ("infinite", None),
+        ("INFINITE", None),
+        ("sEcOnD-1, infinite", 1),
+    ],
+)
+def test_the_timeout_literals_are_case_insensitive(
+    text: str, seconds: "int | None"
+) -> None:
+    """§10.7 spells "Second-" and "Infinite" as ABNF strings, which RFC 5234 §2.3 makes case-insensitive."""
+    assert parse_timeout(text) == seconds
+
+
+def test_a_lowercase_infinite_timeout_is_not_reported_as_unreadable() -> None:
+    body = """<d:activelock xmlns:d="DAV:"><d:locktoken><d:href>urn:a</d:href></d:locktoken>
+    <d:timeout>infinite</d:timeout></d:activelock>"""
+    lock = ActiveLock.from_element(parse_xml(body))
+    assert lock.timeout is None
+    assert lock.timeout_raw is None
+
+
+def test_the_depth_of_an_active_lock_is_read_case_insensitively() -> None:
+    """§14.4 names the value "infinity" as an ABNF string: "Infinity" is the same value."""
+    body = """<d:activelock xmlns:d="DAV:"><d:locktoken><d:href>urn:a</d:href></d:locktoken>
+    <d:depth> Infinity </d:depth></d:activelock>"""
+    assert ActiveLock.from_element(parse_xml(body)).depth == "infinity"
+
+
 # ---------------------------------------------------------------------------
 # RFC 9110 §5.6.7 - HTTP-date, the rfc850-date two-digit year in particular
 # ---------------------------------------------------------------------------

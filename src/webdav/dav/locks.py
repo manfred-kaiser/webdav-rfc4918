@@ -157,7 +157,9 @@ def parse_timeout(value: str | None) -> "int | None":
     if not value:
         return None
     first = value.split(",")[0].strip()
-    if first.startswith("Second-"):
+    # RFC 4918 sec. 10.7 writes "Second-" and "Infinite" as ABNF strings, which
+    # RFC 5234 sec. 2.3 makes case-insensitive.
+    if first[: len("Second-")].casefold() == "second-":
         return parse_uint(first[len("Second-") :])
     return None
 
@@ -229,7 +231,8 @@ class ActiveLock:
             if element.find(f"{dav('lockscope')}/{dav('shared')}") is not None
             else EXCLUSIVE
         )
-        depth = element.findtext(dav("depth")) or "0"
+        # RFC 4918 sec. 14.4: "0", "1" or "infinity" - an ABNF string, so any casing.
+        depth = (element.findtext(dav("depth")) or "0").strip().lower()
         # ``owner`` may hold anything (sec. 14.17; the RFC's own example is an
         # ``<href>``): its text, including that of its children.
         owner_el = element.find(dav("owner"))
@@ -246,7 +249,7 @@ class ActiveLock:
         if (
             timeout is None
             and timeout_text
-            and timeout_text.split(",")[0].strip() != "Infinite"
+            and timeout_text.split(",")[0].strip().casefold() != "infinite"
         ):
             timeout_raw = timeout_text.strip()[:64]
 
