@@ -70,7 +70,7 @@ from fsspec import Callback
 from fsspec.spec import AbstractBufferedFile
 from fsspec.utils import stringify_path
 
-from webdav._fsspec_guards import GET_TREE, PUT_ROOT, GuardedFileSystem
+from webdav._fsspec_guards import GET_TREE, PUT_ROOT, GuardedFileSystem, server_aware
 from webdav._fsspec_ranges import UNKNOWN, fetch_range
 from webdav._fsspec_support import absolute, info_of, is_root, translate_exceptions
 from webdav._webdavs_url import (
@@ -217,8 +217,11 @@ class WebdavFileSystem(GuardedFileSystem):
             else FileSystem(base_url, auth=credentials, **session_opts)
         )
 
-    @classmethod
-    def _strip_protocol(cls, path: "str | list[str]") -> "str | list[str]":
+    @server_aware
+    def _strip_protocol(  # pylint: disable=no-self-argument
+        cls,  # noqa: N805 - a class method, see server_aware
+        path: "str | list[str]",
+    ) -> "str | list[str]":
         """Strip the ``webdav://``/``webdavs://`` protocol prefix, and make the path absolute.
 
         Every path has its leading ``/`` (``root_marker``): ``/d`` and ``d`` are
@@ -282,9 +285,8 @@ class WebdavFileSystem(GuardedFileSystem):
     def _strip(self, path: str) -> str:
         """``_strip_protocol`` for the common single-path case - everywhere but ``rm``.
 
-        A URL that names another server than this filesystem's is refused (:meth:`_own_server`).
+        A URL that names another server than this filesystem's is refused (:class:`server_aware`).
         """
-        self._own_server(path)
         return cast("str", self._strip_protocol(path))
 
     # pylint's signature-differs check is confused by these @overload stubs

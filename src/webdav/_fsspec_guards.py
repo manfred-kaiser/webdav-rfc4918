@@ -9,6 +9,7 @@ filesystem itself, which is long enough.
 import contextvars
 import errno
 import os
+import types
 from pathlib import Path, PurePath
 from typing import Any, cast
 
@@ -143,6 +144,37 @@ PUT_ROOT: "contextvars.ContextVar[str | None]" = contextvars.ContextVar(
 )
 
 
+class server_aware:  # noqa: N801  # pylint: disable=invalid-name  # used like ``classmethod``
+    """A class method that, called on an instance, first checks the path names that instance's server.
+
+    ``_strip_protocol`` is a class method in fsspec, and fsspec calls it as
+    ``self._strip_protocol(path)`` in every method that takes a path (``open``, ``cat``,
+    ``find``, ``glob``, ``expand_path``, ``pipe``, ``get_mapper``, ...) and as
+    ``cls._strip_protocol(path)`` where there is no instance. Used on ``_strip_protocol``,
+    this keeps both: the class-level call is a plain class method call, the instance-level
+    one refuses a URL for another server (see :meth:`GuardedFileSystem._own_server`) before
+    stripping it. One place, so a method fsspec adds later is covered without being listed.
+    """
+
+    def __init__(self, function: Any) -> None:
+        """Remember the function (it takes the class first, like a class method's)."""
+        self._function = function
+
+    def __get__(self, instance: Any, owner: Any = None) -> Any:
+        """A class method on the class; a checked one on an instance."""
+        function = self._function
+        if instance is None:
+            return types.MethodType(function, owner)
+        cls = type(instance)
+        check = instance._own_server  # noqa: SLF001  # pylint: disable=protected-access
+
+        def strip(path: Any) -> Any:
+            check(path)
+            return function(cls, path)
+
+        return strip
+
+
 # The rest of the abstract methods is the subclass's.
 # pylint: disable-next=abstract-method
 class GuardedFileSystem(AbstractFileSystem):
@@ -154,10 +186,9 @@ class GuardedFileSystem(AbstractFileSystem):
         """Refuse a ``webdav(s)://host[:port]/...`` URL (in ``path``, or a list) for another server.
 
         ``_strip_protocol`` is a class method - it cannot know which server it is asked
-        about, and drops the host. So this is called where a path *enters* an instance:
-        by ``_strip``, and by the methods of fsspec's base class that strip a path
-        themselves (``open``, ``cat``, ``find``, ``glob``, ``expand_path``, ``walk``, ``get``,
-        ``put``, ``pipe``, ``rm``, ``copy``, ``mv``, ``get_mapper``, ...), overridden below.
+        about, and drops the host. Every method of fsspec that takes a path calls it on the
+        instance, so :class:`server_aware` makes that call come here first; ``walk``, ``get``
+        and ``put`` also check at their start, before they do anything else.
 
         Raises:
             ValueError: The URL names another server - a filesystem is bound to one.
@@ -174,19 +205,9 @@ class GuardedFileSystem(AbstractFileSystem):
                         cast("str", self.filesystem.session.base_url), host, port
                     )
 
-    # fsspec's methods that take a path and strip it themselves, not through ``_strip``:
-    # each passes it through ``_own_server`` first, and does nothing else.
+    # fsspec's ``exists`` and ``isfile`` swallow every exception from ``info`` and answer
+    # "no": for another server that is wrong, so they check first.
     # pylint: disable=signature-differs
-    def open(self, path: Any, *args: Any, **kwargs: Any) -> Any:
-        """``fsspec``'s ``open`` - for the URL of this server only."""
-        self._own_server(path)
-        return super().open(path, *args, **kwargs)
-
-    def cat(self, path: Any, *args: Any, **kwargs: Any) -> Any:
-        """``fsspec``'s ``cat`` - for URLs of this server only."""
-        self._own_server(path)
-        return super().cat(path, *args, **kwargs)
-
     def exists(self, path: Any, **kwargs: Any) -> bool:
         """``fsspec``'s ``exists`` - for the URL of this server only (not "no" for another)."""
         self._own_server(path)
@@ -196,37 +217,6 @@ class GuardedFileSystem(AbstractFileSystem):
         """``fsspec``'s ``isfile`` - for the URL of this server only (not "no" for another)."""
         self._own_server(path)
         return cast("bool", super().isfile(path))
-
-    def find(self, path: Any, *args: Any, **kwargs: Any) -> Any:
-        """``fsspec``'s ``find`` - for the URL of this server only."""
-        self._own_server(path)
-        return super().find(path, *args, **kwargs)
-
-    def glob(self, path: Any, *args: Any, **kwargs: Any) -> Any:
-        """``fsspec``'s ``glob`` - for the URL of this server only."""
-        self._own_server(path)
-        return super().glob(path, *args, **kwargs)
-
-    def expand_path(self, path: Any, *args: Any, **kwargs: Any) -> Any:
-        """``fsspec``'s ``expand_path`` - for URLs of this server only."""
-        self._own_server(path)
-        return super().expand_path(path, *args, **kwargs)
-
-    def pipe(self, path: Any, *args: Any, **kwargs: Any) -> Any:
-        """``fsspec``'s ``pipe`` - for URLs of this server only."""
-        self._own_server(path)
-        return super().pipe(path, *args, **kwargs)
-
-    def get_mapper(
-        self,
-        root: str = "",
-        check: bool = False,
-        create: bool = False,
-        missing_exceptions: Any = None,
-    ) -> Any:
-        """``fsspec``'s ``get_mapper`` - for the URL of this server only."""
-        self._own_server(root)
-        return super().get_mapper(root, check, create, missing_exceptions)
 
     def walk(
         self,
