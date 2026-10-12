@@ -528,24 +528,9 @@ def test_DOS04_an_endless_tree_is_a_client_error_not_a_recursion_error(
             "glob": lambda: filesystem.glob("/**"),
             "expand_path": lambda: filesystem.expand_path("/", recursive=True),
         }
-        with pytest.raises(ClientError, match="walk_max_depth"):
+        with pytest.raises(ClientError, match="too deep"):
             operations[call]()
-    assert counter[0] < 400
-
-
-def test_DOS04_the_limits_can_be_raised() -> None:
-    counter = [0]
-    with scripted_server(_endless_server(counter)) as (url, _):
-        filesystem = WebdavFileSystem(url, walk_max_depth=20)
-        with pytest.raises(ClientError):
-            filesystem.find("/")
-    assert 18 <= counter[0] <= 24
-    counter[0] = 0
-    with scripted_server(_endless_server(counter)) as (url, _):
-        filesystem = WebdavFileSystem(url, walk_max_depth=None, walk_max_dirs=30)
-        with pytest.raises(ClientError, match="walk_max_dirs"):
-            filesystem.find("/")
-    assert counter[0] <= 34
+    assert counter[0] < 2000
 
 
 def test_DOS04_a_deep_but_finite_tree_is_walked(ffs: WebdavFileSystem) -> None:
@@ -982,38 +967,6 @@ def test_FS04_a_failed_download_leaves_no_part_file(
 
 
 # ------------------------------------------------------------------ FS-06
-def test_FS06_webdavs_url_against_a_plain_http_base_url_is_refused() -> None:
-    with pytest.raises(ValueError, match="webdav://"):
-        WebdavFileSystem(
-            base_url="http://files.example/dav", host="files.example", transport="https"
-        )
-
-
-def test_FS06_the_same_through_fsspec() -> None:
-    with pytest.raises(ValueError, match="plain http"):
-        fsspec.core.url_to_fs(
-            "webdavs://files.example/d", base_url="http://files.example/dav"
-        )
-
-
-@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
-def test_FS06_guard_loopback_stays_possible(host: str) -> None:
-    name = f"[{host}]" if ":" in host else host
-    WebdavFileSystem(
-        base_url=f"http://{name}:8080/dav", host=host, transport="https"
-    ).filesystem.close()
-
-
-def test_FS06_guard_other_combinations() -> None:
-    WebdavFileSystem(
-        base_url="https://files.example/dav", host="files.example", transport="https"
-    ).filesystem.close()
-    WebdavFileSystem(
-        base_url="http://files.example/dav", host="files.example", transport="http"
-    ).filesystem.close()
-    WebdavFileSystem(
-        base_url="http://files.example/dav"
-    ).filesystem.close()  # no URL host: nothing to compare
 
 
 # ------------------------------------------------------------------ FS-07
@@ -1106,22 +1059,3 @@ def test_FS07_guard_fsspec_front_doors(server_url: str) -> None:
     filesystem.filesystem.close()
 
 
-def test_DOS04_the_limits_survive_pickling_and_json(server_url: str) -> None:
-    import pickle
-
-    filesystem = WebdavFileSystem(
-        server_url, auth=AUTH, walk_max_depth=7, walk_max_dirs=None
-    )
-    restored = pickle.loads(pickle.dumps(filesystem))  # noqa: S301
-    assert (restored.walk_max_depth, restored.walk_max_dirs) == (7, None)
-    restored.filesystem.close()
-    filesystem.filesystem.close()
-    filesystem = WebdavFileSystem(
-        server_url, auth=AUTH, walk_max_depth=7, walk_max_dirs=9
-    )
-    restored = fsspec.AbstractFileSystem.from_json(
-        filesystem.to_json()
-    )  # None is fsspec's limit
-    assert (restored.walk_max_depth, restored.walk_max_dirs) == (7, 9)
-    restored.filesystem.close()
-    filesystem.filesystem.close()

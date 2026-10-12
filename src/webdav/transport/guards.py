@@ -32,7 +32,7 @@ from webdav.url_safety import effective_origin, is_url, redact_url
 
 if TYPE_CHECKING:
     import urllib.parse
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Callable, Mapping
 
 _LOGGER = logging.getLogger("webdav")
 
@@ -167,6 +167,93 @@ def check_insecure_transport(value: object) -> str:
         msg = f"insecure_transport must be one of {INSECURE_TRANSPORT_MODES}, got {value!r}"
         raise ValueError(msg)
     return str(value)
+
+
+class CleartextWarner:
+    """Credentials about to go out over plain ``http``: refuse, warn once per host, or let them.
+
+    Holds what it has already warned about, so it belongs to one session: a
+    copy of a session starts with a fresh one (see ``Session._init_derived``).
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing warned about."""
+        self._warned: set[str] = set()
+        self._lock = threading.Lock()
+
+    def check(
+        self,
+        url: str,
+        *,
+        mode: str = "warn",
+        call_headers: "Mapping[str, str] | None",
+        session_headers: "Mapping[str, str]",
+        has_auth: bool,
+        has_cookies: "Callable[[], bool]" = lambda: False,
+        proxied: "Callable[[], bool]" = lambda: False,
+    ) -> None:
+        """Deal with a request to ``url`` that would send credentials in clear text.
+
+        Args:
+            url: Where the request goes.
+            mode: ``"error"`` refuses the request, ``"warn"`` warns (once per
+                host) and sends it, ``"allow"`` does neither.
+            call_headers: The headers this request carries on top of the
+                session's own.
+            session_headers: The session's default headers.
+            has_auth: The request or the session has ``auth`` set.
+            has_cookies: Whether a cookie the caller set goes along (asked
+                only when nothing else already said so).
+            proxied: Whether the request goes through a proxy (asked only for
+                a loopback host: it is the proxy that sees such a request, not
+                the machine).
+
+        Raises:
+            ClientError: ``url`` cannot be parsed - or ``mode`` is ``"error"``
+                and credentials would be sent in clear text.
+
+        """
+        if mode == "allow":
+            return
+        parts = split_url(url)
+        if parts.scheme.lower() != "http" or not parts.hostname:
+            return
+        if _is_loopback(parts.hostname) and not proxied():
+            return
+        names = {k.lower() for k in (call_headers or {})} | {
+            k.lower() for k in session_headers
+        }
+        if not (
+            has_auth
+            or parts.username is not None
+            or names & _CREDENTIAL_HEADERS
+            or has_cookies()
+        ):
+            return
+        # Host and port only: the netloc may carry the very password being warned about.
+        host = (
+            f"{parts.hostname.lower()}:{parts.port}"
+            if parts.port
+            else parts.hostname.lower()
+        )
+        if mode == "error":
+            msg = (
+                f"refusing to send credentials to {host} over plain http - anyone on the "
+                "network path can read them. Use an https URL; or, for a network you "
+                'trust, pass insecure_transport="warn" (send, with a warning; dav: '
+                '--allow-insecure) or insecure_transport="allow" (send, silently)'
+            )
+            raise ClientError(msg)
+        with self._lock:
+            if host in self._warned:
+                return
+            self._warned.add(host)
+        message = (
+            f"sending credentials to {host} over plain http - anyone on the network "
+            "path can read them; use an https URL"
+        )
+        _LOGGER.warning(message)
+        warn_at_caller(message, InsecureTransportWarning)
 
 
 def scrub_exception(exc: BaseException, url: str) -> None:

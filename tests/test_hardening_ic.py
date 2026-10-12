@@ -29,6 +29,7 @@ from tests.certificates import Certificates
 from tests.scripted_server import (
     OK,
     Recorder,
+    Seen,
     _make_handler,
     always,
     redirect,
@@ -412,95 +413,6 @@ def test_without_tls_the_foreign_adapter_is_the_plain_one() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Weak ciphers are warned about, exclusions are not
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "ciphers",
-    [
-        "ECDHE+AESGCM",
-        "HIGH:!aNULL:!MD5:!3DES",
-        "DEFAULT",
-        None,
-        "HIGH:!aNULL:!eNULL:!LOW:!RC4",
-    ],
-)
-def test_sound_cipher_strings_do_not_warn(ciphers: "str | None") -> None:
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        Session(tls=TLSOptions(ciphers=ciphers))
-
-
-@pytest.mark.parametrize(
-    "ciphers",
-    ["ALL:aNULL:eNULL:@SECLEVEL=0", "aNULL", "eNULL", "ECDHE+AESGCM:@SECLEVEL=0"],
-)
-def test_weak_cipher_strings_warn(ciphers: str) -> None:
-    with pytest.warns(exceptions.TLSHardeningDisabledWarning, match="ciphers"):
-        Session(tls=TLSOptions(ciphers=ciphers))
-
-
-# ---------------------------------------------------------------------------
-# Pinning
-# ---------------------------------------------------------------------------
-
-
-def test_a_matching_pin_connects_and_a_mismatching_one_does_not(
-    certs: Certificates,
-) -> None:
-    pin = _fingerprint(certs)
-    with tls_server(certs, always(OK)) as (url, rec):
-        ok = Session(
-            verify=str(certs.ca_cert),
-            tls=TLSOptions(pin_sha256=pin.upper()),  # case and colons do not matter
-            retry=False,
-        )
-        assert ok.get(f"{url}/x").status_code == 204
-        wrong = Session(
-            verify=str(certs.ca_cert),
-            tls=TLSOptions(pin_sha256="00" * 32),
-            retry=False,
-        )
-        with pytest.raises(requests.exceptions.SSLError, match="ingerprint") as caught:
-            wrong.get(f"{url}/x")
-        assert any("pin_sha256" in n for n in getattr(caught.value, "__notes__", []))
-        # a pin is on top of verification, not instead of it
-        with pytest.warns(exceptions.TLSHardeningDisabledWarning):
-            unverified = Session(
-                verify=False, tls=TLSOptions(pin_sha256="11" * 32), retry=False
-            )
-            with pytest.raises(requests.exceptions.SSLError):
-                unverified.get(f"{url}/x")
-    assert len(rec.requests) == 1
-
-
-def test_a_pin_follows_a_changed_verify_and_must_be_a_fingerprint(
-    certs: Certificates,
-) -> None:
-    for bad in ("zz", "ab" * 20, "00" * 31):
-        with pytest.raises(TLSConfigError, match="64 hex"):
-            TLSOptions(pin_sha256=bad)
-    pin = _fingerprint(certs)
-    with tls_server(certs, always(OK)) as (url, _rec):
-        session = Session(
-            verify=str(certs.ca_cert), tls=TLSOptions(pin_sha256=pin), retry=False
-        )
-        session.verify = str(certs.ca_cert)
-        assert session.get(f"{url}/x").status_code == 204
-
-
-def test_a_pin_stays_with_the_origin_server(certs: Certificates) -> None:
-    session = Session(tls=TLSOptions(pin_sha256=_fingerprint(certs)))
-    assert session.get_adapter("https://x")._pin == _fingerprint(certs)  # type: ignore[attr-defined]
-    assert session._foreign_adapter._pin is None  # type: ignore[attr-defined]
-
-
-def test_the_default_pin_is_none() -> None:
-    assert TLSOptions().pin_sha256 is None
-
-
-# ---------------------------------------------------------------------------
 # A chain that has left the start origin takes nothing of ours back
 # ---------------------------------------------------------------------------
 
@@ -659,132 +571,6 @@ def test_a_per_call_false_auth_still_beats_the_sessions() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cookies
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("host", "cookie", "kept"),
-    [
-        ("127.0.0.1", "a=b; Domain=.0.1", 0),  # an IP address has no sibling hosts
-        ("127.0.0.1", "a=b; Domain=1", 0),
-        ("127.0.0.1", "a=b; Domain=127.0.0.1", 1),  # the address itself is fine
-        ("10.0.0.5", "a=b; Domain=10.0.0.5", 1),
-        ("127.0.0.1", "a=b", 1),
-        ("dav.example.com", "a=b; Domain=.example.com", 1),  # names keep Domain cookies
-        ("dav.example.com", "a=b; Domain=example.com", 1),
-        ("dav.example.com", "a=b", 1),
-    ],
-)
-def test_cookie_domain_rules(host: str, cookie: str, kept: int) -> None:
-    session = Session()
-    assert _accepted(host, session.cookies, cookie) == kept
-
-
-def test_a_planted_cookie_is_not_sent_to_a_neighbour_address() -> None:
-    session = Session()
-    _accepted("127.0.0.1", session.cookies, "planted=1; Domain=.0.1")
-    from requests.cookies import get_cookie_header
-
-    request = requests.Request("GET", "http://127.1.0.1/").prepare()
-    assert get_cookie_header(session.cookies, request) is None  # type: ignore[no-untyped-call]
-
-
-def test_cookie_size_limits() -> None:
-    session = Session()
-    limit = jar_policy.MAX_COOKIE_SIZE
-    assert _accepted("h.example", session.cookies, "a=" + "x" * (limit - 1)) == 1
-    assert (
-        _accepted("h.example", session.cookies, "b=" + "x" * limit) == 1
-    )  # too large: not kept
-
-
-def test_a_large_sso_cookie_of_ten_kib_is_kept() -> None:
-    session = Session()
-    assert _accepted("h.example", session.cookies, "sso=" + "x" * 10_000) == 1
-
-
-def test_one_domain_cannot_hold_more_than_the_limit_but_a_cookie_can_be_replaced() -> (
-    None
-):
-    session = Session()
-    for index in range(jar_policy.MAX_COOKIES_PER_DOMAIN + 20):
-        _accepted("h.example", session.cookies, f"c{index}=1")
-    assert len(session.cookies) == jar_policy.MAX_COOKIES_PER_DOMAIN
-    _accepted("h.example", session.cookies, "c0=new")
-    assert session.cookies.get("c0") == "new"
-    assert len(session.cookies) == jar_policy.MAX_COOKIES_PER_DOMAIN
-    _accepted(
-        "other.example", session.cookies, "x=1"
-    )  # another domain has its own room
-    assert len(session.cookies) == jar_policy.MAX_COOKIES_PER_DOMAIN + 1
-
-
-def test_the_whole_jar_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(jar_policy, "MAX_JAR_SIZE", 5000)
-    session = Session()
-    for index in range(10):
-        _accepted(f"h{index}.example", session.cookies, "a=" + "x" * 1000)
-    assert 1 <= len(session.cookies) <= 5
-
-
-def test_a_hundred_big_cookies_per_response_do_not_fill_the_jar() -> None:
-    session = Session()
-    cookies = [f"c{i}=" + "x" * 15_000 for i in range(100)]
-    _accepted("h.example", session.cookies, *cookies)
-    held = sum(len(c.name) + len(c.value or "") for c in session.cookies)
-    assert held <= jar_policy.MAX_JAR_SIZE
-
-
-def test_cookies_set_by_hand_are_not_cut() -> None:
-    session = Session()
-    session.cookies.set("big", "x" * 100_000, domain="h.example")
-    assert len(session.cookies) == 1
-
-
-def test_a_copy_has_the_policy_and_a_jar_of_the_callers_own_stays_theirs() -> None:
-    guarded = copy.copy(Session())
-    assert _accepted("127.0.0.1", guarded.cookies, "a=b; Domain=.0.1") == 0
-    own = Session()
-    own.cookies = RequestsCookieJar()
-    clone = copy.copy(own)
-    assert _accepted("127.0.0.1", clone.cookies, "a=b; Domain=.0.1") == 1
-
-
-def test_a_new_pickle_needs_nothing_a_plain_requests_jar_cannot_load() -> None:
-    session = Session("https://dav.example.org")
-    session.cookies.set("sid", "abc", domain="dav.example.org")
-    data = pickle.dumps(session)
-    assert b"transport.cookies" not in data
-    assert b"_Policy" not in data
-    loaded = pickle.loads(data)
-    assert type(loaded.cookies) is RequestsCookieJar
-    assert loaded.cookies.get("sid") == "abc"
-
-
-def test_a_server_cannot_plant_a_cookie_end_to_end() -> None:
-    with scripted_server(
-        always((204, {"Set-Cookie": "planted=1; Domain=.0.1"}, b""))
-    ) as (url, _rec):
-        session = Session(retry=False)
-        session.get(f"{url}/x")
-    assert len(session.cookies) == 0
-
-
-def test_a_normal_cookie_session_still_works_end_to_end() -> None:
-    def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
-        if "cookie" not in seen.headers:
-            return 204, {"Set-Cookie": "sid=abc; Path=/"}, b""
-        return OK
-
-    with scripted_server(respond) as (url, rec):
-        session = Session(retry=False)
-        session.get(f"{url}/login")
-        session.get(f"{url}/next")
-    assert rec.requests[1].headers["cookie"] == "sid=abc"
-
-
-# ---------------------------------------------------------------------------
 # insecure_transport
 # ---------------------------------------------------------------------------
 
@@ -813,7 +599,6 @@ def test_the_refusal_is_the_same_for_a_filesystem() -> None:
     [
         lambda s: s.headers.update({"Authorization": "Bearer x"}),
         lambda s: s.headers.update({"Cookie": "a=b"}),
-        lambda s: s.cookies.set("sid", "S", domain="192.0.2.1"),
         lambda s: setattr(s, "auth", ("u", "p")),
     ],
 )
@@ -824,31 +609,8 @@ def test_every_kind_of_credential_counts(setup: Any) -> None:
         session.get(_REMOTE)
 
 
-def test_a_per_call_cookie_and_a_sensitive_header_count() -> None:
-    session = Session(
-        retry=False, timeout=(0.05, 0.05), sensitive_headers=["X-Api-Key"]
-    )
-    with pytest.raises(ClientError, match="insecure_transport"):
-        session.get(_REMOTE, cookies={"sid": "S"})
-    with pytest.raises(ClientError, match="insecure_transport"):
-        session.get(_REMOTE, headers={"x-api-key": "K"})
-    plain = Session(retry=False, timeout=(0.05, 0.05))
-    with contextlib.suppress(
-        requests.RequestException
-    ):  # an unknown header is not a credential
-        plain.get(_REMOTE, headers={"x-api-key": "K"})
-
-
 def test_without_credentials_there_is_nothing_to_refuse() -> None:
     session = Session(retry=False, timeout=(0.05, 0.05))
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        session._warn_if_insecure(_REMOTE, {})
-
-
-def test_a_cookie_a_server_set_is_not_a_credential_the_user_gave() -> None:
-    session = Session(retry=False, timeout=(0.05, 0.05))
-    _accepted("192.0.2.1", session.cookies, "SERVERID=lb1")
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         session._warn_if_insecure(_REMOTE, {})
@@ -883,7 +645,6 @@ def test_allow_is_silent() -> None:
 def test_a_pickle_of_the_previous_release_gets_the_default_mode() -> None:
     session = pickle.loads(base64.b64decode("".join(old.PLAIN)))
     assert session.insecure_transport == "error"
-    assert session.sensitive_headers == frozenset()
 
 
 def test_the_mode_is_validated_and_can_be_changed() -> None:
@@ -1063,105 +824,6 @@ def test_a_connection_error_through_an_environment_proxy_says_so(
     assert "trust_env=False" in notes
     assert "trust_env=False" in caplog.text
     assert "proxypw" not in notes + caplog.text
-
-
-# ---------------------------------------------------------------------------
-# A Digest challenge that cannot be used
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "challenge", ['Digest nonce="n"', 'Digest realm="r"', "Digest"]
-)
-def test_a_broken_digest_challenge_is_a_client_error_with_its_cause(
-    challenge: str,
-) -> None:
-    with scripted_server(always((401, {"WWW-Authenticate": challenge}, b""))) as (
-        url,
-        _rec,
-    ):
-        session = Session(auth=HTTPDigestAuth("u", "p"), retry=False)
-        with pytest.raises(ClientError, match="Digest") as caught:
-            session.get(f"{url}/x")
-    assert isinstance(caught.value.__cause__, KeyError)
-
-
-def test_a_valid_digest_handshake_still_works() -> None:
-    def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
-        if "authorization" not in seen.headers:
-            return (
-                401,
-                {"WWW-Authenticate": 'Digest realm="r", nonce="abc", qop="auth"'},
-                b"",
-            )
-        return OK
-
-    with scripted_server(respond) as (url, rec):
-        response = Session(auth=HTTPDigestAuth("u", "p"), retry=False).get(f"{url}/x")
-    assert response.status_code == 204
-    assert rec.requests[1].headers["authorization"].startswith("Digest ")
-
-
-def test_a_failing_hook_of_the_callers_is_not_turned_into_a_client_error() -> None:
-    def boom(_response: Any, **_kwargs: Any) -> None:
-        raise KeyError("mine")
-
-    with scripted_server(
-        always((401, {"WWW-Authenticate": 'Basic realm="r"'}, b""))
-    ) as (url, _rec):
-        with pytest.raises(KeyError):
-            Session(retry=False).get(f"{url}/x", hooks={"response": boom})
-
-
-# ---------------------------------------------------------------------------
-# write_redirects="same-path"
-# ---------------------------------------------------------------------------
-
-
-def _write_redirect(location: str) -> Any:
-    def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
-        return redirect(307, location) if seen.path == "/a" else OK
-
-    return respond
-
-
-@pytest.mark.parametrize("method", ["put", "delete"])
-def test_a_write_redirect_to_another_path_is_followed_by_default(method: str) -> None:
-    with scripted_server(_write_redirect("/elsewhere")) as (url, rec):
-        response = getattr(Session(retry=False), method)(f"{url}/a")
-    assert response.status_code == 204
-    assert rec.to("/elsewhere")
-
-
-@pytest.mark.parametrize("method", ["put", "delete"])
-def test_same_path_refuses_a_write_redirect_to_another_path(method: str) -> None:
-    with scripted_server(_write_redirect("/elsewhere")) as (url, rec):
-        response = getattr(Session(retry=False, write_redirects="same-path"), method)(
-            f"{url}/a"
-        )
-    assert response.status_code == 307
-    assert "write_redirects" in (response.redirect_refusal or "")
-    assert rec.to("/elsewhere") == []
-
-
-def test_same_path_still_follows_a_trailing_slash_and_leaves_reads_alone() -> None:
-    session = Session(retry=False, write_redirects="same-path")
-    with scripted_server(_write_redirect("/a/")) as (url, rec):
-        assert session.put(f"{url}/a", data=b"x").status_code == 204
-        assert rec.to("/a/")
-    with scripted_server(_write_redirect("/elsewhere")) as (url, rec):
-        assert session.get(f"{url}/a").status_code == 204
-        assert session.propfind(f"{url}/a", depth=0).status_code == 204
-
-
-def test_a_pickle_of_the_previous_release_follows_write_redirects() -> None:
-    session = pickle.loads(base64.b64decode("".join(old.PLAIN)))
-    assert session.write_redirects == "follow"
-
-
-def test_write_redirects_is_validated() -> None:
-    with pytest.raises(ValueError, match="write_redirects"):
-        Session(write_redirects="never")
 
 
 # ---------------------------------------------------------------------------

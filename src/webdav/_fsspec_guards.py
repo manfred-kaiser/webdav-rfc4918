@@ -1,7 +1,7 @@
 """What keeps the fsspec filesystem inside its server and its local trees.
 
 The base class of :class:`~webdav.fsspec.WebdavFileSystem`: fsspec's own methods, with a check in
-front of each - a URL names this filesystem's server (and no other), a ``walk`` has a bound, a
+front of each - a URL names this filesystem's server (and no other), a
 recursive ``get``/``put`` stays inside the local tree it was given. Kept apart from the
 filesystem itself, which is long enough.
 """
@@ -20,38 +20,6 @@ from webdav._webdavs_url import authority_of, check_host, host_and_port
 from webdav.exceptions import ClientError
 from webdav.fs import FileSystem
 from webdav.resource import safe_local_name
-
-
-class WalkBudget:
-    """How deep, and over how many collections, one ``walk`` has gone - shared by its recursive calls."""
-
-    def __init__(self, max_depth: "int | None", max_dirs: "int | None") -> None:
-        """Start at nothing, with these limits (``None``: no limit)."""
-        self.max_depth = max_depth
-        self.max_dirs = max_dirs
-        self.depth = 0
-        self.dirs = 0
-
-    def enter(self, path: str) -> None:
-        """Count one more collection, one level deeper - refuse it if that is too much."""
-        self.depth += 1
-        self.dirs += 1
-        if self.max_depth is not None and self.depth > self.max_depth:
-            reason = f"more than {self.max_depth} levels deep (walk_max_depth)"
-        elif self.max_dirs is not None and self.dirs > self.max_dirs:
-            reason = f"more than {self.max_dirs} collections (walk_max_dirs)"
-        else:
-            return
-        msg = (
-            f"walk gave up at {path!r}: {reason} - a server that invents directories as you "
-            "go never ends. Raise the limit in the WebdavFileSystem(...) arguments if the tree "
-            "is really that big, or None to remove it."
-        )
-        raise ClientError(msg)
-
-    def leave(self) -> None:
-        """Back up one level."""
-        self.depth -= 1
 
 
 class GetTree:
@@ -154,8 +122,6 @@ class GuardedFileSystem(AbstractFileSystem):
     """``fsspec``'s base class, for one server: see :meth:`_own_server`, :meth:`walk`, :meth:`get`, :meth:`put`."""
 
     filesystem: FileSystem
-    walk_max_depth: "int | None"
-    walk_max_dirs: "int | None"
 
     def _own_server(self, path: Any) -> None:
         """Refuse a ``webdav(s)://host[:port]/...`` URL (in ``path``, or a list) for another server.
@@ -243,36 +209,20 @@ class GuardedFileSystem(AbstractFileSystem):
         on_error: Any = "omit",
         **kwargs: Any,
     ) -> Any:
-        """``fsspec``'s ``walk`` - but a tree that never ends is refused, with a ``ClientError``.
+        """``fsspec``'s ``walk``, for URLs of this server only; a tree too deep is a ``ClientError``.
 
         ``find``, ``du``, ``glob("**")``, ``expand_path`` and ``get(recursive=True)`` all walk.
-        fsspec's own ``walk`` recurses without a limit, until Python's ``RecursionError``
-        (which is not one of this library's errors); here the depth and the number of
-        collections are bounded - ``walk_max_depth`` and ``walk_max_dirs`` of the
-        constructor - and a ``RecursionError`` is a ``ClientError`` too. The budget travels
-        with the recursive calls as a keyword argument fsspec hands on to them (and to
-        ``ls``, which ignores it).
+        fsspec's own ``walk`` recurses until Python's ``RecursionError``, which is not one of
+        this library's errors.
         """
-        budget = kwargs.pop("_webdav_walk", None)
-        if budget is None:
-            self._own_server(path)
-            budget = WalkBudget(self.walk_max_depth, self.walk_max_dirs)
-        budget.enter(path)
+        self._own_server(path)
         try:
-            try:
-                yield from super().walk(
-                    path,
-                    maxdepth=maxdepth,
-                    topdown=topdown,
-                    on_error=on_error,
-                    _webdav_walk=budget,
-                    **kwargs,
-                )
-            except RecursionError as exc:
-                msg = f"walk gave up at {path!r}: the tree is too deep"
-                raise ClientError(msg) from exc
-        finally:
-            budget.leave()
+            yield from super().walk(
+                path, maxdepth=maxdepth, topdown=topdown, on_error=on_error, **kwargs
+            )
+        except RecursionError as exc:
+            msg = f"walk gave up at {path!r}: the tree is too deep"
+            raise ClientError(msg) from exc
 
     def get(
         self,

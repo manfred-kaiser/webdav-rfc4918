@@ -127,27 +127,6 @@ origin is sent through the adapter for other origins, so with `tls=` it is
 verified against the default trust locations, not your `ca_files`, and
 without your client certificate.
 
-A redirect to an origin outside `allowed_origins` (see
-[Session](session.md#whom-to-talk-to-allowed-origins)) is refused, whatever
-the policy says.
-
-## Writes that are redirected to another path
-
-Redirects of a `PUT`, `DELETE`, `MOVE` or `COPY` to another path of the same
-server are followed by default: a missing trailing slash, a rewritten path
-behind a proxy and a migrated tree all look like that. A server you do not
-fully trust could use the same mechanism to point a write at a path you did
-not name; if that matters, `write_redirects="same-path"` refuses a redirect of
-a write whose target path differs from the one asked for (a trailing slash
-and percent-encoding do not count as different). Reads are never affected, and
-a redirect to another origin is still a matter of the redirect policy.
-
-```python
-session = Session("https://webdav.example.org", write_redirects="same-path")
-```
-
-The refusal is a `RedirectNotFollowedError` whose reason names the option.
-
 ## Session `params` on a redirect
 
 A session-wide `params` (`session.params = {"token": ...}`) is added to every

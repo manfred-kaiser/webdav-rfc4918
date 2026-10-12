@@ -28,15 +28,11 @@ def _root_reached(*_args: object) -> None:
     raise _Stop
 
 
-def check_xml(content: "str | bytes", max_markup: "int | None" = None) -> None:
-    """Refuse ``content`` if it declares an entity, or has more than ``max_markup`` ``<``.
+def check_xml(content: "str | bytes") -> None:
+    """Refuse ``content`` if it declares an entity.
 
-    The entity check reads only up to the root element - where every
-    declaration has to be - so it costs nothing on a document of any size. The
-    ``<`` count is an upper bound for the work parsing will do (two per element,
-    plus comments and processing instructions), taken before anything is built:
-    a few megabytes of ``<a/>`` become gigabytes of objects, and ``expat`` only
-    counts bytes.
+    The check reads only up to the root element - where every declaration has to be - so
+    it costs nothing on a document of any size.
 
     Raises:
         UnsafeXMLError: It does (the message names the way out).
@@ -54,12 +50,3 @@ def check_xml(content: "str | bytes", max_markup: "int | None" = None) -> None:
         # expat does not know, ...): the real parse - which comes next - reports
         # what is wrong with it.
         pass
-    if max_markup is not None:
-        found = content.count("<") if isinstance(content, str) else content.count(b"<")
-        if found > max_markup:
-            msg = (
-                f"the document has {found} '<', more than the {max_markup} allowed "
-                "(set webdav.dav.xml_utils.MAX_MARKUP to a larger number, or to None, "
-                "if this server really sends documents this large)"
-            )
-            raise UnsafeXMLError(msg)

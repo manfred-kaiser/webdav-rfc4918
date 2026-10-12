@@ -972,6 +972,7 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
         the session it was copied from do not share them. A ``verify`` that is not a ``bool`` or a path (``None``, ``0``, ``""``:
         accepted then, and meaning "off") stays what it meant: ``False``.
         """
+        state = {**_STATE_DEFAULTS, **state}
         verify = state.get("_verify_arg", True)
         if not isinstance(verify, bool | str | os.PathLike) or verify == "":
             verify = verify or False

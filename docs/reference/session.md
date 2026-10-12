@@ -273,11 +273,9 @@ session = webdav.Session(
 ```
 
 The options of this library are `redirect_policy`, `trusted_redirect_origins`,
-`trust_env`, `max_response_size`, `max_response_time`, `max_redirects`,
-`retry`, `chunk_size`, `raise_on_error` and `response_class`. `FileSystem(...)` and every short-form function take
-`allowed_origins`, `insecure_transport`, `sensitive_headers`, `trust_env`,
-`max_response_size`, `max_response_time`, `max_redirects`, `retry`,
-`chunk_size`, `raise_on_error` and `response_class`. `FileSystem(...)` and every short-form function take
+`insecure_transport`, `trust_env`, `max_response_size`, `max_response_time`,
+`max_redirects`, `retry`, `chunk_size`, `raise_on_error` and `response_class`.
+`FileSystem(...)` and every short-form function take
 them too. The next sections explain the limits and retries. Redirects and
 certificates have their own pages: [Redirects](redirects.md) and
 [TLS and mTLS](tls.md).
@@ -298,11 +296,10 @@ These limits apply to a `Session`, a `FileSystem` and the short form alike.
 
 - `max_response_size` (default 64 MiB) caps a response body after
   decompression. A response with stacked content-codings is refused.
-- XML from the server is parsed with entity declarations refused and a ceiling
-  of 64 million `<` per document (`webdav.dav.xml_utils.MAX_MARKUP`, `None` to
-  lift it). A `multistatus` has at most 200 000 `<d:response>` elements
-  (`webdav.dav.multistatus.MAX_RESPONSES`). These limits bound what one
-  document can make the client build, not how much memory a document up to
+- XML from the server is parsed with entity declarations refused. A
+  `multistatus` has at most 200 000 `<d:response>` elements
+  (`webdav.dav.multistatus.MAX_RESPONSES`). These limits do not bound how much
+  memory a document up to
   `max_response_size` costs: that is about 25 times its size for a document of
   nothing but tiny elements.
 - `max_response_time` (default 300 s) is a deadline for the whole request:
@@ -334,9 +331,7 @@ that names the option), unless the host is loopback (`127.0.0.1`, `::1`,
 | `"allow"` | Send it silently |
 
 What counts as a credential: `auth=`, an `Authorization`, `Proxy-Authorization`
-or `Cookie` header, a cookie you put in `session.cookies` or pass as
-`cookies=` (not one the server set itself), and any header named in
-`sensitive_headers=` (`sensitive_headers=["X-Api-Key"]`). Loopback counts as
+or `Cookie` header, and a cookie passed as `cookies=`. Loopback counts as
 loopback only without a proxy: with `HTTP_PROXY` set, a request to
 `localhost` goes to the proxy, in clear text. Credentials in a URL are refused
 anyway. A trusted `http://` intranet or NAS needs `insecure_transport="warn"`
@@ -424,8 +419,8 @@ there from the environment.
 - `send` sends one prepared request. It does not follow redirects and does
   not add lock tokens (use `request` for that). It sends what is prepared, but
   not to anywhere: this session's credentials, cookies and headers go with it,
-  so a request for another origin than the `base_url`, outside
-  `allowed_origins`, or for a URL with user and password in it, is refused
+  so a request for another origin than the `base_url`, or for a URL with user
+  and password in it, is refused
   with a `ClientError`. Use a `Session` of its own, or `requests`, for another
   server. `prepare_request` itself prepares whatever it is given.
 

@@ -134,7 +134,6 @@ _SESSION_PROPERTIES = [
     "redirect_forward_headers",
     "redirect_policy",
     "retry",
-    "sensitive_headers",
     "stream",
     "timeout",
     "trust_env",

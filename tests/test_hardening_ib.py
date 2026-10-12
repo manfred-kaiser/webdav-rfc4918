@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+import requests
 
 from tests.scripted_server import (
     NO_CONTENT_LENGTH,
@@ -207,33 +208,6 @@ def test_identity_is_no_content_encoding() -> None:
         sink = Sink()
         FileSystem(url).download_fileobj("/f", sink)  # type: ignore[arg-type]
         assert sink.data == b"hello"
-
-
-# ---------------------------------------------------------------------------
-# the headers of a response have a size limit
-# ---------------------------------------------------------------------------
-
-
-def _with_headers(
-    count: int, size: int
-) -> "Callable[[RawServer, socket.socket, Seen], None]":
-    def handler(_server: RawServer, conn: socket.socket, _seen: Seen) -> None:
-        lines = b"".join(b"X-%d: %s\r\n" % (i, b"a" * size) for i in range(count))
-        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n" + lines + b"\r\nok")
-
-    return handler
-
-
-def test_headers_of_two_megabytes_are_refused() -> None:
-    with raw_server(_with_headers(30, 65_000)) as server:
-        with pytest.raises(ClientError, match="response headers are larger"):
-            Session().get(f"{server.url}/x")
-
-
-@pytest.mark.parametrize(("count", "size"), [(1, 16_000), (14, 64_000)])
-def test_large_but_reasonable_headers_go_through(count: int, size: int) -> None:
-    with raw_server(_with_headers(count, size)) as server:
-        assert Session().get(f"{server.url}/x").text == "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -516,77 +490,3 @@ def test_a_block_with_the_right_content_range_is_taken() -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# a certificate that fails verification is not tried again
-# ---------------------------------------------------------------------------
-
-
-def _verification_error() -> requests.exceptions.SSLError:
-    cause = ssl.SSLCertVerificationError(
-        1, "certificate verify failed: self-signed certificate"
-    )
-    low = urllib3.exceptions.SSLError(cause)
-    pool = urllib3.exceptions.MaxRetryError(None, "https://x/", low)  # type: ignore[arg-type]
-    return requests.exceptions.SSLError(pool)
-
-
-def _handshake_cut_off() -> requests.exceptions.SSLError:
-    cause = ssl.SSLEOFError(8, "EOF occurred in violation of protocol")
-    return requests.exceptions.SSLError(urllib3.exceptions.SSLError(cause))
-
-
-@pytest.mark.parametrize(
-    ("error", "calls"),
-    [(_verification_error, 1), (_handshake_cut_off, 3)],
-)
-def test_only_a_failed_certificate_check_is_not_retried(
-    error: "Callable[[], Exception]", calls: int, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        retry_module, "time", types.SimpleNamespace(sleep=lambda _s: None)
-    )
-    count = 0
-
-    def attempt() -> None:
-        nonlocal count
-        count += 1
-        raise error()
-
-    with pytest.raises(requests.exceptions.SSLError):
-        retry_module.retry(enabled=True)(attempt)
-    assert count == calls
-
-
-def test_an_untrusted_server_certificate_is_one_handshake_not_three(
-    tmp_path: Path,
-) -> None:
-    from tests.certificates import Certificates  # noqa: PLC0415
-
-    certs = Certificates(tmp_path)
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(str(certs.server_cert), str(certs.server_key))
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(10)
-    accepted = 0
-
-    def serve() -> None:
-        nonlocal accepted
-        while True:
-            try:
-                conn, _ = listener.accept()
-            except OSError:
-                return
-            accepted += 1
-            try:
-                context.wrap_socket(conn, server_side=True).close()
-            except OSError:
-                conn.close()
-
-    threading.Thread(target=serve, daemon=True).start()
-    try:
-        with pytest.raises(requests.exceptions.SSLError):
-            Session(f"https://127.0.0.1:{listener.getsockname()[1]}").get("/x")
-    finally:
-        listener.close()
-    assert accepted == 1

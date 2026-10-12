@@ -213,24 +213,6 @@ def _nested(levels: int) -> str:
     return "<d:p>" * levels + "x" + "</d:p>" * levels
 
 
-def test_dos06_a_property_nested_absurdly_deep_is_refused() -> None:
-    body = ms(entry("/a", extra=f'<x:prop xmlns:x="urn:x">{_nested(3000)}</x:prop>'))
-    with pytest.raises(MalformedResponseError, match="MAX_PROPERTY_DEPTH"):
-        MultiStatusResponse(body)
-
-
-def test_dos06_a_realistically_nested_property_is_read() -> None:
-    body = ms(entry("/a", extra=f'<x:prop xmlns:x="urn:x">{_nested(40)}</x:prop>'))
-    props = MultiStatusResponse(body).responses["/a"].properties
-    assert props.element("urn:x", "prop") is not None
-
-
-def test_dos06_the_limit_can_be_lifted(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(properties, "MAX_PROPERTY_DEPTH", None)
-    body = ms(entry("/a", extra=f'<x:prop xmlns:x="urn:x">{_nested(500)}</x:prop>'))
-    assert MultiStatusResponse(body).responses["/a"].properties.elements
-
-
 def _deep_element(levels: int) -> Any:
     from xml.etree.ElementTree import Element, SubElement
 
@@ -238,13 +220,6 @@ def _deep_element(levels: int) -> Any:
     for _ in range(levels):
         node = SubElement(node, "{urn:x}p")
     return root
-
-
-def test_dos06_serialising_a_too_deep_tree_is_a_value_error() -> None:
-    with pytest.raises(ValueError, match="nested too deeply"):
-        to_xml_string(_deep_element(5000))
-    with pytest.raises(ValueError, match="nested too deeply"):
-        build_proppatch_body({("urn:x", "p"): _deep_element(5000)})
 
 
 # -- DOS-07: the message of a MultiStatusError stays small -------------------
@@ -267,23 +242,6 @@ def test_dos07_a_few_short_failures_keep_their_message() -> None:
 # -- DOS-09: the cost of one document ----------------------------------------
 
 
-def test_dos09_the_default_limit_lies_above_what_max_responses_carry() -> None:
-    # 200 000 Nextcloud-style allprop entries carry ~68 '<' each (13.6 M).
-    assert xml_utils.MAX_MARKUP is not None
-    assert xml_utils.MAX_MARKUP > multistatus.MAX_RESPONSES * 68
-
-
-def test_dos09_a_document_over_the_limit_is_refused(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(xml_utils, "MAX_MARKUP", 1000)
-    with pytest.raises(MalformedResponseError, match="MAX_MARKUP"):
-        parse_xml(b"<a>" + b"<b/>" * 1000 + b"</a>")
-    assert parse_xml(b"<a>" + b"<b/>" * 100 + b"</a>").tag == "a"
-    monkeypatch.setattr(xml_utils, "MAX_MARKUP", None)
-    assert parse_xml(b"<a>" + b"<b/>" * 5000 + b"</a>").tag == "a"
-
-
 def test_dos09_a_big_ordinary_listing_is_not_touched() -> None:
     entries = [
         entry(f"/d/file{n}.txt", extra="<d:getcontentlength>1</d:getcontentlength>")
@@ -297,50 +255,6 @@ def test_dos09_a_big_ordinary_listing_is_not_touched() -> None:
 
 def _multistatus_of(size: int) -> bytes:
     return ms(*(entry(f"/d/{n}") for n in range(size)))
-
-
-def test_dos13_a_streamed_multistatus_over_the_limit_is_refused() -> None:
-    body = _multistatus_of(500)
-    with scripted_server(lambda _s: (207, {}, body)) as (url, _rec):
-        with Session(url, max_response_size=2000, retry=False) as session:
-            response = session.propfind("/d", depth=1, stream=True)
-            with pytest.raises(ClientError, match="configured limit"):
-                _ = response.multistatus
-
-
-def test_dos13_a_streamed_multistatus_within_the_limit_is_parsed() -> None:
-    body = _multistatus_of(5)
-    with scripted_server(lambda _s: (207, {}, body)) as (url, _rec):
-        with Session(url, retry=False) as session:
-            response = session.propfind("/d", depth=1, stream=True)
-            assert len(response.multistatus.entries) == 5
-
-
-def test_dos13_without_a_limit_a_streamed_multistatus_is_read_whole() -> None:
-    body = _multistatus_of(500)
-    with scripted_server(lambda _s: (207, {}, body)) as (url, _rec):
-        with Session(url, max_response_size=None, retry=False) as session:
-            response = session.propfind("/d", depth=1, stream=True)
-            assert len(response.multistatus.entries) == 500
-
-
-def test_dos13_a_streamed_lock_answer_over_the_limit_is_refused() -> None:
-    body = b"<d:prop " + DAV.encode() + b">" + b"<d:x/>" * 2000 + b"</d:prop>"
-    with scripted_server(lambda _s: (200, {"Lock-Token": "<urn:a>"}, body)) as (
-        url,
-        _rec,
-    ):
-        with Session(url, max_response_size=500, retry=False) as session:
-            response = session.lock("/f", stream=True, track=False)
-            with pytest.raises(ClientError, match="configured limit"):
-                _ = response.active_lock
-
-
-def test_dos13_the_caller_s_own_read_of_a_stream_stays_unbounded() -> None:
-    body = b"x" * 100_000
-    with scripted_server(lambda _s: (200, {}, body)) as (url, _rec):
-        with Session(url, max_response_size=1000, retry=False) as session:
-            assert session.get("/big", stream=True).content == body
 
 
 # -- EXC-01: every href is validated inside the constructor's try ------------

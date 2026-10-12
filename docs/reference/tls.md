@@ -196,22 +196,6 @@ extension is not marked critical. `False` accepts such chains, which some
 legacy or internal CAs produce. Like a low `minimum_version`, it emits the warning when
 the session is created.
 
-### `pin_sha256`
-
-```python
-tls = TLSOptions(ca_files="company-ca.pem", pin_sha256="3f:..:9a")  # 64 hex digits
-```
-
-The SHA-256 fingerprint of the server's certificate (DER form; colons and
-case do not matter). A connection to a server with another certificate fails
-with an `SSLError` that says so. It is checked on top of verification, not
-instead of it, and it takes the place of the host name check: the pinned
-certificate is the identity. It applies to your server only, never to another
-origin a redirect leads to. A pin breaks at every renewal of the certificate:
-change it together with the certificate. A single certificate in `ca_files` is
-the other way to pin, and survives a renewal with the same key if the CA is
-the same.
-
 ## Which limits can be turned off, and what warns
 
 | What | Turned off by | Says so |

@@ -113,33 +113,23 @@ A WebDAV server, or a redirect to one, can be hostile. This is the complete
 list of defaults:
 
 - TLS verification is on. `verify` is `True`, `False` or a CA bundle path;
-  `None`, `0` or `""` (an unset environment variable) are a `TypeError`,
-  not a silent "off". Turning it off (`verify=False`) emits and logs a
-  `TLSHardeningDisabledWarning` that `urllib3.disable_warnings()` does not
-  silence. So does a `TLSOptions` with a TLS version below 1.2, strict chain
-  checking off.
+  `None`, `0` or `""` (an unset environment variable) are a `TypeError`.
+  `verify=False` emits and logs a `TLSHardeningDisabledWarning` that
+  `urllib3.disable_warnings()` does not silence. So does a `TLSOptions` with a
+  TLS version below 1.2 or with strict chain checking off.
 - `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` are ignored, so the environment
   cannot replace the CA you configured. `~/.netrc` is ignored too: without
   `auth=`, no credentials are sent.
-  checking off or a weak cipher string.
-- `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` are ignored (`SSL_CERT_FILE` and
-  `SSL_CERT_DIR` are not: see "Trust store" below). `~/.netrc` is ignored
-  too: without `auth=`, no credentials are sent.
 - A URL with credentials in it (`https://user:pw@host/`) is refused. Pass
   `auth=` instead. [Why](https://webdav.readthedocs.io/en/latest/reference/url-credentials.html).
-- Credentials (`auth=`, cookies, an `Authorization` header) over plain `http`
-  to a host other than localhost are refused (`insecure_transport="error"`);
-  `"warn"` sends them with an `InsecureTransportWarning`, `"allow"` silently.
-  Unlike URLs you name, which are the configuration (set `allowed_origins`
-  when they come from untrusted input), this one has an effect by default.
-- Only same-origin redirects are followed
-  (`RedirectPolicy.SAME_ORIGIN`). Credentials and cookies are never sent to
-  another origin, even a trusted one, and not on the way back to the origin
-  the request started at either.
-- A redirect from `https` to `http` is never followed, under any policy, at
-  any step of a chain.
-- Proxies from the environment (`HTTP_PROXY`, ...) are used, as in `requests`;
-  `trust_env=False` / `dav --no-proxy` turns that off.
+- Credentials (`auth=`, an `Authorization` or `Cookie` header, `cookies=`) over
+  plain `http` to a host other than localhost are refused
+  (`insecure_transport="error"`, RFC 4918 section 20.1); `"warn"` sends them with
+  an `InsecureTransportWarning`, `"allow"` silently.
+- Only same-origin redirects are followed (`RedirectPolicy.SAME_ORIGIN`).
+  Credentials and cookies are never sent to another origin, even a trusted one,
+  and not on the way back to the origin the request started at either.
+- A redirect from `https` to `http` is never followed, under any policy.
 - Buffered responses, including multistatus XML, are size-capped, and so are
   redirect chains. Exact limits:
   [Session reference](https://webdav.readthedocs.io/en/latest/reference/session.html#limits-on-what-a-server-can-make-the-client-do).
@@ -149,48 +139,18 @@ list of defaults:
 - A streamed download (`stream=True`, `download_file`) is bounded per read
   only. Neither `max_response_size` nor `max_response_time` applies to it.
 - XML from the server is parsed with the standard library's expat parser.
-  External entities are never resolved. A document that declares an entity
-  at all (`<!ENTITY ...>`) is refused before it is parsed, because expat's
-  own protection against "billion laughs" only starts at 8 MiB of output and
-  counts bytes, not the objects a tree of tiny elements costs. A document
-  with more than 64 million `<` is refused too (far above what any real
-  answer holds). A multistatus or lock response that does either raises
-  `MalformedResponseError`. Not covered: a hostile body just under
-  `max_response_size` still costs memory in proportion (about 1.6 GB for 64
-  MiB of nothing but empty elements); lower the limit for a server you do
-  not trust.
-- Credentials do not end up in the exception messages, warnings or log lines
-  *this library* writes: the userinfo of a URL and the query of a signed URL
-  are redacted, also from the connection errors it passes on. Pass a signed
-  URL as a full URL, not as a path: a path is echoed as you wrote it. The
-  `urllib3` logger prints every requested path and query at DEBUG level; do
-  not enable it while you use signed URLs.
+  External entities are never resolved, and a document that declares an entity
+  at all is refused with `MalformedResponseError`. How well expat itself holds
+  up depends on the Python in use (`pyexpat.EXPAT_VERSION`; 2.7.2 or newer).
+- Credentials do not end up in exception messages, warnings or logs: the
+  userinfo of a URL and the query of a signed URL are redacted.
 - `download_file` writes only to the path you give, through a temporary
   file (private while it is written), and refuses a symlink at that path. A
   recursive `get` or `put` does not follow a symlink out of the tree
-  (`follow_symlinks=True` allows it). That is a check made just before the
-  write, not a guarantee against someone who can change the directory at the
-  same time.
-
-What the defaults do **not** cover (the environment is trusted, a hostile
-server is not):
-
-- **Proxies.** `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` from
-  the environment are used, as with `requests`. The proxy sees what you
-  send. `dav --no-proxy` and the `trust_env` keyword of `Session` turn this off.
-- **Trust store.** Without `tls=`, `verify=True` trusts the `certifi`
-  bundle (distributions may patch it to the system store). With
-  `tls=TLSOptions(...)` (and in `dav` with `--key-password`, `--ciphers`,
-  `--tls-*-version` or `--crl-cert`) it is the operating system's store, and there
-  `SSL_CERT_FILE` and `SSL_CERT_DIR` from the environment can add or
-  replace CAs. Name your CA with `verify=`/`--ca-cert`.
-- **Pickle.** A pickled `Session`/`FileSystem`, `to_json()` output and the
-  `storage_options` Dask sends to its workers hold the credentials in
-  clear text, and so does the `key_password` of `TLSOptions`.
-- **Streaming.** A streamed download has no size or total-time limit. A
-  server that sends one byte per read timeout can hold it open.
-- **Untrusted input.** If a user, not you, chooses the paths or the server:
-  [Using the library with untrusted input](https://webdav.readthedocs.io/en/latest/untrusted-input.html).
+  (`follow_symlinks=True` allows it).
+- Proxies from the environment (`HTTP_PROXY`, ...) are used, as in `requests`;
+  `trust_env=False` / `dav --no-proxy` turns that off. A pickled `Session` holds
+  its credentials in clear text.
 
 **Report a vulnerability:**
 [SECURITY.md](https://github.com/manfred-kaiser/webdav-rfc4918/blob/main/SECURITY.md).

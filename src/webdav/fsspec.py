@@ -41,8 +41,7 @@ gives fsspec the ``host``/``port``/``transport`` (``_get_kwargs_from_urls``), an
 not part of the path. ``webdavs`` is WebDAV over TLS, ``webdav`` plain HTTP - like
 ``ftps``/``ftp`` - so without a ``base_url`` that is ``https://host`` or ``http://host``
 respectively; with one, the URL has to name the same server (its own scheme does not have
-to match - a ``webdav://`` URL against an ``https://`` ``base_url`` is fine; a ``webdavs://``
-one against a plain ``http://`` ``base_url`` is refused, unless that is a loopback address).
+to match - a ``webdav://`` URL against an ``https://`` ``base_url`` is fine).
 Every method that takes a path - not only the constructor - refuses a URL for another server.
 Credentials in a URL are refused.
 """
@@ -91,7 +90,6 @@ from webdav.exceptions import (
     ResourceConflictError,
 )
 from webdav.fs import FileSystem
-from webdav.fs.client import _WALK_MAX_DEPTH, _WALK_MAX_DIRS
 from webdav.session import Session
 
 if TYPE_CHECKING:
@@ -151,9 +149,6 @@ class WebdavFileSystem(GuardedFileSystem):
         host: "str | None" = None,
         port: "int | None" = None,
         transport: str = "https",
-        *,
-        walk_max_depth: "int | None" = _WALK_MAX_DEPTH,
-        walk_max_dirs: "int | None" = _WALK_MAX_DIRS,
         **session_opts: Any,
     ) -> None:
         """Instantiate with ``base_url``/``auth``, or an existing ``session``.
@@ -177,13 +172,6 @@ class WebdavFileSystem(GuardedFileSystem):
             transport: ``"https"`` (default) or ``"http"`` - the transport a bare ``host``
                 (no ``base_url``) is reached over. fsspec sets this from whichever of
                 ``webdavs://``/``webdav://`` the URL used; irrelevant once ``base_url`` is given.
-            walk_max_depth: ``walk`` - and so ``find``, ``du``, ``glob("**")``, ``expand_path`` and
-                ``get(recursive=True)``, which walk - gives up with a
-                :class:`~webdav.exceptions.ClientError` in a tree deeper than this (default 256
-                levels), or ``None`` for no limit. A server that invents a new directory in every
-                directory never ends; this is what stops it.
-            walk_max_dirs: The same for the number of collections a ``walk`` lists (default
-                100 000).
             session_opts: Extra keyword arguments forwarded to
                 :class:`~webdav.session.Session` - except the options fsspec passes to every
                 filesystem (``asynchronous``, ``loop``, ``use_listings_cache``,
@@ -222,8 +210,6 @@ class WebdavFileSystem(GuardedFileSystem):
         for name in ("timeout", "cert"):
             if name in session_opts:
                 session_opts[name] = _tuple_from_json(session_opts[name])
-        self.walk_max_depth = walk_max_depth
-        self.walk_max_dirs = walk_max_dirs
         session_opts.setdefault("chunk_size", self.blocksize)
         self.filesystem = (
             FileSystem.from_session(session)

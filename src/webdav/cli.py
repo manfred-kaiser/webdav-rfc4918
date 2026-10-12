@@ -539,7 +539,6 @@ def _add_client_args(parser: argparse.ArgumentParser) -> None:
 
     conn = parser.add_argument_group("connection")
     conn.add_argument(
-    conn.add_argument(
         "--allow-insecure",
         action="store_true",
         help="send credentials over plain http to a host that is not "
