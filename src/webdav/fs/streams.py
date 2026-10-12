@@ -20,7 +20,7 @@ import requests.exceptions
 
 from webdav.exceptions import ClientError, raise_for_status
 from webdav.methods import Method
-from webdav.transport.body import iter_body, reject_content_encoding
+from webdav.transport.body import iter_body
 from webdav.transport.parse_utils import parse_content_range, parse_uint
 
 if TYPE_CHECKING:
@@ -129,10 +129,10 @@ def _get(session: "Session", url: str, pos: int = 0) -> "HTTPResponse":
     """Send a (possibly ranged) streaming GET.
 
     Always ``Accept-Encoding: identity``: a byte range addresses the
-    *encoded* representation, while the bytes counted (and written) are the
-    decoded ones - resuming a gzip-encoded body at "byte N" would splice the
-    wrong data into the output, and ``Content-Length`` would not be the size
-    of the file. A server that sends a ``Content-Encoding`` anyway is refused.
+    *encoded* representation. A server that sends a ``Content-Encoding`` anyway
+    (it labels the stored file, as Apache does with ``AddEncoding``) gets its bytes
+    read as they are, not decoded: the same bytes are counted, addressed by
+    ``Range`` and written, and ``Content-Length`` is the size of the file.
     """
     headers = {"Accept-Encoding": "identity"}
     if pos:
@@ -143,7 +143,6 @@ def _get(session: "Session", url: str, pos: int = 0) -> "HTTPResponse":
     if not (pos and response.status_code == HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE):
         try:
             raise_for_status(response)
-            reject_content_encoding(response)
         except BaseException:
             # The body of an error response is neither wanted nor bounded (this is a
             # stream): give the connection back instead of leaving it checked out until
@@ -243,7 +242,7 @@ def iter_url(
                     _validate_resumed_response(response, pos, etag, last_modified)
 
                 try:
-                    for chunk in iter_body(response, read_size):
+                    for chunk in iter_body(response, read_size, decode=False):
                         pos += len(chunk)
                         yield chunk
                     if expected is not None and pos != expected:

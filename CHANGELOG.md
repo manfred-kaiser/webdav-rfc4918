@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Files Apache labels with a `Content-Encoding` (`AddEncoding x-gzip .gz`) can be uploaded, listed and downloaded; a download gives the stored bytes.
 - `HTTPDigestAuth` as `auth` is refused with a `ClientError`; an upload with it never worked.
 - A user name with a colon is a `ClientError`.
 - A held `204`/`HEAD`/`304` response no longer breaks the next request on the same connection.

@@ -14,7 +14,7 @@ import requests.exceptions
 
 from webdav.exceptions import ClientError, raise_for_status
 from webdav.methods import Method
-from webdav.transport.body import reject_content_encoding
+from webdav.transport.body import iter_body
 from webdav.transport.parse_utils import parse_content_range
 
 if TYPE_CHECKING:
@@ -58,7 +58,7 @@ def _read_exactly(response: "HTTPResponse", length: int, chunk_size: int) -> byt
     """The body of ``response``, which has to be exactly ``length`` bytes - never more is read."""
     chunks: list[bytes] = []
     received = 0
-    for chunk in response.iter_content(chunk_size=chunk_size):
+    for chunk in iter_body(response, chunk_size, decode=False):
         received += len(chunk)
         if received > length:
             msg = f"the server sent more than the {length} bytes asked for"
@@ -146,7 +146,6 @@ def fetch_range(
         response = session.request(Method.GET, path, headers=headers, stream=True)
         try:
             raise_for_status(response)
-            reject_content_encoding(response)
             validators = _validate(response, start, end, whole=whole, known=known)
             data = _read_exactly(response, end - start, 65536)
             return RangeRead(

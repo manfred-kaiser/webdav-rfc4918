@@ -184,8 +184,9 @@ again, and never hand `href` to a `Session` without a `base_url`.
 - A whole file is one request.
 - A server that answers a range request with the whole file (`200`) is
   refused, and so is a file whose `ETag` changes between two blocks, a
-  `Content-Range` that does not say the bytes asked for, and a `Content-Encoding`.
-  All raise a `ClientError`.
+  `Content-Range` that does not say the bytes asked for. All raise a
+  `ClientError`. A `Content-Encoding` on a file (Apache with `AddEncoding x-gzip .gz`)
+  is not undone: the bytes are the stored ones.
 
 `open()` asks for the size with one `PROPFIND` first, so a resource
 without a size cannot be read this way. For a dataset of many small files,

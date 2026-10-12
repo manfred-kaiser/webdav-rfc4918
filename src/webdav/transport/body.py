@@ -7,6 +7,7 @@ explicit limits instead.
 """
 
 import time
+import zlib
 from typing import TYPE_CHECKING
 
 import requests
@@ -24,35 +25,9 @@ if TYPE_CHECKING:
 _READ_CHUNK = 64 * 1024
 
 
-def reject_content_encoding(response: requests.Response) -> None:
-    """Refuse a streamed response whose body has a ``Content-Encoding``, and close it.
-
-    A streamed read asks for ``Accept-Encoding: identity``: the bytes counted,
-    written and addressed by ``Range`` are those of the file. A server that
-    answers with another coding anyway would have them decoded on the way (a
-    few kilobytes becoming gigabytes), or the file and the bytes of the wire
-    mixed up.
-
-    Raises:
-        ClientError: The response carries a coding other than ``identity``.
-
-    """
-    codings = [
-        c.strip().lower()
-        for c in response.headers.get("Content-Encoding", "").split(",")
-    ]
-    if any(c not in ("", "identity") for c in codings):
-        response.close()
-        shown = response.headers["Content-Encoding"]
-        msg = (
-            f"the server answered with Content-Encoding: {shown} although Accept-Encoding: "
-            "identity was sent; the bytes cannot be streamed as the file's. Read the "
-            "response yourself with Session.get(url, stream=True) if you want them"
-        )
-        raise ClientError(msg)
-
-
-def iter_body(response: requests.Response, chunk_size: int) -> "Iterator[bytes]":
+def iter_body(
+    response: requests.Response, chunk_size: int, *, decode: bool = True
+) -> "Iterator[bytes]":
     """Yield a streamed body in whatever pieces arrive, without waiting to fill ``chunk_size``.
 
     ``iter_content(n)`` blocks until ``n`` bytes have arrived, so a server
@@ -62,6 +37,11 @@ def iter_body(response: requests.Response, chunk_size: int) -> "Iterator[bytes]"
     read. Used here for :func:`read_bounded`'s own deadline, and by
     :func:`webdav.fs.streams.iter_url` so a caller's progress ``callback``
     fires as data actually arrives rather than once per full chunk.
+
+    ``decode=False`` yields the bytes as they came, whatever ``Content-Encoding`` says. A
+    download asks for ``Accept-Encoding: identity``; a server that labels the *stored*
+    file anyway (Apache with ``AddEncoding x-gzip .gz``) means the file is the encoded
+    bytes: they are what is counted, written and addressed by ``Range``.
     """
     raw = response.raw
     read1 = getattr(raw, "read1", None)
@@ -70,7 +50,7 @@ def iter_body(response: requests.Response, chunk_size: int) -> "Iterator[bytes]"
         yield from response.iter_content(chunk_size=chunk_size)
         return
     try:
-        while chunk := read1(chunk_size, decode_content=True):
+        while chunk := read1(chunk_size, decode_content=decode):
             yield chunk
     except urllib3.exceptions.ProtocolError as exc:
         raise requests.exceptions.ChunkedEncodingError(exc, response=response) from exc
@@ -128,7 +108,9 @@ def read_bounded(
     deadline = None if max_time is None else time.monotonic() + max_time
     chunks: list[bytes] = []
     total = 0
-    for chunk in iter_body(response, _READ_CHUNK):
+    coding = codings[0].strip().lower() if codings else ""
+    inflate = coding in _INFLATED_HERE
+    for chunk in iter_body(response, _READ_CHUNK, decode=not inflate):
         total += len(chunk)
         if max_size is not None and total > max_size:
             response.close()
@@ -141,7 +123,49 @@ def read_bounded(
         chunks.append(chunk)
     # What ``response.content`` would have stored, minus the unbounded read.
     body = b"".join(chunks)
+    if inflate:
+        body = _inflate(response, body, coding, max_size)
     _set_body(response, body)
+
+
+#: The codings undone here, under the size limit and with a fallback for a wrong label.
+_INFLATED_HERE = frozenset({"gzip", "x-gzip", "deflate"})
+
+
+def _inflate(
+    response: requests.Response, body: bytes, coding: str, max_size: "int | None"
+) -> bytes:
+    """``body`` undone from ``coding`` - or as it is, when it is not that.
+
+    Apache with ``AddEncoding x-gzip .gz`` puts the encoding of the *file* ``a.gz`` on the
+    answer to a PROPFIND or PUT for it, whose body is plain XML or HTML: such a body is
+    taken as it came. A real one is inflated up to ``max_size`` (a few kilobytes that inflate
+    to gigabytes are stopped, as before).
+
+    Raises:
+        ClientError: The inflated body is larger than ``max_size``.
+
+    """
+    if not body:
+        return body
+    windows = (
+        (zlib.MAX_WBITS, -zlib.MAX_WBITS)
+        if coding == "deflate"
+        else (16 + zlib.MAX_WBITS,)
+    )
+    for bits in windows:
+        try:
+            inflated = zlib.decompressobj(bits).decompress(
+                body, 0 if max_size is None else max_size + 1
+            )
+        except zlib.error:
+            continue
+        if max_size is not None and len(inflated) > max_size:
+            response.close()
+            msg = f"response body exceeds the configured limit of {max_size} bytes"
+            raise ClientError(msg)
+        return inflated
+    return body
 
 
 def _set_body(response: requests.Response, body: bytes) -> None:
@@ -214,5 +238,4 @@ __all__ = [
     "iter_body",
     "read_bounded",
     "read_response",
-    "reject_content_encoding",
 ]

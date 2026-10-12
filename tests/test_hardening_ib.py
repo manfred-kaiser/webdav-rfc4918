@@ -9,6 +9,7 @@ import io
 import socket
 import threading
 import tracemalloc
+import zlib
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,6 +19,7 @@ import requests
 
 from tests.scripted_server import (
     NO_CONTENT_LENGTH,
+    always,
     Reply,
     Seen,
     scripted_server,
@@ -156,7 +158,7 @@ _BODY = bytes(range(256)) * 40  # 10 KiB
 
 
 # ---------------------------------------------------------------------------
-# a Content-Encoding on a streamed body is refused
+# a stored file labelled with a Content-Encoding is read as the bytes it is
 # ---------------------------------------------------------------------------
 
 
@@ -164,7 +166,7 @@ _GZIPPED = gzip.compress(b"A" * 100_000)
 
 
 def _gzip_server(*, with_length: bool) -> "Callable[[Seen], Reply]":
-    headers = {"Content-Encoding": "gzip"}
+    headers = {"Content-Encoding": "x-gzip"}
     if not with_length:
         headers[NO_CONTENT_LENGTH] = "1"
     return file_server(len(_GZIPPED), lambda _seen: (200, headers, _GZIPPED))
@@ -172,31 +174,31 @@ def _gzip_server(*, with_length: bool) -> "Callable[[Seen], Reply]":
 
 @pytest.mark.parametrize("with_length", [True, False])
 @pytest.mark.parametrize("how", ["download_fileobj", "download_file", "open", "cat"])
-def test_a_content_encoding_is_refused_where_a_body_is_streamed(
+def test_a_stored_gzip_file_is_downloaded_as_stored(
     with_length: bool, how: str, tmp_path: Path
 ) -> None:
+    """Apache with ``AddEncoding x-gzip .gz``: the file is the gzip bytes, not what is in it."""
     with scripted_server(_gzip_server(with_length=with_length)) as (url, _rec):
         fs = FileSystem(url)
         sink = Sink()
-        with pytest.raises(ClientError, match="Content-Encoding: gzip"):
-            if how == "download_fileobj":
-                fs.download_fileobj("/f", sink)  # type: ignore[arg-type]
-            elif how == "download_file":
-                fs.download_file("/f", tmp_path / "out")
-            elif how == "open":
-                with fs.open("/f", "rb") as f:
-                    f.read()
-            else:
-                WebdavFileSystem(url).cat_file("/f", 0, 10)
-        assert sink.data == b""
-        assert not (tmp_path / "out").exists()
+        if how == "download_fileobj":
+            fs.download_fileobj("/f", sink)  # type: ignore[arg-type]
+            got = sink.data
+        elif how == "download_file":
+            fs.download_file("/f", tmp_path / "out")
+            got = (tmp_path / "out").read_bytes()
+        elif how == "open":
+            with fs.open("/f", "rb") as f:
+                got = f.read()
+        else:
+            got = WebdavFileSystem(url).cat_file("/f", 0, len(_GZIPPED))
+        assert got == _GZIPPED
         fs.close()
 
 
-def test_a_content_encoding_is_refused_for_a_whole_file_read_of_fsspec() -> None:
+def test_a_stored_gzip_file_is_read_whole_by_fsspec() -> None:
     with scripted_server(_gzip_server(with_length=False)) as (url, _rec):
-        with pytest.raises(ClientError, match="Content-Encoding"):
-            WebdavFileSystem(url).cat_file("/f")
+        assert WebdavFileSystem(url).cat_file("/f") == _GZIPPED
 
 
 def test_identity_is_no_content_encoding() -> None:
@@ -206,6 +208,35 @@ def test_identity_is_no_content_encoding() -> None:
         sink = Sink()
         FileSystem(url).download_fileobj("/f", sink)  # type: ignore[arg-type]
         assert sink.data == b"hello"
+
+
+@pytest.mark.parametrize("method", ["PUT", "DELETE", "MKCOL", "PROPFIND"])
+def test_an_answer_labelled_gzip_that_is_not_gzip_is_taken_as_it_came(
+    method: str,
+) -> None:
+    """Apache labels the answers for ``a.gz`` ``x-gzip``: the 201 of a PUT is HTML, a PROPFIND's XML."""
+    reply = (201, {"Content-Encoding": "x-gzip"}, b"<html>Created</html>")
+    with scripted_server(always(reply)) as (url, _rec), Session(url, retry=False) as s:
+        response = s.request(method, "/a.gz", data=b"x" if method == "PUT" else None)
+    assert response.status_code == 201
+    assert response.content == b"<html>Created</html>"
+
+
+@pytest.mark.parametrize("coding", ["gzip", "x-gzip", "deflate"])
+def test_a_real_gzip_or_deflate_answer_is_inflated(coding: str) -> None:
+    body = b"<d:multistatus xmlns:d='DAV:'/>" * 20
+    packed = gzip.compress(body) if "gzip" in coding else zlib.compress(body)
+    reply = (200, {"Content-Encoding": coding}, packed)
+    with scripted_server(always(reply)) as (url, _rec), Session(url, retry=False) as s:
+        assert s.get("/x").content == body
+
+
+def test_an_answer_that_inflates_past_the_limit_is_refused() -> None:
+    reply = (200, {"Content-Encoding": "gzip"}, gzip.compress(b"A" * 1_000_000))
+    with scripted_server(always(reply)) as (url, _rec):
+        with Session(url, retry=False, max_response_size=10_000) as s:
+            with pytest.raises(ClientError, match="exceeds"):
+                s.get("/x")
 
 
 # ---------------------------------------------------------------------------

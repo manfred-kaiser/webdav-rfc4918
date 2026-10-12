@@ -230,10 +230,10 @@ called with the number of bytes of each chunk, for a progress bar:
 fs.upload_file("Gorilla.jpg", "Photos/Gorilla.jpg", overwrite=True, callback=print)
 ```
 
-A download refuses a server that answers with a `Content-Encoding` (the
-request says `Accept-Encoding: identity`), because the bytes and the file's
-bytes would no longer be the same; read such a response yourself with
-`Session.get(url, stream=True)`.
+A download gives the bytes the server stores. The request says
+`Accept-Encoding: identity`; a server that labels the file with a
+`Content-Encoding` anyway (Apache with `AddEncoding x-gzip .gz` does so for
+`a.gz`) does not get its file decoded.
 
 Transfers stream in `chunk_size` pieces (4 MiB by default), so memory use
 does not grow with the file size. Several transfers at once need

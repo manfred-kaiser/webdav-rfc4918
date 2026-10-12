@@ -20,6 +20,7 @@ here, not discovered in production).
 import base64
 import collections
 import contextlib
+import gzip
 import hashlib
 import io
 import logging
@@ -753,6 +754,7 @@ _PORTS = {
     "limit": 8789,
     "dbm": 8791,
     "deflate": 8793,
+    "gzip": 8795,
 }
 
 _needs_local_apache = pytest.mark.skipif(
@@ -2678,3 +2680,22 @@ def test_apache_does_not_know_the_latin1_form_of_a_utf8_password() -> None:
         with pytest.raises(HTTPStatusError) as caught:
             fs.exists("/")
         assert caught.value.status_code == 401
+
+
+def test_apache_with_add_encoding_stores_and_serves_a_gz_file_as_it_is(
+    tmp_path: Path,
+) -> None:
+    """``AddEncoding x-gzip .gz`` labels the 201 of the PUT and every GET of ``a.gz``."""
+    from webdav.fsspec import WebdavFileSystem  # noqa: PLC0415
+
+    payload = gzip.compress(b"hello world\n" * 1000)
+    with _variant(tmp_path, "gzip", extra_conf="AddEncoding x-gzip .gz\n") as url:
+        with FileSystem(url, auth=_Apache.auth) as fs:
+            fs.upload_fileobj(io.BytesIO(payload), "/a.txt.gz")
+            fs.download_file("/a.txt.gz", str(tmp_path / "back.gz"))
+            assert (tmp_path / "back.gz").read_bytes() == payload
+            with fs.open("/a.txt.gz", "rb") as fobj:
+                assert fobj.read() == payload
+        fsspec_fs = WebdavFileSystem(url, auth=_Apache.auth)
+        assert fsspec_fs.cat_file("/a.txt.gz") == payload
+        assert fsspec_fs.cat_file("/a.txt.gz", start=3, end=20) == payload[3:20]
