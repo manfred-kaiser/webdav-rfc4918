@@ -168,7 +168,8 @@ def wait_until_up(url: str, timeout: float = 5.0) -> None:
         try:
             with urllib.request.urlopen(url, timeout=0.5):  # noqa: S310
                 pass
-        except urllib.error.HTTPError:
+        except urllib.error.HTTPError as exc:
+            exc.close()  # an open HTTPError is a ResourceWarning when collected (Python 3.14)
             return  # a real HTTP response (401 included) - the server is up
         except OSError:
             time.sleep(0.1)
@@ -203,7 +204,9 @@ def start(conf_file: Path) -> None:
     if result.returncode != 0:
         error_log = conf_file.parent / "error.log"
         error_log_tail = (
-            error_log.read_text(errors="replace") if error_log.exists() else "(no error.log)"
+            error_log.read_text(errors="replace")
+            if error_log.exists()
+            else "(no error.log)"
         )
         msg = (
             f"{profile.nginx} -c {conf_file} failed (exit {result.returncode}):\n"
