@@ -160,6 +160,19 @@ member, nothing created), raised as
 If the lock is already gone when the block ends, the release is reported in
 the `webdav` log ("was already gone when it was released").
 
+### A lock that is gone
+
+RFC 4918 section 6.6: "Clients MUST assume that locks can arbitrarily disappear at
+any time" (a timeout the server enforced, a restart). A server that follows section
+10.4 answers the `If` header of a lock that is gone with `412` - to every later write
+too, if the session goes on sending the token. So a `412` for a write that carried a
+token makes the session ask the server (`PROPFIND` for `lockdiscovery`) which of the
+tokens it sent are still active, and forget the others. The write is not repeated: without
+the lock it may be someone else's turn; the `412` is raised, and the next write goes out
+without the token. A `412` for another reason (`If-Match`) changes nothing, and neither
+does a server that cannot answer the question. Apache accepts the token of an expired
+lock, so it never answers `412` here.
+
 ### Locks on a collection
 
 A lock on a collection with `depth="infinity"` (the default) covers its

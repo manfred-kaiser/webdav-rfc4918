@@ -412,6 +412,11 @@ class LockRegistry:
                     if held.token == old:
                         entries[i] = HeldLock(held.url, new, held.depth)
 
+    def held(self) -> list[HeldLock]:
+        """Every lock held, a copy."""
+        with self._mutex:
+            return [lock for entries in self._held.values() for lock in entries]
+
     def covering(self, url: str) -> list[HeldLock]:
         """The locks a write to ``url`` has to present a token for.
 

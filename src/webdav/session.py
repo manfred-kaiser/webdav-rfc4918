@@ -73,6 +73,7 @@ from webdav.exceptions import (
     ClientError,
     DeadlineDisabledWarning,
     HTTPStatusError,
+    WebDAVError,
     warn_at_caller,
 )
 from webdav.methods import RETRYABLE_METHODS, Method
@@ -1188,7 +1189,48 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
                 read_response(
                     response, method, max_size=self.max_response_size, max_time=None
                 )
+        if (
+            response.status_code == HTTPStatus.PRECONDITION_FAILED
+            and "If" in first["headers"]
+        ):
+            self._forget_vanished_locks(first["headers"]["If"])
         return response
+
+    def _forget_vanished_locks(self, sent_if: str) -> None:
+        """After a ``412`` for a write that carried lock tokens: drop those the server no longer knows.
+
+        RFC 4918 section 6.6: "Clients MUST assume that locks can arbitrarily disappear at
+        any time" (a timeout the server enforced, a restart); a server that follows
+        section 10.4 answers the ``If`` header of a lock that is gone with ``412``, to every
+        later write too, as long as the session sends that token. A ``PROPFIND`` for
+        ``lockdiscovery`` says which of the tokens are still active; only the ones it does
+        not list are forgotten. A ``412`` for another reason (``If-Match``) changes nothing,
+        and the write is not repeated: without the lock it may be someone else's turn.
+        """
+        for lock in self.locks.held():
+            if lock.token not in sent_if:
+                continue
+            try:
+                answer = self.propfind(
+                    lock.url,
+                    depth=0,
+                    props=["{DAV:}lockdiscovery"],
+                    raise_on_error=False,
+                )
+                active = {
+                    active_lock.token
+                    for entry in answer.multistatus.entries
+                    for active_lock in entry.properties.active_locks
+                }
+            except (WebDAVError, requests.RequestException):
+                continue  # cannot tell: keep it
+            if lock.token not in active:
+                self.locks.discard_token(lock.token, url=lock.url)
+                _LOGGER.warning(
+                    "the server no longer has the lock on %s (RFC 4918 section 6.6: locks can "
+                    "disappear at any time): forgotten, the next write goes without it",
+                    redact_url(lock.url),
+                )
 
     def prepare_request(self, request: requests.Request) -> requests.PreparedRequest:
         """Prepare ``request``; with no credentials configured, none are looked up.

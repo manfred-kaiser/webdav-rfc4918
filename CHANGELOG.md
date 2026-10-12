@@ -45,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `HTTPDigestAuth` as `auth` is refused with a `ClientError`; an upload with it never worked.
 - A user name with a colon is a `ClientError`.
 - A held `204`/`HEAD`/`304` response no longer breaks the next request on the same connection.
-- With several locks, the `If` header carries all tokens. Lock tokens go only to the server that issued them.
+- A lock the server no longer has is forgotten after a `412`, instead of failing every later write. With several locks, the `If` header carries all tokens. Lock tokens go only to the server that issued them.
 - `%2F` and invalid UTF-8 in a full URL are sent as written. `ls("/data ")` keeps the space.
 - `mkdir` accepts `202` and `204`. Uploads work from a pipe and from the middle of a file object.
 - Pretty-printed XML hrefs and ETags are read. An unparseable second `<d:href>` no longer hides a `423`.
