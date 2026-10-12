@@ -136,7 +136,7 @@ class DAVProperties:
         modified = leaf_text("getlastmodified")
         self.modified: datetime | None = from_rfc1123(modified) if modified else None
 
-        self.etag: str | None = (leaf_text("getetag") or "").strip() or None
+        self.etag: str | None = leaf_text("getetag") or None
         self.content_type: str | None = leaf_text("getcontenttype")
 
         self.content_length: int | None = parse_uint(leaf_text("getcontentlength"))

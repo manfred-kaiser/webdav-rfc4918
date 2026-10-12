@@ -40,10 +40,6 @@ MAX_RESPONSES = 200_000
 #: Longest ``<d:href>`` accepted, in characters.
 MAX_HREF_LENGTH = 8192
 
-#: What may stand around an ``<d:href>``'s URI in a pretty-printed document: XML
-#: whitespace, which no URI can contain (a space in a name is ``%20``).
-_HREF_WHITESPACE = " \t\r\n"
-
 #: Cap for the lazy peek :func:`multistatus_failure` takes at a non-207
 #: failure's body: a real RFC 4918 multistatus is small, so this is generous
 #: while still refusing to read an unbounded amount of a hostile server's
@@ -119,11 +115,7 @@ class ResourceResponse:
         # equivalent paths). `self.href`/`.path`/`.path_norm` below stay
         # the first one (the common single-href case, and what property
         # lookups always use), `self.hrefs` carries all of them.
-        hrefs = [
-            text
-            for el in response_xml.findall(dav("href"))
-            if el.text and (text := el.text.strip(_HREF_WHITESPACE))
-        ]
+        hrefs = [el.text for el in response_xml.findall(dav("href")) if el.text]
         if not hrefs:
             msg = "<d:response> is missing a required <d:href>"
             raise ValueError(msg)

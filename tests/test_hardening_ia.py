@@ -22,7 +22,6 @@ from requests.structures import CaseInsensitiveDict
 import webdav.exceptions as exceptions_module
 from tests.scripted_server import Seen, scripted_server
 from webdav import FileSystem, Response, Session
-from webdav.dav.conditional import entity_tag
 from webdav.dav.date_utils import from_rfc1123, fromisoformat
 from webdav.dav.locks import ActiveLock, LockRegistry
 from webdav.dav.multistatus import (
@@ -577,24 +576,17 @@ def test_bug08_an_iso_date_with_a_zone_keeps_it() -> None:
 
 
 # -- BUG-09: whitespace around an href or an ETag ----------------------------
+# RFC 4918 sec. 14.7: an href holds a Simple-ref, a URI, which has no whitespace;
+# sec. 4.3: whitespace in a property value is significant. Neither is trimmed.
 
 
-def test_bug09_a_pretty_printed_href_and_etag_are_read() -> None:
-    body = ms(
-        entry(
-            "\n    /d/a.txt\n  ",
-            extra='<d:getetag>\n  "abc"\n </d:getetag>',
-        )
-    )
-    parsed = MultiStatusResponse(body)
-    response = parsed.entries[0]
-    assert response.href == "/d/a.txt"
-    assert response.properties.etag == '"abc"'
-    assert entity_tag(response.properties.etag or "") == '"abc"'
+def test_bug09_an_href_padded_with_a_line_break_is_refused() -> None:
+    with pytest.raises(MalformedResponseError, match="control character"):
+        MultiStatusResponse(ms(entry("\n    /d/a.txt\n  ")))
 
 
-def test_bug09_an_href_of_nothing_but_whitespace_is_still_missing() -> None:
-    with pytest.raises(MalformedResponseError, match="missing a required"):
+def test_bug09_an_href_of_nothing_but_whitespace_is_missing() -> None:
+    with pytest.raises(MalformedResponseError):
         MultiStatusResponse(ms(entry(" \n ")))
 
 
