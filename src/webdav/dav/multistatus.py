@@ -203,10 +203,17 @@ class MultiStatusResponse:
     #: to plug in custom property parsing; see that attribute's docstring.
     response_class: ClassVar[type[ResourceResponse]] = ResourceResponse
 
-    def __init__(self, content: str | bytes) -> None:
-        """Parse ``content``, the body of a 207 response."""
+    def __init__(
+        self, content: str | bytes, *, content_type: str | None = None
+    ) -> None:
+        """Parse ``content``, the body of a 207 response.
+
+        ``content_type`` is its ``Content-Type`` header, if known: its
+        ``charset`` decides how the bytes are read, behind a byte-order mark and
+        ahead of the body's own ``encoding=`` (RFC 7303 sec. 3).
+        """
         self.content = content
-        self.tree = tree = parse_xml(content)
+        self.tree = tree = parse_xml(content, content_type=content_type)
 
         self.response_description: str | None = tree.findtext(
             dav("responsedescription")
@@ -351,7 +358,9 @@ def parse_multistatus_response(
     if http_response.status_code != requests.codes.multi_status:
         msg = f"the server answered {http_response.status_code}, not a 207 Multi-Status - is this a WebDAV server?"
         raise MalformedResponseError(msg)
-    parsed = multistatus_class(http_response.content)
+    parsed = multistatus_class(
+        http_response.content, content_type=http_response.headers.get("Content-Type")
+    )
     # Not in the constructor, which is public and takes what a caller gives it: here
     # it is an answer from a server, and a 207 that is no multistatus (another
     # namespace, an error page) reports nothing - a failure it hid would pass as success.
@@ -380,7 +389,9 @@ def multistatus_failure(http_response: "HTTPResponse") -> "MultiStatusResponse |
     if not content:
         return None
     try:
-        parsed = MultiStatusResponse(content)
+        parsed = MultiStatusResponse(
+            content, content_type=http_response.headers.get("Content-Type")
+        )
     except MalformedResponseError:
         return None
     if split_clark(parsed.tree.tag)[1] != "multistatus":

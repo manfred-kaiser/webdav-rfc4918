@@ -9,8 +9,10 @@ therefore refused outright (a WebDAV server sends none); ``max_response_size``
 bounds what a document can cost.
 """
 
+import codecs
 import re
-from xml.etree.ElementTree import Element, ParseError, SubElement
+from email.message import Message
+from xml.etree.ElementTree import Element, ParseError, SubElement, XMLParser
 from xml.etree.ElementTree import fromstring as _fromstring
 from xml.etree.ElementTree import tostring as _tostring
 
@@ -41,15 +43,68 @@ def split_clark(tag: str) -> tuple[str, str]:
     return "", tag
 
 
-def parse_xml(content: str | bytes) -> Element:
+#: A byte-order mark: it names the encoding, and RFC 7303 sec. 3 makes it
+#: authoritative over everything else.
+_BOMS = (
+    codecs.BOM_UTF8,
+    codecs.BOM_UTF32_LE,
+    codecs.BOM_UTF32_BE,
+    codecs.BOM_UTF16_LE,
+    codecs.BOM_UTF16_BE,
+)
+
+
+def _labelled_charset(content: str | bytes, content_type: str | None) -> str | None:
+    """The ``charset`` of ``content_type``, when it decides how ``content`` is read.
+
+    RFC 7303 sec. 3 gives the order: a byte-order mark is authoritative; without
+    one, the ``charset`` parameter is; only without that does the document's own
+    ``encoding=`` (or the UTF-8 default) apply.
+
+    Raises:
+        ValueError: The label names a charset this Python has no codec for.
+
+    """
+    if not content_type or not isinstance(content, bytes) or content.startswith(_BOMS):
+        return None
+    message = Message()
+    message["Content-Type"] = content_type
+    charset = message.get_content_charset()
+    if not charset:
+        return None
+    try:
+        codecs.lookup(charset)
+    except LookupError:
+        msg = f"the Content-Type names the charset {charset[:40]!r}, which is unknown here"
+        raise ValueError(msg) from None
+    return charset
+
+
+def _parse_as(content: bytes, charset: str) -> Element:
+    # Safe against XXE/entity expansion: see the module docstring.
+    parser = XMLParser(encoding=charset)  # noqa: S314 # nosec B314
+    parser.feed(content)
+    return parser.close()
+
+
+def parse_xml(content: str | bytes, *, content_type: str | None = None) -> Element:
     """Parse XML content into an :class:`~xml.etree.ElementTree.Element`.
 
     See the module docstring for why this is safe against XXE/entity
     expansion attacks.
 
+    Args:
+        content: The document.
+        content_type: The ``Content-Type`` header it came with, if any. Its
+            ``charset`` parameter decides how the bytes are read, ahead of the
+            document's own ``encoding=`` and behind a byte-order mark (RFC 7303
+            sec. 3). A document that cannot be read that way is refused.
+
     Raises:
-        MalformedResponseError: ``content`` is not well-formed XML, declares
-            or declares an entity - wraps
+        MalformedResponseError: ``content`` is not well-formed XML in the
+            encoding it is read in (also when its ``Content-Type`` names a
+            charset it does not fit, or one that is unknown here), or declares an
+            entity - wraps
             the stdlib's bare :class:`~xml.etree.ElementTree.ParseError` so
             every exception this library raises stays a
             :class:`~webdav.exceptions.WebDAVError`, per the promise in
@@ -57,18 +112,21 @@ def parse_xml(content: str | bytes) -> Element:
 
     """
     try:
-        check_xml(content)
+        charset = _labelled_charset(content, content_type)
+        check_xml(content, charset)
+        # Safe against XXE/entity expansion: see the module docstring. (bandit reads every
+        # word after "nosec" as a test id, so the reason cannot sit on that line.)
+        if charset is not None and isinstance(content, bytes):
+            return _parse_as(content, charset)
+        return _fromstring(content)  # noqa: S314 # nosec B314
     except UnsafeXMLError as exc:
         msg = f"refusing the server's XML: {exc}"
         raise MalformedResponseError(msg) from exc
-    try:
-        # Safe against XXE/entity expansion: see the module docstring. (bandit reads every
-        # word after "nosec" as a test id, so the reason cannot sit on that line.)
-        return _fromstring(content)  # noqa: S314 # nosec B314
     except (ParseError, LookupError, ValueError, UnicodeError) as exc:
         # LookupError: an unknown ``encoding=`` declaration; ValueError/
         # UnicodeError: one expat cannot honour (e.g. ``utf-16`` on an ASCII
-        # body). The server picked them - none may escape as a bare error.
+        # body), or a charset the Content-Type names that is unknown here. The
+        # server picked them - none may escape as a bare error.
         msg = f"could not parse server response as XML: {exc}"
         raise MalformedResponseError(msg) from exc
 

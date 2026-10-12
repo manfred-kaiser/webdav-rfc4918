@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from xml.etree.ElementTree import Element
 
 import pytest
+from requests import Response
 
 from tests.scripted_server import Reply, Seen, always, scripted_server
 from webdav import FileSystem, Session
@@ -27,7 +28,11 @@ from webdav.dav.locks import (
     format_timeout,
     parse_timeout,
 )
-from webdav.dav.multistatus import MultiStatusResponse, ResourceResponse
+from webdav.dav.multistatus import (
+    MultiStatusResponse,
+    ResourceResponse,
+    parse_multistatus_response,
+)
 from webdav.dav.properties import (
     DAVProperties,
     build_mkcol_body,
@@ -596,6 +601,86 @@ def test_the_timeout_literals_are_case_insensitive(
     assert parse_timeout(text) == seconds
 
 
+# ---------------------------------------------------------------------------
+# RFC 7303 sec. 3 - the charset parameter of the Content-Type
+# ---------------------------------------------------------------------------
+
+_CAFE = (
+    '<d:multistatus xmlns:d="DAV:"><d:response><d:href>/a</d:href><d:propstat>'
+    "<d:prop><d:displayname>Caf\u00e9</d:displayname></d:prop>"
+    "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"
+)
+
+
+def _display_name(body: bytes, content_type: "str | None") -> "str | None":
+    ms = MultiStatusResponse(body, content_type=content_type)
+    return ms.get_response_for_path("/", "a").properties.display_name
+
+
+def test_a_body_with_no_encoding_is_read_in_the_charset_of_its_label() -> None:
+    """RFC 7303 sec. 3: with no byte-order mark, the charset parameter is authoritative."""
+    body = _CAFE.encode("iso-8859-1")
+    assert _display_name(body, "text/xml; charset=iso-8859-1") == "Caf\u00e9"
+    assert _display_name(body, 'application/xml; charset="ISO-8859-1"') == "Caf\u00e9"
+    with pytest.raises(MalformedResponseError):
+        _display_name(body, "text/xml")
+
+
+def test_the_charset_parameter_wins_over_the_encoding_the_document_declares() -> None:
+    """RFC 7303 sec. 3: with no byte-order mark, the charset parameter is authoritative."""
+    body = ('<?xml version="1.0" encoding="utf-8"?>' + _CAFE).encode("iso-8859-1")
+    assert _display_name(body, "text/xml; charset=iso-8859-1") == "Caf\u00e9"
+
+
+def test_a_document_that_does_not_fit_its_label_is_refused() -> None:
+    """Not read some other way: a UTF-8 body labelled us-ascii cannot be what the server says it is."""
+    body = ('<?xml version="1.0" encoding="utf-8"?>' + _CAFE).encode()
+    with pytest.raises(MalformedResponseError):
+        _display_name(body, "text/xml; charset=us-ascii")
+
+
+def test_a_byte_order_mark_wins_over_the_charset_parameter() -> None:
+    body = b"\xef\xbb\xbf" + _CAFE.encode()
+    assert _display_name(body, "text/xml; charset=iso-8859-1") == "Caf\u00e9"
+
+
+def test_a_charset_this_python_does_not_know_is_refused() -> None:
+    with pytest.raises(MalformedResponseError, match="unknown"):
+        _display_name(_CAFE.encode(), "text/xml; charset=no-such-charset")
+
+
+def test_an_empty_charset_parameter_names_no_charset() -> None:
+    assert _display_name(_CAFE.encode(), "text/xml; charset=") == "Caf\u00e9"
+
+
+@pytest.mark.parametrize(
+    ("codec", "label"),
+    [("iso-8859-1", "ISO-8859-1"), ("utf-8", "UTF-8"), ("utf-16-le", "UTF-16LE")],
+)
+def test_an_entity_declaration_is_refused_whatever_the_document_is_read_as(
+    codec: str, label: str
+) -> None:
+    """The check has to read the document the way the parse will."""
+    doc = '<?xml version="1.0"?><!DOCTYPE d [<!ENTITY e "x">]><d>&e;</d>'
+    with pytest.raises(MalformedResponseError, match="entity"):
+        parse_xml(doc.encode(codec), content_type=f"text/xml; charset={label}")
+
+
+def test_a_utf16_body_without_a_byte_order_mark_is_read_by_its_label() -> None:
+    body = '<d xmlns="DAV:"><x>Caf\u00e9</x></d>'.encode("utf-16-le")
+    parsed = parse_xml(body, content_type="text/xml; charset=UTF-16LE")
+    assert parsed[0].text == "Caf\u00e9"
+
+
+def test_the_charset_of_the_response_is_used_by_parse_multistatus_response() -> None:
+    response = Response()
+    response.status_code = 207
+    response._content = _CAFE.encode("iso-8859-1")
+    response.headers["Content-Type"] = "text/xml; charset=iso-8859-1"
+    parsed = parse_multistatus_response(response)
+    assert parsed.get_response_for_path("/", "a").properties.display_name == "Caf\u00e9"
+
+
 def test_a_lowercase_infinite_timeout_is_not_reported_as_unreadable() -> None:
     body = """<d:activelock xmlns:d="DAV:"><d:locktoken><d:href>urn:a</d:href></d:locktoken>
     <d:timeout>infinite</d:timeout></d:activelock>"""
@@ -836,6 +921,7 @@ def test_parse_mkcol_response_matches_the_rfcs_own_failure_example() -> None:
 
     class _FakeResponse:
         content = body
+        headers: dict[str, str] = {}  # noqa: RUF012
 
     propstats = parse_mkcol_response(_FakeResponse())  # type: ignore[arg-type]
     assert [p.status_code for p in propstats] == [403, 424]
@@ -851,6 +937,7 @@ def test_parse_mkcol_response_is_empty_for_a_body_that_is_not_one() -> None:
 
     class _FakeResponse:
         content = b"plain text error, not XML at all"
+        headers: dict[str, str] = {}  # noqa: RUF012
 
     assert parse_mkcol_response(_FakeResponse()) == []  # type: ignore[arg-type]
 

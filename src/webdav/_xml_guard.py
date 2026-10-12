@@ -59,8 +59,11 @@ def warn_if_expat_is_old() -> None:
     )
 
 
-def check_xml(content: "str | bytes") -> None:
+def check_xml(content: "str | bytes", encoding: "str | None" = None) -> None:
     """Refuse ``content`` if it declares an entity.
+
+    ``encoding`` is the one the document is going to be parsed with, when that is
+    not the one it declares: the check has to read the same document the parse will.
 
     The check reads only up to the root element - where every declaration has to be - so
     it costs nothing on a document of any size.
@@ -70,7 +73,7 @@ def check_xml(content: "str | bytes") -> None:
 
     """
     warn_if_expat_is_old()
-    parser = ParserCreate()
+    parser = ParserCreate(encoding)
     parser.EntityDeclHandler = _entity_declared
     parser.StartElementHandler = _root_reached
     try:

@@ -284,7 +284,9 @@ def parse_lock_response(
             ``<d:activelock>``, or none of them is the lock asked about.
 
     """
-    tree = parse_xml(http_response.content)
+    tree = parse_xml(
+        http_response.content, content_type=http_response.headers.get("Content-Type")
+    )
     elements = tree.findall(f".//{dav('activelock')}")
     if not elements:
         msg = "LOCK response body has no <d:activelock>"

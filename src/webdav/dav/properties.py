@@ -342,7 +342,9 @@ def parse_mkcol_response(http_response: "HTTPResponse") -> "list[PropStat]":
     if not content:
         return []
     try:
-        tree = parse_xml(content)
+        tree = parse_xml(
+            content, content_type=http_response.headers.get("Content-Type")
+        )
     except MalformedResponseError:
         return []
     if split_clark(tree.tag)[1] != "mkcol-response":
