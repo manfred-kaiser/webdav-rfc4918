@@ -22,6 +22,11 @@ from webdav.fs import FileSystem
 from webdav.resource import safe_local_name
 
 
+def _on_windows() -> bool:
+    """Whether local file names follow the Windows rules (a function, so a test can say so)."""
+    return os.name == "nt"
+
+
 class GetTree:
     """The destination tree of one ``get``: what it may write to."""
 
@@ -35,12 +40,21 @@ class GetTree:
         self.written: dict[tuple[int, int], str] = {}
 
     def check(self, local: str) -> None:
-        """Refuse ``local`` if a symlink leads it out of the destination.
+        """Refuse ``local`` if a symlink leads it out of the destination, or the name cannot be a file here.
+
+        On Windows a name that is not a Windows file name (``CON``, ``a:b``, a trailing dot,
+        a backslash) is refused. On every platform a name that is the file of one written
+        before (two names that differ only in case or Unicode form, on a file system that
+        folds them) is refused, instead of one silently replacing the other. A name with a
+        control character (a newline) is refused on every platform.
 
         Raises:
-            OSError: ``local`` leads out of the destination through a symlink.
+            OSError: ``local`` leads out of the destination through a symlink, is not a
+                file name here, or is the file another name of this tree was written to.
 
         """
+        self.check_names(local, windows=_on_windows())
+        self.check_collision(local)
         if not self.contained:
             return
         real = os.path.realpath(local)
@@ -51,14 +65,27 @@ class GetTree:
             )
             raise OSError(errno.ELOOP, msg, local)
 
-    # Prepared, not enforced: ``get`` does not call the two checks below, because they
-    # cannot be tested on real Windows/macOS yet (see issue #5, Windows/macOS CI). They are
-    # pure, work on any platform, and are unit-tested on Linux.
+    # ``check`` calls these two. The collision check works on file identity, so it is the
+    # same on every platform; the Windows names are enforced only where ``_on_windows()``.
+    # Neither has run on real Windows/macOS yet (issue #5, Windows/macOS CI): they are pure
+    # and unit-tested on Linux, with ``_on_windows`` and hard links standing in.
     def check_windows_names(self, local: str) -> None:
         """Refuse a ``local`` under the tree with a part that is not a file name on Windows.
 
         Raises:
             OSError: A part of the path below the tree is not usable on Windows.
+
+        """
+        self.check_names(local, windows=True)
+
+    def check_names(self, local: str, *, windows: bool) -> None:
+        """Refuse a ``local`` under the tree with a part that is not a usable file name.
+
+        Control characters (a newline in a name) are refused everywhere, the Windows rules
+        with ``windows``.
+
+        Raises:
+            OSError: A part of the path below the tree is not usable.
 
         """
         try:
@@ -68,7 +95,7 @@ class GetTree:
             return
         for part in parts:
             try:
-                safe_local_name(part, windows=True)
+                safe_local_name(part, windows=windows)
             except ValueError as exc:
                 raise OSError(errno.EINVAL, str(exc), local) from exc
 
@@ -249,12 +276,12 @@ class GuardedFileSystem(AbstractFileSystem):
         who can swap a directory for a symlink in that moment is not stopped. Keep the
         destination to yourself. (Windows has no ``dir_fd`` to write without a race.)
 
-        The names are the server's, and ``get`` does not vet them for the platform: on Windows
-        a name such as ``CON`` or ``a:b`` is not a plain file, and where the file system folds
-        case or Unicode forms (Windows, macOS) two names of the server can be one file, one
-        silently replacing the other. That is not checked yet (checks are prepared, not
-        enforced; see issue #5, Windows/macOS CI). Vet names yourself with
-        :func:`~webdav.resource.safe_local_name` (``windows=True``) if you need that.
+        The names are the server's. On Windows ``get`` refuses a name that is not a plain file
+        there (``CON``, ``a:b``, a trailing dot or space, a backslash) with an ``OSError``; on
+        every platform it refuses a name that is the file of one it wrote before (two names that
+        differ only in case or Unicode form, on a file system that folds them) instead of
+        replacing it. Both are tested on Linux only (issue #5, Windows/macOS CI). For your own
+        code, :func:`~webdav.resource.safe_local_name` (``windows=True``) is the check.
         """
         self._own_server(rpath)
         tree = None

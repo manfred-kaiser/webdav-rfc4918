@@ -348,12 +348,20 @@ usual cause is a stale `HTTP_PROXY`.
 
 ### Digest authentication
 
-`requests.auth.HTTPDigestAuth` keeps its state (realm, nonce) per thread, not
-per host. With a session without a `base_url` that talks to several servers,
-the second server can be sent a header built from the first one's challenge (a
-hash, not the password). Use one session with a `base_url` per server when you
-use Digest. A challenge the client cannot use (`Digest nonce="n"` without a
-realm) is a `ClientError`, with the original error as its cause.
+RFC 4918 section 20.1 asks clients to support Digest authentication. This
+library does not, and that is a decision about security. Digest is MD5 unless the
+server offers more (RFC 7616 calls MD5 "NOT RECOMMENDED"), it does not check who the
+server is, it does not protect the content, and whoever records an exchange can
+guess the password offline. Over TLS it adds nothing to Basic. A system that has
+to be secure should not use it, so this library has no Digest code of its own. Use
+Basic over `https://` (or a client certificate, see [TLS and mTLS](tls.md)); an
+intranet server with its own certificate is covered there.
+
+`auth=requests.auth.HTTPDigestAuth(...)` is therefore refused with a
+`ClientError` (in the constructor, as `session.auth`, per call and in
+`prepare_request`), rather than half working: an upload with it fails with `408`
+or a timeout, because the body is a stream that cannot be sent twice after the
+server's 401.
 
 ## Retries
 

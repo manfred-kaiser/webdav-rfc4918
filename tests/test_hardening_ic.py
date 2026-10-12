@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 import requests
+from requests.cookies import RequestsCookieJar, extract_cookies_to_jar
 
 from tests import previous_release_pickles as old
 from tests.certificates import Certificates
@@ -824,6 +825,153 @@ def test_a_connection_error_through_an_environment_proxy_says_so(
     assert "trust_env=False" in notes
     assert "trust_env=False" in caplog.text
     assert "proxypw" not in notes + caplog.text
+
+
+# ---------------------------------------------------------------------------
+# allowed_origins
+# ---------------------------------------------------------------------------
+
+
+def test_allowed_origins_refuse_every_other_server_before_anything_is_sent() -> None:
+    with scripted_server(always(OK)) as (ok_url, ok_rec):
+        with scripted_server(always(OK)) as (bad_url, bad_rec):
+            session = Session(allowed_origins=[ok_url], retry=False)
+            assert session.get(f"{ok_url}/x").status_code == 204
+            with pytest.raises(ClientError, match="allowed_origins"):
+                session.get(f"{bad_url}/x")
+    assert bad_rec.requests == []
+    assert len(ok_rec.requests) == 1
+
+
+def test_allowed_origins_take_a_callable_and_a_single_string() -> None:
+    with scripted_server(always(OK)) as (url, _rec):
+        assert (
+            Session(allowed_origins=lambda u: u.startswith(url))
+            .get(f"{url}/x")
+            .status_code
+            == 204
+        )
+        assert Session(allowed_origins=url).get(f"{url}/x").status_code == 204
+        with pytest.raises(ClientError):
+            Session(allowed_origins=lambda _u: False).get(f"{url}/x")
+
+
+def test_allowed_origins_are_checked_at_construction() -> None:
+    with pytest.raises(ValueError, match="allowed_origins"):
+        Session("https://a.example", allowed_origins=["https://b.example"])
+    with pytest.raises(ValueError, match="allowed_origins"):
+        Session(allowed_origins=[])
+    with pytest.raises(ValueError, match="origins like"):
+        Session(allowed_origins=["dav.example.org"])
+    Session("https://a.example", allowed_origins=["https://a.example"])
+
+
+def test_a_redirect_to_a_server_outside_allowed_origins_is_refused() -> None:
+    with scripted_server(always(OK)) as (storage, storage_rec):
+        with scripted_server(lambda _r: redirect(307, f"{storage}/t")) as (url, _rec):
+            session = Session(
+                allowed_origins=[url],
+                redirect_policy=RedirectPolicy.ALL,
+                retry=False,
+            )
+            response = session.put(f"{url}/x", data=b"d")
+            assert response.status_code == 307
+            assert "allowed_origins" in (response.redirect_refusal or "")
+            both = Session(
+                allowed_origins=[url, storage],
+                redirect_policy=RedirectPolicy.ALL,
+                retry=False,
+            )
+            assert both.put(f"{url}/x", data=b"d").status_code == 204
+    assert len(storage_rec.requests) == 1
+
+
+def test_a_pickle_of_the_previous_release_is_not_restricted() -> None:
+    session = pickle.loads(base64.b64decode("".join(old.PLAIN)))
+    assert session.allowed_origins is None
+
+
+def test_allowed_origins_are_kept_by_a_pickle_a_filesystem_and_storage_options() -> (
+    None
+):
+    session = Session(allowed_origins=["https://a.example"])
+    clone = pickle.loads(pickle.dumps(session))
+    with pytest.raises(ClientError):
+        clone.get("https://b.example/x")
+    client = FileSystem("https://a.example", allowed_origins=["https://a.example"])
+    assert client.session.allowed_origins == ("https://a.example",)
+    from webdav.fsspec import WebdavFileSystem
+
+    with pytest.raises(ValueError, match="allowed_origins"):
+        WebdavFileSystem(host="b.example", allowed_origins=["https://a.example"])
+    fs = WebdavFileSystem(host="a.example", allowed_origins=["https://a.example"])
+    assert fs.filesystem.session.allowed_origins == ("https://a.example",)
+
+
+def test_without_allowed_origins_any_url_is_still_requested() -> None:
+    assert Session().allowed_origins is None
+
+
+def test_a_failing_hook_of_the_callers_is_not_turned_into_a_client_error() -> None:
+    def boom(_response: Any, **_kwargs: Any) -> None:
+        raise KeyError("mine")
+
+    with scripted_server(
+        always((401, {"WWW-Authenticate": 'Basic realm="r"'}, b""))
+    ) as (url, _rec):
+        with pytest.raises(KeyError):
+            Session(retry=False).get(f"{url}/x", hooks={"response": boom})
+
+
+# ---------------------------------------------------------------------------
+# write_redirects="same-path"
+# ---------------------------------------------------------------------------
+
+
+def _write_redirect(location: str) -> Any:
+    def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
+        return redirect(307, location) if seen.path == "/a" else OK
+
+    return respond
+
+
+@pytest.mark.parametrize("method", ["put", "delete"])
+def test_a_write_redirect_to_another_path_is_followed_by_default(method: str) -> None:
+    with scripted_server(_write_redirect("/elsewhere")) as (url, rec):
+        response = getattr(Session(retry=False), method)(f"{url}/a")
+    assert response.status_code == 204
+    assert rec.to("/elsewhere")
+
+
+@pytest.mark.parametrize("method", ["put", "delete"])
+def test_same_path_refuses_a_write_redirect_to_another_path(method: str) -> None:
+    with scripted_server(_write_redirect("/elsewhere")) as (url, rec):
+        response = getattr(Session(retry=False, write_redirects="same-path"), method)(
+            f"{url}/a"
+        )
+    assert response.status_code == 307
+    assert "write_redirects" in (response.redirect_refusal or "")
+    assert rec.to("/elsewhere") == []
+
+
+def test_same_path_still_follows_a_trailing_slash_and_leaves_reads_alone() -> None:
+    session = Session(retry=False, write_redirects="same-path")
+    with scripted_server(_write_redirect("/a/")) as (url, rec):
+        assert session.put(f"{url}/a", data=b"x").status_code == 204
+        assert rec.to("/a/")
+    with scripted_server(_write_redirect("/elsewhere")) as (url, rec):
+        assert session.get(f"{url}/a").status_code == 204
+        assert session.propfind(f"{url}/a", depth=0).status_code == 204
+
+
+def test_a_pickle_of_the_previous_release_follows_write_redirects() -> None:
+    session = pickle.loads(base64.b64decode("".join(old.PLAIN)))
+    assert session.write_redirects == "follow"
+
+
+def test_write_redirects_is_validated() -> None:
+    with pytest.raises(ValueError, match="write_redirects"):
+        Session(write_redirects="never")
 
 
 # ---------------------------------------------------------------------------

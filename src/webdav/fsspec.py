@@ -865,6 +865,8 @@ class WebdavFileSystem(GuardedFileSystem):
                 self.filesystem.download_file(
                     rpath, lpath, overwrite=True, callback=cb.relative_update
                 )
+                if tree is not None:
+                    tree.record(os.fspath(lpath))
 
 
 class WebdavFile(AbstractBufferedFile):

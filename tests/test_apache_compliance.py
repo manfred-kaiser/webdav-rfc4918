@@ -747,6 +747,7 @@ _PORTS = {
     "timeout": 8788,
     "limit": 8789,
     "dbm": 8791,
+    "deflate": 8793,
 }
 
 _needs_local_apache = pytest.mark.skipif(
@@ -2600,3 +2601,40 @@ def test_apache_copy_move_and_delete_of_one_source_at_once_have_one_winner_where
     )
     assert deletes.count(204) == 1
     assert all(status >= 400 for status in deletes if status != 204)
+
+
+# ---------------------------------------------------------------------------
+# A server that compresses and sets cookies
+# ---------------------------------------------------------------------------
+
+
+_DEFLATE_CONF = """
+AddOutputFilterByType DEFLATE text/plain text/xml application/xml text/html
+Header always add Set-Cookie "srv=1; Path=/"
+Header always add Set-Cookie "srv2=2; Path=/; HttpOnly"
+"""
+
+
+def test_apache_with_mod_deflate_and_cookies(tmp_path: Path) -> None:
+    """Compressed listings, identity downloads and the cookies a server sets all keep working."""
+    from webdav.fsspec import WebdavFileSystem  # noqa: PLC0415
+
+    with _variant(
+        tmp_path,
+        "deflate",
+        extra_modules=("mod_filter.so", "mod_deflate.so", "mod_headers.so"),
+        extra_conf=_DEFLATE_CONF,
+    ) as url:
+        text = ("Grüße äöü €\n" * 20_000).encode()
+        with FileSystem(url, auth=_Apache.auth) as fs:
+            fs.upload_fileobj(io.BytesIO(text), "/text.txt")
+            assert [r.name for r in fs.ls("/")] == ["text.txt"]
+            fs.download_file("/text.txt", str(tmp_path / "text.txt"))
+            assert (tmp_path / "text.txt").read_bytes() == text
+            with fs.open("/text.txt", "r") as fobj:
+                assert fobj.read(12) == "Grüße äöü €\n"
+            with fs.open("/text.txt", "rb") as fobj:
+                fobj.seek(1000)
+                assert fobj.read(10) == text[1000:1010]
+        fsspec_fs = WebdavFileSystem(url, auth=_Apache.auth)
+        assert fsspec_fs.cat_file("/text.txt", start=5, end=25) == text[5:25]

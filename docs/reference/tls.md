@@ -196,6 +196,41 @@ extension is not marked critical. `False` accepts such chains, which some
 legacy or internal CAs produce. Like a low `minimum_version`, it emits the warning when
 the session is created.
 
+### `pin_sha256`
+
+```python
+tls = TLSOptions(ca_files="company-ca.pem", pin_sha256="3f:..:9a")  # 64 hex digits
+```
+
+The SHA-256 fingerprint of the server's certificate (DER form; colons and
+case do not matter). A connection to a server with another certificate fails
+with an `SSLError` that says so. It is checked on top of verification, not
+instead of it, and it takes the place of the host name check: the pinned
+certificate is the identity. It applies to your server only, never to another
+origin a redirect leads to. A pin breaks at every renewal of the certificate:
+change it together with the certificate. A single certificate in `ca_files` is
+the other way to pin, and survives a renewal with the same key if the CA is
+the same.
+
+## An intranet server with its own certificate
+
+A self-signed certificate (or one from your own CA) on an internal server is the
+better answer to "the server has no TLS": trust that certificate instead of
+turning verification off.
+
+```python
+fs = FileSystem("https://dav.intranet", auth=("user", "password"), verify="server.pem")
+```
+
+`server.pem` is the server's certificate (or your CA's). To also fix the exact
+certificate, add `tls=TLSOptions(ca_files="server.pem", pin_sha256="...")`
+(see [`pin_sha256`](#pin_sha256)).
+
+`verify=False` encrypts too, but it does not check who answers: anyone on the
+path can sit in the middle and read the password. It also warns on every use
+(`TLSHardeningDisabledWarning`). RFC 4918 section 20.1 allows Basic only over a
+secure connection, and a connection that does not authenticate the server is hardly one.
+
 ## Which limits can be turned off, and what warns
 
 | What | Turned off by | Says so |

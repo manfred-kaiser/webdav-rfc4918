@@ -372,13 +372,12 @@ for resource in fs.ls("Photos"):
 control characters. It does not refuse a backslash, a colon or a leading `-`:
 those are ordinary characters of a name on Linux and macOS. The Windows rules
 (device names such as `CON` and `NUL`, a trailing dot or space, a backslash and
-`: " < > | ? *`) apply only with `safe_local_name(name, windows=True)`. Nothing
-turns them on by itself, and `get` does not call this helper: the checks are
-prepared, not enforced, because they cannot be tested on real Windows/macOS
-yet (issue #5, Windows/macOS CI). It is for you, where you create files from
-server names. It does not detect two names that are one file on a
-case-insensitive file system either. Error messages show a name escaped,
-never raw.
+`: " < > | ? *`) apply only with `safe_local_name(name, windows=True)`. The fsspec
+`get` turns them on by itself on Windows, and it refuses two names that end up
+as one file on a case-insensitive file system (the second would replace the
+first); both are tested on Linux only (issue #5, Windows/macOS CI). The helper
+is for you, where you create files from server names. Error messages show a
+name escaped, never raw.
 
 `resource.href` is "as the server wrote it", and a server may write another
 host in it - a reverse proxy does so innocently, a hostile server on purpose.

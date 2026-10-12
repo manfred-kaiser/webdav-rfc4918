@@ -82,6 +82,7 @@ from webdav.transport.deadline import DeadlineAdapter, enforce
 from webdav.transport.guards import (
     NO_AUTH,
     CleartextWarner,
+    check_auth,
     check_base_url,
     check_insecure_transport,
     check_verify,
@@ -597,6 +598,7 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
 
     @auth.setter
     def auth(self, value: "AuthTypes") -> None:
+        check_auth(value)
         self._transport.auth = value
 
     @property
@@ -1139,6 +1141,7 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
     def _fetch_once(
         self, method: str, url: str, policy: RedirectPolicy, kwargs: dict[str, Any]
     ) -> Response:
+        check_auth(kwargs.get("auth"))
         self._warn_if_insecure(url, kwargs)
         caller_headers: dict[str, str] = dict(kwargs.get("headers") or {})
 
@@ -1180,6 +1183,7 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
         also when ``auth`` is given as ``False``, ``()`` or ``""``. The request is
         prepared as it is: whether it may be *sent* is :meth:`send`'s decision.
         """
+        check_auth(request.auth)
         if not request.auth and not self.auth:
             request.auth = NO_AUTH
         return self._transport.prepare_request(request)
@@ -1275,8 +1279,8 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
                 self._explain_transport_error(exc, request.url or "", kwargs)
                 raise
             response.elapsed = timedelta(seconds=time.perf_counter() - started)
-            # Before any response hook runs: ``HTTPDigestAuth`` (and any
-            # hook of the caller's) reads ``.content`` of a 401 to answer
+            # Before any response hook runs: a hook of the
+            # caller's reads ``.content`` of a 401 to answer
             # it - which would be an unbounded, deadline-free read.
             hooks = request.hooks.get("response") if request.hooks else None
             if not kwargs["stream"] or (hooks and response.status_code in (401, 407)):

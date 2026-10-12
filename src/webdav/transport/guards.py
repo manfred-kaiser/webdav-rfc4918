@@ -60,6 +60,28 @@ class _NoAuth(requests.auth.AuthBase):
 NO_AUTH = _NoAuth()
 
 
+def check_auth(auth: object) -> None:
+    """Refuse ``requests.auth.HTTPDigestAuth``: Digest authentication is not supported.
+
+    It is MD5 unless the server offers more, does not authenticate the server, does not
+    protect the content and allows guessing the password offline; and a request with a
+    body cannot be answered to its challenge, because the body is a stream (see the
+    Digest section of ``docs/reference/session.md``).
+
+    Raises:
+        ClientError: ``auth`` is an ``HTTPDigestAuth``.
+
+    """
+    if isinstance(auth, requests.auth.HTTPDigestAuth):
+        msg = (
+            "Digest authentication is not supported: it is weak (MD5, the server is not "
+            "authenticated, the content is not protected). Use Basic authentication "
+            "over https, or a client certificate (docs/reference/session.md, "
+            '"Digest authentication")'
+        )
+        raise ClientError(msg)
+
+
 def split_url(url: str) -> "urllib.parse.SplitResult":
     """``urlsplit`` that reports an unparseable URL as the library's own error.
 
@@ -301,6 +323,7 @@ def scrub_exception(exc: BaseException, url: str) -> None:
 __all__ = [
     "NO_AUTH",
     "CleartextWarner",
+    "check_auth",
     "check_base_url",
     "check_insecure_transport",
     "check_verify",

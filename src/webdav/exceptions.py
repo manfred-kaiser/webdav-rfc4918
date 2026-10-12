@@ -15,6 +15,7 @@ regular HTTP 4xx/5xx codes a WebDAV server commonly returns.
 
 import copy
 import inspect
+import logging
 import warnings
 import xml.etree.ElementTree as ET
 from http import HTTPStatus
@@ -27,10 +28,12 @@ import requests.models
 import requests.structures
 
 from webdav._base_exceptions import ClientError, WebDAVError
-from webdav._xml_guard import check_xml
+from webdav._xml_guard import UnsafeXMLError, check_xml
 from webdav.methods import WRITE_METHODS
 from webdav.transport.body import content_within
 from webdav.url_safety import escape_text, redact_url
+
+_LOGGER = logging.getLogger("webdav")
 
 if TYPE_CHECKING:
     import types
@@ -361,13 +364,24 @@ _MAX_ERROR_BODY_SIZE = 1 * 1024 * 1024
 
 def _parse_error_codes(response: "Response") -> "frozenset[str]":
     content = content_within(response, max_size=_MAX_ERROR_BODY_SIZE)
-    if not content:
+    # ``content_within`` bounds a body it reads; one the session already read comes back as it
+    # is, up to ``max_response_size`` - far more than an error body is worth parsing.
+    if not content or len(content) > _MAX_ERROR_BODY_SIZE:
         return frozenset()
     try:
         # See webdav.dav.xml_utils's module docstring: stdlib expat never resolves
         # external entities; a document that declares one is refused (a ValueError).
         check_xml(content)
         tree = ET.fromstring(content)  # noqa: S314 # nosec B314
+    except UnsafeXMLError as exc:
+        # The status is the caller's to report; what this drops is the detail. Said once
+        # in the log, without the server's text.
+        _LOGGER.warning(
+            "ignoring the XML error body of a response (status %s): %s",
+            response.status_code,
+            str(exc).split(":", maxsplit=1)[0],
+        )
+        return frozenset()
     except (ET.ParseError, LookupError, ValueError, UnicodeError):
         return frozenset()
     tag = tree.tag

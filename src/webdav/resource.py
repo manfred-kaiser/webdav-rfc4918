@@ -30,10 +30,10 @@ def safe_local_name(name: str, *, windows: bool = False) -> str:
     backslash, a colon or a leading ``-`` is an ordinary character of a name on Linux and
     macOS, and not refused. The Windows rules - device names (``CON``, ``NUL``, ``COM1``,
     ...), a name that ends in a dot or a space, a backslash and ``: " < > | ? *`` - apply
-    only with ``windows=True``: nothing turns them on by itself, because they could not be
-    tested on real Windows yet (issue #5, Windows/macOS CI). Two names that are one file on
-    a case-insensitive file system are not detected either, and neither does ``get`` check
-    any of this for you: this helper is for callers who create files from server names.
+    only with ``windows=True``. The fsspec ``get`` turns them on by itself on Windows, and
+    refuses two names that end up as one file on a case-insensitive file system; they could
+    not be tested on real Windows yet (issue #5, Windows/macOS CI). For your own code that
+    creates files from server names, this helper is the check.
 
     Raises:
         ValueError: ``name`` is not usable as a file name.

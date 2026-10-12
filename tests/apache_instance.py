@@ -170,9 +170,9 @@ DocumentRoot "{instance_dir}/dav-root"
     Dav On
     Options None
     AllowOverride None
-    AuthType Basic
-    AuthName "webdav-rfc4918 test"
-    AuthUserFile "{instance_dir}/htpasswd"
+    AuthType {auth_type}
+    AuthName "{realm}"
+{auth_directives}
     Require valid-user
 </Directory>
 
@@ -210,12 +210,14 @@ def write_instance(
     lock_db: bool = True,
     without_modules: "frozenset[str]" = frozenset(),
     extra_conf: str = "",
+    extra_modules: "tuple[str, ...]" = (),
 ) -> Path:
     """Create/refresh the instance's config, auth file and directories; return the config path.
 
     ``port``, ``lock_db``, ``without_modules`` (``.so`` filenames from
     ``REQUIRED_MODULES`` to leave out) and ``extra_conf`` (more server-level
-    directives, appended as they are) exist for the tests that need a second
+    directives, appended as they are) and ``extra_modules`` (more ``.so``
+    filenames to load, e.g. ``mod_deflate.so``) exist for the tests that need a second
     instance next to the shared one, configured differently: e.g. without a
     ``DavLockDB`` Apache still advertises locking but cannot grant a lock.
 
@@ -248,6 +250,14 @@ def write_instance(
         for filename, directive in (*REQUIRED_MODULES, *profile.extra_modules)
         if filename not in profile.built_in and filename not in without_modules
     )
+    for filename in extra_modules:
+        if not (profile.module_dir / filename).exists():
+            msg = f"missing: {profile.module_dir / filename}"
+            raise RuntimeError(msg)
+        directive = filename.removeprefix("mod_").removesuffix(".so") + "_module"
+        load_modules += f"\nLoadModule {directive:<22} {profile.module_dir / filename}"
+    realm = "webdav-rfc4918 test"
+    auth_directives = f'    AuthUserFile "{instance_dir}/htpasswd"'
     conf_file = instance_dir / "httpd.conf"
     conf_file.write_text(
         HTTPD_CONF_TEMPLATE.format(
@@ -255,6 +265,9 @@ def write_instance(
             load_modules=load_modules,
             lock_db=LOCK_DB_DIRECTIVE if lock_db else "# no DavLockDB on purpose",
             extra_conf=extra_conf,
+            auth_type="Basic",
+            realm=realm,
+            auth_directives=auth_directives,
             host=HOST,
             port=port,
         )
