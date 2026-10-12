@@ -346,6 +346,26 @@ included; for `https://` it only sees the host and port. `trust_env=False`
 through a proxy says so in a note on the exception and in the log, because the
 usual cause is a stale `HTTP_PROXY`.
 
+### Basic authentication and non-ASCII characters
+
+RFC 7617 leaves open which encoding the user name and password have. `requests`
+sends ISO-8859-1; curl, HTTPie and the browsers send UTF-8, and so do the
+servers that store them that way (Apache with an `htpasswd` file made on a UTF-8
+system, Nextcloud). So `auth=("üser", "päss")` sends UTF-8 here, and a name like
+`名前`, which ISO-8859-1 cannot hold, works. ASCII credentials are the same bytes
+as before.
+
+For a server that expects ISO-8859-1, or credentials you have as bytes:
+
+```python
+from webdav import BasicAuth, Session
+
+session = Session("https://dav.example", auth=BasicAuth("üser", "päss", encoding="latin-1"))
+```
+
+A user name with a colon is a `ClientError`: the server would read the name up to
+the colon (RFC 7617 section 2). A password may contain one. `dav` always sends UTF-8.
+
 ### Digest authentication
 
 RFC 4918 section 20.1 asks clients to support Digest authentication. This

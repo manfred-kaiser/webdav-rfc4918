@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 import requests.auth
 
 from webdav.exceptions import ClientError, InsecureTransportWarning, warn_at_caller
+from webdav.transport.basic_auth import as_basic
 from webdav.transport.tls import (
     check_verify_type,
     verification_on,
@@ -61,7 +62,9 @@ NO_AUTH = _NoAuth()
 
 
 def check_auth(auth: object) -> None:
-    """Refuse ``requests.auth.HTTPDigestAuth``: Digest authentication is not supported.
+    """Refuse ``requests.auth.HTTPDigestAuth``, and Basic credentials that cannot be sent.
+
+    Digest authentication is not supported.
 
     It is MD5 unless the server offers more, does not authenticate the server, does not
     protect the content and allows guessing the password offline; and a request with a
@@ -69,7 +72,8 @@ def check_auth(auth: object) -> None:
     Digest section of ``docs/reference/session.md``).
 
     Raises:
-        ClientError: ``auth`` is an ``HTTPDigestAuth``.
+        ClientError: ``auth`` is an ``HTTPDigestAuth``, or a user name with a colon, or
+            credentials that cannot be encoded.
 
     """
     if isinstance(auth, requests.auth.HTTPDigestAuth):
@@ -80,6 +84,8 @@ def check_auth(auth: object) -> None:
             '"Digest authentication")'
         )
         raise ClientError(msg)
+    # Now, not at the first request: a user name with a colon, a name that cannot be encoded.
+    as_basic(auth)
 
 
 def split_url(url: str) -> "urllib.parse.SplitResult":

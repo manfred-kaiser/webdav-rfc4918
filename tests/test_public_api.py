@@ -15,6 +15,7 @@ from webdav import Session
 
 _PACKAGE_ALL = [
     "ActiveLock",
+    "BasicAuth",
     "ClientError",
     "FeatureDetection",
     "FileSystem",

@@ -35,6 +35,8 @@ REQUIRED_MODULES = (
 )
 TEST_USER = "testuser"
 TEST_PASSWORD = "testpass123"  # noqa: S105
+#: More users, with non-ASCII names and passwords: ``htpasswd`` stores the bytes it is given, UTF-8.
+UNICODE_USERS = (("üser", "päss"), ("名前", "пароль"))  # noqa: S105
 HOST = "127.0.0.1"
 PORT = 8765
 
@@ -244,6 +246,12 @@ def write_instance(
         subprocess.run(
             [htpasswd_bin, "-bc", str(htpasswd_file), TEST_USER, TEST_PASSWORD],
             check=True,
+        )
+    for user, password in UNICODE_USERS:
+        subprocess.run(
+            [htpasswd_bin, "-b", str(htpasswd_file), user, password],
+            check=True,
+            capture_output=True,
         )
     load_modules = "\n".join(
         f"LoadModule {directive:<22} {profile.module_dir / filename}"

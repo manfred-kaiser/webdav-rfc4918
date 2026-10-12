@@ -60,6 +60,7 @@ from webdav.methods import Method
 from webdav.resource import Resource
 from webdav.response import Response
 from webdav.session import Session
+from webdav.transport.basic_auth import BasicAuth
 from webdav.transport.redirects import RedirectPolicy
 from webdav.transport.tls import TLSOptions
 
@@ -68,6 +69,7 @@ __version__ = "1.2.0"
 
 __all__ = [
     "ActiveLock",
+    "BasicAuth",
     "ClientError",
     "FeatureDetection",
     "FileSystem",

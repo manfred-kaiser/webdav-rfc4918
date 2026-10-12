@@ -163,6 +163,8 @@ module. It can also be used directly for a custom conditional request.
 ## TLS
 
 ```{eval-rst}
+.. autoclass:: webdav.BasicAuth
+
 .. autoclass:: webdav.transport.tls.TLSOptions
    :members:
 

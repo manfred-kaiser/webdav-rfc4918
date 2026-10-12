@@ -42,7 +42,12 @@ import pytest
 import requests
 
 from tests import apache_instance
-from webdav import FileSystem, ResourceAlreadyExistsError, ResourceLockedError
+from webdav import (
+    BasicAuth,
+    FileSystem,
+    ResourceAlreadyExistsError,
+    ResourceLockedError,
+)
 from webdav.dav.locks import EXCLUSIVE, SHARED
 from webdav.exceptions import (
     ForbiddenError,
@@ -2638,3 +2643,38 @@ def test_apache_with_mod_deflate_and_cookies(tmp_path: Path) -> None:
                 assert fobj.read(10) == text[1000:1010]
         fsspec_fs = WebdavFileSystem(url, auth=_Apache.auth)
         assert fsspec_fs.cat_file("/text.txt", start=5, end=25) == text[5:25]
+
+
+# ---------------------------------------------------------------------------
+# Basic authentication with non-ASCII credentials (RFC 7617)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("user", "password"), apache_instance.UNICODE_USERS)
+def test_apache_accepts_non_ascii_credentials_sent_as_utf8(
+    user: str, password: str
+) -> None:
+    """``htpasswd`` stores the bytes it was given (UTF-8); a client has to send the same ones."""
+    assert _Apache.url is not None
+    if _Apache.auth != (apache_instance.TEST_USER, apache_instance.TEST_PASSWORD):
+        pytest.skip("the users exist only on the instance this suite starts")
+    with FileSystem(_Apache.url, auth=(user, password)) as fs:
+        assert fs.exists("/")
+    with FileSystem(_Apache.url, auth=(user, password + "x")) as fs:
+        with pytest.raises(HTTPStatusError) as caught:
+            fs.exists("/")
+        assert caught.value.status_code == 401
+
+
+def test_apache_does_not_know_the_latin1_form_of_a_utf8_password() -> None:
+    """What ``requests`` sends for ``(user, password)``, and the reason for UTF-8 by default."""
+    assert _Apache.url is not None
+    if _Apache.auth != (apache_instance.TEST_USER, apache_instance.TEST_PASSWORD):
+        pytest.skip("the users exist only on the instance this suite starts")
+    user, password = apache_instance.UNICODE_USERS[0]
+    with FileSystem(
+        _Apache.url, auth=BasicAuth(user, password, encoding="latin-1")
+    ) as fs:
+        with pytest.raises(HTTPStatusError) as caught:
+            fs.exists("/")
+        assert caught.value.status_code == 401

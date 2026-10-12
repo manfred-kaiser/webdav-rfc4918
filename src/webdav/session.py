@@ -77,6 +77,7 @@ from webdav.exceptions import (
 )
 from webdav.methods import RETRYABLE_METHODS, Method
 from webdav.response import Response
+from webdav.transport.basic_auth import as_basic
 from webdav.transport.body import read_bounded, read_response
 from webdav.transport.deadline import DeadlineAdapter, enforce
 from webdav.transport.guards import (
@@ -1186,6 +1187,13 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
         check_auth(request.auth)
         if not request.auth and not self.auth:
             request.auth = NO_AUTH
+        elif request.auth:
+            request.auth = as_basic(request.auth)
+        elif request.auth is None:
+            # The session's own ``auth`` is merged in by ``requests`` only when the request
+            # has none (``auth=False`` keeps beating it): converted here, so both reach the
+            # server as UTF-8, see :mod:`webdav.transport.basic_auth`.
+            request.auth = as_basic(self.auth)
         return self._transport.prepare_request(request)
 
     def _dispatch(self, method: str, url: str, **kwargs: Any) -> Response:
