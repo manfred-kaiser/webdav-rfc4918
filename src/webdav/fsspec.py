@@ -118,6 +118,8 @@ def _tuple_from_json(value: Any) -> Any:
     return tuple(value) if isinstance(value, list) else value
 
 
+# fsspec leaves out what it cannot do by raising NotImplementedError (fsid, sign): pylint calls that abstract
+# pylint: disable-next=abstract-method
 class WebdavFileSystem(GuardedFileSystem):
     """Provides access to a WebDAV server through the fsspec API."""
 
