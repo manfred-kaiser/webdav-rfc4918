@@ -113,7 +113,8 @@ any of them parse, subclass them and set `response_class` on the
 ## Server features
 
 `Session.features_for` returns a `FeatureDetection`, one per server,
-cached.
+cached. It is meant to be read, not built; fields may be added in a
+later release.
 
 ```{eval-rst}
 .. autoclass:: webdav.dav.features.FeatureDetection

@@ -19,6 +19,8 @@ class FeatureDetection:
     Immutable, because one instance is cached per server and handed to every
     caller: a caller that could change it would change it for all of them.
     ``FeatureDetection()`` is the "nothing known" state.
+
+    Meant to be read, not built; fields may be added in a later release.
     """
 
     supports_ranges: bool = False

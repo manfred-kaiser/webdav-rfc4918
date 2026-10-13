@@ -365,27 +365,57 @@ class FileSystem:
         self._remote.send(Method.PROPPATCH, path, data=data)
 
     def content_length(self, path: str) -> "int | None":
-        """Return the ``getcontentlength`` property."""
+        """Return the ``getcontentlength`` property.
+
+        One request per call. For several properties, use :meth:`info` or
+        :meth:`get_props` with ``props=[...]``.
+
+        """
         return self.get_props(path, props=["content_length"]).content_length
 
     def created(self, path: str) -> "datetime | None":
-        """Return the ``creationdate`` property."""
+        """Return the ``creationdate`` property.
+
+        One request per call. For several properties, use :meth:`info` or
+        :meth:`get_props` with ``props=[...]``.
+
+        """
         return self.get_props(path, props=["created"]).created
 
     def modified(self, path: str) -> "datetime | None":
-        """Return the ``getlastmodified`` property."""
+        """Return the ``getlastmodified`` property.
+
+        One request per call. For several properties, use :meth:`info` or
+        :meth:`get_props` with ``props=[...]``.
+
+        """
         return self.get_props(path, props=["modified"]).modified
 
     def etag(self, path: str) -> "str | None":
-        """Return the ``getetag`` property."""
+        """Return the ``getetag`` property.
+
+        One request per call. For several properties, use :meth:`info` or
+        :meth:`get_props` with ``props=[...]``.
+
+        """
         return self.get_props(path, props=["etag"]).etag
 
     def content_type(self, path: str) -> "str | None":
-        """Return the ``getcontenttype`` property."""
+        """Return the ``getcontenttype`` property.
+
+        One request per call. For several properties, use :meth:`info` or
+        :meth:`get_props` with ``props=[...]``.
+
+        """
         return self.get_props(path, props=["content_type"]).content_type
 
     def content_language(self, path: str) -> "str | None":
-        """Return the ``getcontentlanguage`` property."""
+        """Return the ``getcontentlanguage`` property.
+
+        One request per call. For several properties, use :meth:`info` or
+        :meth:`get_props` with ``props=[...]``.
+
+        """
         return self.get_props(path, props=["content_language"]).content_language
 
     # -- locking ----------------------------------------------------------
