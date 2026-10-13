@@ -9,6 +9,25 @@ from tests.credentials import AUTH
 from webdav import FileSystem, Session
 
 
+_PROXY_VARIABLES = (
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_proxy_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests talk to local servers directly, whatever proxy the machine running them is behind."""
+    for name in _PROXY_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def storage_dir(tmp_path: Path) -> Path:
     """A fresh local directory backing the test WebDAV server."""
