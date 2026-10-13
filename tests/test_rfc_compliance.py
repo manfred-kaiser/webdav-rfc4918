@@ -884,7 +884,10 @@ def test_build_mkcol_body_matches_the_rfcs_own_shape() -> None:
     """§3.4's own example request body: <D:mkcol><D:set><D:prop>resourcetype + displayname."""
     body = build_mkcol_body(
         {
-            "resourcetype": Element("{http://example.com/ns/}special-resource"),
+            "resourcetype": [
+                Element("{DAV:}collection"),
+                Element("{http://example.com/ns/}special-resource"),
+            ],
             "displayname": "Special Resource",
         }
     )
@@ -892,11 +895,32 @@ def test_build_mkcol_body_matches_the_rfcs_own_shape() -> None:
     assert tree.tag == "{DAV:}mkcol"
     prop_el = tree.find("{DAV:}set/{DAV:}prop")
     assert prop_el is not None
-    assert (
-        prop_el.find("{DAV:}resourcetype/{http://example.com/ns/}special-resource")
-        is not None
-    )
+    assert [child.tag for child in prop_el.find("{DAV:}resourcetype") or []] == [
+        "{DAV:}collection",
+        "{http://example.com/ns/}special-resource",
+    ]
     assert prop_el.findtext("{DAV:}displayname") == "Special Resource"
+
+
+def test_build_mkcol_body_takes_a_single_element_as_the_one_resource_type() -> None:
+    body = build_mkcol_body({"resourcetype": Element("{DAV:}collection")})
+    assert parse_xml(body).find("{DAV:}set/{DAV:}prop/{DAV:}resourcetype/{DAV:}collection") is not None
+
+
+@pytest.mark.parametrize(
+    "resourcetype",
+    [
+        Element("{http://example.com/ns/}special-resource"),
+        [Element("{http://example.com/ns/}special-resource")],
+        [],
+        "collection",
+    ],
+)
+def test_build_mkcol_body_refuses_a_resourcetype_without_collection(
+    resourcetype: object,
+) -> None:
+    with pytest.raises(ValueError, match="must include <d:collection/>"):
+        build_mkcol_body({"resourcetype": resourcetype})  # type: ignore[dict-item]
 
 
 def test_build_mkcol_body_needs_at_least_one_property() -> None:

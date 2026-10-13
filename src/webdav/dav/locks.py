@@ -408,6 +408,25 @@ class LockRegistry:
                 if not entries:
                     del self._held[key]
 
+    def discard_within(self, url: str) -> None:
+        """Forget every lock held on ``url`` and on anything below it.
+
+        For a resource the server has deleted or moved away: a lock is on the resource
+        (RFC 4918 sec. 9.6 and 7.6), and it does not outlive it. Locks on its ancestors stay.
+        """
+        try:
+            origin, path = self._key(url)
+        except ClientError:
+            return
+        prefix = path if path == "/" else path + "/"
+        with self._mutex:
+            for key in list(self._held):
+                held_origin, held_path = key
+                if held_origin == origin and (
+                    held_path == path or held_path.startswith(prefix)
+                ):
+                    del self._held[key]
+
     def replace_token(self, old: str, new: str) -> None:
         """Swap a token after a refresh (RFC 4918 sec. 9.10.2)."""
         check_token(new)
@@ -588,11 +607,17 @@ class LockRegistry:
         If request header." That includes a lock on the *parent* of either
         (sec. 7.4: a lock on a collection covers its membership: the
         source's parent loses a member on a MOVE, the destination's gains
-        one), and - for a MOVE, which takes the source and all it holds away -
-        locks on members of the source. Every lock touched is presented as a
-        tagged list of its own resource - a plain token would only speak about
-        the request's.
+        one), locks on members of the destination (with ``Overwrite: T`` both methods
+        replace it together with its members), and - for a MOVE, which takes the
+        source and all it holds away - locks on members of the source. Every lock
+        touched is presented as a tagged list of its own resource - a plain token
+        would only speak about the request's.
         """
+        # Below the destination: with ``Overwrite: T`` the server deletes what is there first
+        # (sec. 9.9.3), members and their locks too (sec. 9.9.6: "every resource, both source
+        # and destination, anywhere in the scope of the method").
         return self.if_header(
-            source, destination, include_below=(source,) if moves else ()
+            source,
+            destination,
+            include_below=(source, destination) if moves else (destination,),
         )

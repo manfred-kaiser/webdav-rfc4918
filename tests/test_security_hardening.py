@@ -16,7 +16,7 @@ import pytest
 import requests
 
 from tests.certificates import Certificates
-from tests.scripted_server import OK, Seen, always, redirect, scripted_server
+from tests.scripted_server import OK, Reply, Seen, always, redirect, scripted_server
 from webdav import FileSystem, RedirectPolicy, Session, exceptions
 from webdav.dav.conditional import Condition, build_if_header_single
 from webdav.dav.locks import LockRegistry
@@ -541,8 +541,21 @@ def test_a_shared_lock_response_selects_the_lock_that_was_asked_about() -> None:
         assert refreshed.owner == "me"
 
 
+_FOUND = (
+    b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/a</d:href>'
+    b"<d:propstat><d:prop><d:resourcetype/></d:prop><d:status>HTTP/1.1 200 OK</d:status>"
+    b"</d:propstat></d:response></d:multistatus>"
+)
+
+
 def test_a_412_is_a_precondition_failure_not_necessarily_an_existing_resource() -> None:
-    with scripted_server(always((412, {}, b""))) as (url, _rec):
+    def respond(seen: Seen) -> Reply:
+        # A 412 for the upload; the resource is there (a PROPFIND finds it).
+        if seen.method == "PROPFIND":
+            return 207, {}, _FOUND
+        return 412, {}, b""
+
+    with scripted_server(respond) as (url, _rec):
         session = Session(retry=False, raise_on_error=True)
         fs = FileSystem.from_session(session)
         with pytest.raises(exceptions.PreconditionFailedError) as excinfo:

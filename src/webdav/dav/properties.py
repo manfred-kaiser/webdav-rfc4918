@@ -27,7 +27,7 @@ from webdav.exceptions import MalformedResponseError
 from webdav.transport.parse_utils import parse_uint
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
     from datetime import datetime
 
     from requests import Response as HTTPResponse
@@ -254,7 +254,7 @@ def build_propfind_body(
 
 
 def build_proppatch_body(
-    set_props: "dict[str | PropName, str | Element] | None" = None,
+    set_props: "dict[str | PropName, str | Element | Sequence[Element]] | None" = None,
     remove_props: "Iterable[str | PropName] | None" = None,
 ) -> str:
     """Build a PROPPATCH request body (RFC 4918 §9.2).
@@ -262,9 +262,10 @@ def build_proppatch_body(
     Args:
         set_props: Properties to set, mapping a name (see
             :func:`build_propfind_body` for the accepted name forms) to
-            either a plain text value or a pre-built
-            :class:`~xml.etree.ElementTree.Element` for a complex/typed
-            value.
+            a plain text value, a pre-built
+            :class:`~xml.etree.ElementTree.Element` (the one child of the
+            property) or a list of them (its children, in order) for a
+            complex/typed value.
         remove_props: Properties to remove.
 
     """
@@ -285,43 +286,62 @@ def build_proppatch_body(
     return to_xml_string(root)
 
 
-def _build_set_element(set_props: "dict[str | PropName, str | Element]") -> Element:
+def _build_set_element(
+    set_props: "dict[str | PropName, str | Element | Sequence[Element]]",
+) -> Element:
     """Build a ``<d:set><d:prop>...</d:prop></d:set>`` block (shared by PROPPATCH and MKCOL)."""
     set_el = Element("{DAV:}set")
     prop_el = sub_dav_element(set_el, "prop")
     for name, value in set_props.items():
         namespace, local_name = _resolve_name(name)
         tag = clark(namespace, local_name)
+        el = Element(tag)
         if isinstance(value, Element):
-            wrapper = Element(tag)
-            wrapper.append(value)
-            prop_el.append(wrapper)
-        else:
-            el = Element(tag)
-            if not isinstance(value, str):
-                msg = f"property value for {name!r} must be str or Element, got {type(value).__name__}"
-                raise TypeError(msg)
+            el.append(value)
+        elif isinstance(value, str):
             el.text = value
-            prop_el.append(el)
+        elif isinstance(value, list | tuple) and all(
+            isinstance(child, Element) for child in value
+        ):
+            el.extend(value)
+        else:
+            msg = f"property value for {name!r} must be str or Element (or a list of Element), got {type(value).__name__}"
+            raise TypeError(msg)
+        prop_el.append(el)
     return set_el
 
 
-def build_mkcol_body(set_props: "dict[str | PropName, str | Element]") -> str:
+def build_mkcol_body(
+    set_props: "dict[str | PropName, str | Element | Sequence[Element]]",
+) -> str:
     """Build an Extended MKCOL request body (RFC 5689 sec. 3).
 
     Args:
         set_props: Properties to set on the collection as it is created -
             see :func:`build_proppatch_body` for the accepted name/value
             forms. To create a collection of a non-default type, include
-            ``"resourcetype"`` with an :class:`~xml.etree.ElementTree.Element`
-            whose children are the resource type elements - ``<d:collection/>``
-            itself MUST be among them for the result to still be a collection
-            (sec. 3).
+            ``"resourcetype"`` with a list of the resource type elements
+            (``[Element("{DAV:}collection"), Element("{urn:x}special")]``) -
+            ``<d:collection/>`` itself MUST be among them for the result to
+            still be a collection (sec. 3).
+
+    Raises:
+        ValueError: There is nothing to set, or ``resourcetype`` is given without
+            ``<d:collection/>`` among its elements.
 
     """
     if not set_props:
         msg = "an Extended MKCOL needs at least one property to set (RFC 5689 sec. 3)"
         raise ValueError(msg)
+    for name, value in set_props.items():
+        if _resolve_name(name) != (DAV_NAMESPACE, "resourcetype"):
+            continue
+        types = [value] if isinstance(value, Element) else value
+        if not isinstance(types, list | tuple | str):
+            continue  # not a usable value: _build_set_element says so
+        if dav("collection") not in {getattr(child, "tag", None) for child in types}:
+            msg = "the resourcetype of an Extended MKCOL must include <d:collection/> (RFC 5689 sec. 3)"
+            raise ValueError(msg)
     root = Element("{DAV:}mkcol")
     root.append(_build_set_element(set_props))
     return to_xml_string(root)

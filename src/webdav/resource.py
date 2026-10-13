@@ -90,6 +90,12 @@ class Resource(str):  # noqa: SLOT000 - a str subclass cannot have a non-empty _
     """``getcontentlanguage``, or ``None``."""
     display_name: "str | None"
     """``displayname``, or ``None``."""
+    status: "int | None"
+    """The status the server gave for this resource in a listing when it was not a success
+    (``403`` for a member the account may not read), else ``None``.
+
+    The other fields are empty then, and :attr:`is_dir` is ``False`` whatever the resource is.
+    """
 
     def __new__(
         cls,
@@ -104,6 +110,7 @@ class Resource(str):  # noqa: SLOT000 - a str subclass cannot have a non-empty _
         content_type: "str | None" = None,
         content_language: "str | None" = None,
         display_name: "str | None" = None,
+        status: "int | None" = None,
     ) -> Self:
         """Create a resource named ``name``."""
         self = super().__new__(cls, name)
@@ -116,6 +123,7 @@ class Resource(str):  # noqa: SLOT000 - a str subclass cannot have a non-empty _
         self.content_type = content_type
         self.content_language = content_language
         self.display_name = display_name
+        self.status = status
         return self
 
     @property
@@ -145,6 +153,7 @@ class Resource(str):  # noqa: SLOT000 - a str subclass cannot have a non-empty _
             "content_type": self.content_type,
             "content_language": self.content_language,
             "display_name": self.display_name,
+            "status": self.status,
         }
 
     def __getnewargs_ex__(self) -> "tuple[tuple[str], dict[str, Any]]":

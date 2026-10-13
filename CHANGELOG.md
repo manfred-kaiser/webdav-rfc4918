@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `dav lock` and `dav unlock`.
 - `BasicAuth(user, password, encoding=)`.
 - `FileSystem.walk(onerror=)`, `follow_symlinks` on `upload_file`, `safe_local_name()`, `Resource.basename`, `ActiveLock.timeout_raw`.
+- `Resource.status`: the error status a listing gives for a member (`403`), else `None`.
+- `set_props` and `mkdir(set_props=)` take a list of elements as a property value.
 
 ### Changed
 
@@ -39,9 +41,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - HTTP dates without a zone are timezone-aware UTC.
 - `fs.transaction` uploads at the commit and discards on error. Pipe uploads are sent chunked.
 - The `dav` URL userinfo is percent-decoded; a password without a user is an error.
+- An Extended MKCOL `resourcetype` without `collection` is a `ValueError`. `depth_header` refuses `Depth: 0` for `MOVE`.
 
 ### Fixed
 
+- A PROPPATCH `propstat` that fails without naming a property raises `MultiStatusError`.
+- `info`, `get_props`, `exists` and `ls` follow a status given inside a `207`: `404` is not found, other errors raise. `ls` drops a `404` member and keeps the others.
+- COPY and MOVE send the lock tokens of locked members below the destination.
+- A lock is forgotten after its resource was deleted or moved.
+- A lock the server lists without a token, or does not list at all, is not forgotten after a `412`.
+- A failed `OPTIONS` (`503`, `401`, ...) is not cached by `features_for`.
+- A `412` on an upload to a missing path is a `PreconditionFailedError`, not "already exists".
+- `mkdir` with a full URL sends the trailing slash. `Destination` has no `.` or `..` segments.
 - Files Apache labels with a `Content-Encoding` (`AddEncoding x-gzip .gz`) can be uploaded, listed and downloaded; a download gives the stored bytes.
 - `HTTPDigestAuth` as `auth` is refused with a `ClientError`; an upload with it never worked.
 - A user name with a colon is a `ClientError`.

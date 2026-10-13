@@ -263,7 +263,10 @@ def test_a_delete_or_move_of_an_ancestor_presents_the_locks_below_it() -> None:
         session = Session(retry=False)
         session.locks.add(f"{url}/d/f", "opaquelocktoken:abc", "0")
         session.delete(f"{url}/d")
+        # The delete took the lock with it; hold it again for the next request.
+        session.locks.add(f"{url}/d/f", "opaquelocktoken:abc", "0")
         session.move(f"{url}/d", destination=f"{url}/e")
+        session.locks.add(f"{url}/d/f", "opaquelocktoken:abc", "0")
         session.copy(f"{url}/d", destination=f"{url}/e2")
     delete, move, copy = rec.requests
     assert f"<{url}/d/f> (<opaquelocktoken:abc>)" in delete.headers["if"]

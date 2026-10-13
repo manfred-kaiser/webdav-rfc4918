@@ -15,6 +15,7 @@ regular HTTP 4xx/5xx codes a WebDAV server commonly returns.
 
 import copy
 import inspect
+import io
 import logging
 import warnings
 import xml.etree.ElementTree as ET
@@ -763,3 +764,30 @@ def raise_for_status(response: "Response", path: str | None = None) -> None:
         return
     exc_cls = STATUS_CODE_EXCEPTIONS.get(response.status_code, HTTPStatusError)
     raise exc_cls(response, path=path)
+
+
+def raise_for_member_status(
+    status_code: int, *, url: str, path: str | None = None
+) -> None:
+    """Raise what ``status_code`` would raise as an HTTP status - for a resource a 207 body reports it for.
+
+    A ``<status>`` in a ``<response>`` of a multistatus (RFC 4918 sec. 13) is the status of that
+    resource as a whole. Anything below 300 is left alone. The exception carries a response made
+    here, with that status and ``url``, and no body.
+
+    Raises:
+        RedirectNotFollowedError: A 3xx status.
+        HTTPStatusError: A 4xx or 5xx status (the registered subclass, if there is one).
+
+    """
+    if status_code < 300:
+        return
+    member = requests.models.Response()
+    member.status_code = status_code
+    member.url = url
+    member.reason = _phrase_for(status_code)
+    member.raw = io.BytesIO(b"")  # no body
+    if status_code < 400:
+        member.redirect_refusal = "the multistatus reports it for this resource"  # type: ignore[attr-defined]
+        raise RedirectNotFollowedError(member, path=path)
+    raise STATUS_CODE_EXCEPTIONS.get(status_code, HTTPStatusError)(member, path=path)

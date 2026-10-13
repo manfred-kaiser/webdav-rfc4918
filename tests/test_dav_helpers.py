@@ -73,6 +73,7 @@ def test_the_headers_passed_in_are_never_changed_in_place() -> None:
         (Method.PROPFIND, "1"),
         (Method.PROPFIND, "infinity"),
         (Method.COPY, "0"),
+        (Method.MOVE, "infinity"),
         (Method.LOCK, "infinity"),
     ],
 )
@@ -88,6 +89,7 @@ def test_depth_header_accepts_what_the_method_allows(
         (Method.PROPFIND, 2),
         (Method.PROPFIND, "Infinity"),
         (Method.COPY, 1),
+        (Method.MOVE, 0),
         (Method.LOCK, "1"),
         (Method.LOCK, ""),
     ],

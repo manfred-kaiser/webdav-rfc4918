@@ -68,6 +68,7 @@ from webdav.dav.properties import (
     build_proppatch_body,
 )
 from webdav.dav.urls import URL, join_url
+from webdav.dav.xml_utils import dav
 from webdav.exceptions import (
     STATUS_CODE_EXCEPTIONS,
     ClientError,
@@ -1039,6 +1040,11 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
             if effective_origin(url) != self._base_origin:
                 msg = f"{redact_url(url)!r} is not on this session's base_url {redact_url(self.base_url)!r}"
                 raise ClientError(msg)
+            if add_trailing_slash:
+                # The URL stays as written, but a collection's address ends in "/".
+                parts = urlsplit(url)
+                if not parts.path.endswith("/"):
+                    return urlunsplit(parts._replace(path=parts.path + "/"))
             return url
         keep_slash = url.endswith("/") and bool(url.strip("/"))
         try:
@@ -1200,6 +1206,14 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
             and "If" in first["headers"]
         ):
             self._forget_vanished_locks(first["headers"]["If"])
+        elif (
+            method in (Method.DELETE, Method.MOVE)
+            and HTTPStatus.OK <= response.status_code < HTTPStatus.MULTIPLE_CHOICES
+            and response.status_code != HTTPStatus.MULTI_STATUS
+        ):
+            # The resource is gone from ``url``, and its locks with it. A token
+            # sent on after that only draws a 412 (RFC 4918 sec. 10.4).
+            self.locks.discard_within(url)
         return response
 
     def _forget_vanished_locks(self, sent_if: str) -> None:
@@ -1223,14 +1237,24 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
                     props=["{DAV:}lockdiscovery"],
                     raise_on_error=False,
                 )
+                entries = answer.multistatus.entries
                 active = {
                     active_lock.token
-                    for entry in answer.multistatus.entries
+                    for entry in entries
                     for active_lock in entry.properties.active_locks
                 }
+                # Only an answer that lists the property, with every lock in it read,
+                # says a lock is gone: a 403/404 for the property, or a lock the server
+                # lists without its token (RFC 4918 sec. 6.5: it may), says nothing.
+                discovered = [e.properties.lock_discovery for e in entries]
+                told = any(el is not None for el in discovered) and all(
+                    len(el.findall(dav("activelock"))) == len(e.properties.active_locks)
+                    for el, e in zip(discovered, entries, strict=True)
+                    if el is not None
+                )
             except (WebDAVError, requests.RequestException):
                 continue  # cannot tell: keep it
-            if lock.token not in active:
+            if lock.token not in active and told:
                 self.locks.discard_token(lock.token, url=lock.url)
                 _LOGGER.warning(
                     "the server no longer has the lock on %s (RFC 4918 section 6.6: locks can "
@@ -2008,9 +2032,10 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
     def features_for(self, path: str = "") -> FeatureDetection:
         """Features of the server ``path`` is on (cached per origin once a probe has answered).
 
-        A server that cannot be reached - or that does not answer ``OPTIONS`` -
-        is "nothing known" (``FeatureDetection()``), not an error, and is not
-        remembered; a ``path`` that cannot be requested at all *is* an error.
+        A server that cannot be reached, does not answer ``OPTIONS`` or answers it
+        with an error status is "nothing known" (``FeatureDetection()``), not an
+        error, and is not remembered; a ``path`` that cannot be requested at all
+        *is* an error.
         :meth:`FileSystem.dav_compliance <webdav.fs.client.FileSystem.dav_compliance>`
         asks afresh and raises instead.
         """
@@ -2026,6 +2051,9 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
         try:
             response = self._fetch(Method.OPTIONS, url)
         except requests.RequestException:
+            return FeatureDetection()
+        if not HTTPStatus.OK <= response.status_code < HTTPStatus.MULTIPLE_CHOICES:
+            # A 503, a 429, a 401 - an error says nothing about the server's features.
             return FeatureDetection()
         detected = FeatureDetection.from_response(response)
         with self._features_lock:

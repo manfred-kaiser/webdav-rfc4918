@@ -159,12 +159,13 @@ def _direct_members(
     An entry outside the collection is a lie or a bug - refused, never
     followed (``walk`` and anything built on ``ls`` would walk out of the
     subtree); one deeper down means the server ignored ``Depth: 1``, and is
-    left out.
+    left out. A member the server reports as 404 is gone, not listed; one it reports
+    another failure for (a 403: the account may not read it) is listed, with ``Resource.status`` set.
     """
     prefix = own_key.rstrip("/") + "/"
     members = []
     for resp in responses:
-        if resp is own:
+        if resp is own or resp.status_code == HTTPStatus.NOT_FOUND:
             continue
         key = path_key(resp.path)
         if not key.startswith(prefix):
@@ -178,6 +179,7 @@ def _direct_members(
 def _resource(response: "ResourceResponse", base_url: URL) -> Resource:
     """The :class:`~webdav.resource.Resource` a multistatus entry describes."""
     props = response.properties
+    failed = response.status_code is not None and not 200 <= response.status_code < 300
     return Resource(
         response.path_relative_to(base_url),
         href=response.href,
@@ -189,6 +191,7 @@ def _resource(response: "ResourceResponse", base_url: URL) -> Resource:
         content_type=props.content_type,
         content_language=props.content_language,
         display_name=props.display_name,
+        status=response.status_code if failed else None,
     )
 
 
@@ -351,7 +354,9 @@ class FileSystem:
         # XML_BODY_METHODS call with a body - PROPFIND is one.
         headers = {"Depth": "0"}
         result = self._remote.propfind(path, headers=headers, data=data)
-        return result.get_response_for_path(base.path, rel).properties
+        resource = result.get_response_for_path(base.path, rel)
+        self._remote.raise_for_resource(path, resource)
+        return resource.properties
 
     def set_props(
         self,
@@ -770,6 +775,8 @@ class FileSystem:
                 own_key = path_key(own.path)
         if own is not None and own.properties.resource_type == "file":
             raise IsAResourceError(display_url(path), "not a collection: use info()")
+        if own is not None:
+            self._remote.raise_for_resource(path, own)
         members = _direct_members(result.entries, own, own_key)
         return [_resource(resp, base) for resp in members]
 
@@ -780,12 +787,16 @@ class FileSystem:
         """
         _url, base, rel = self._remote.locate(path)
         result = self._remote.propfind(path, headers={"Depth": "0"})
-        return _resource(result.get_response_for_path(base.path, rel), base)
+        resource = result.get_response_for_path(base.path, rel)
+        self._remote.raise_for_resource(path, resource)
+        return _resource(resource, base)
 
     def exists(self, path: str) -> bool:
         """Check whether a resource exists."""
         try:
-            self._remote.propfind(path, headers={"Depth": "0"})
+            self._remote.raise_for_own_response(
+                path, self._remote.propfind(path, headers={"Depth": "0"})
+            )
         except ResourceNotFoundError:
             return False
         return True
@@ -1170,8 +1181,14 @@ class FileSystem:
                 Method.PUT, path, data=body, headers=headers, error_path=path
             )
         except PreconditionFailedError as exc:
-            if not overwrite and not isinstance(exc, ResourceAlreadyExistsError):
-                # We set ``If-None-Match: *``: a 412 here means "it exists".
+            if (
+                not overwrite
+                and not isinstance(exc, ResourceAlreadyExistsError)
+                and self._remote.exists_quietly(path)
+            ):
+                # We set ``If-None-Match: *``: a 412 for a resource that is there means
+                # "it exists". (Not for one that is not: a 412 also answers the ``If``
+                # header, a lock token that has gone stale.)
                 raise ResourceAlreadyExistsError(
                     exc.response, display_url(path)
                 ) from exc

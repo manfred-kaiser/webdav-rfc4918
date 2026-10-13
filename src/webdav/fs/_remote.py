@@ -17,13 +17,14 @@ from webdav.exceptions import (
     ClientError,
     ResourceNotFoundError,
     WebDAVError,
+    raise_for_member_status,
     raise_for_status,
 )
 from webdav.methods import Method
 from webdav.url_safety import display_url, is_url
 
 if TYPE_CHECKING:
-    from webdav.dav.multistatus import MultiStatusResponse
+    from webdav.dav.multistatus import MultiStatusResponse, ResourceResponse
     from webdav.response import Response
     from webdav.session import Session
     from webdav.transport.redirects import RedirectPolicy
@@ -146,13 +147,44 @@ class Remote:
         # is honoured here too.
         return response.multistatus
 
+    def raise_for_resource(self, path: str, resource: "ResourceResponse") -> None:
+        """Raise what the status says that a multistatus gives for ``resource``, if it is not a success.
+
+        A server may answer a ``PROPFIND`` with a ``207`` whose ``<response>`` for ``path``
+        holds a ``<status>`` and no properties (RFC 4918 sec. 13): a ``404`` there is as good
+        as an HTTP ``404``.
+        """
+        if resource.status_code is not None:
+            raise_for_member_status(
+                resource.status_code,
+                url=self.locate(path).url,
+                path=display_url(path),
+            )
+
+    def raise_for_own_response(self, path: str, result: "MultiStatusResponse") -> None:
+        """:meth:`raise_for_resource` for the answer to a depth-0 ``PROPFIND`` on ``path``.
+
+        Looks at the response for ``path``, or at the only one there is (a server may spell
+        the path another way). Nothing is raised if neither can be told.
+        """
+        _url, base, rel = self.locate(path)
+        try:
+            own = result.get_response_for_path(base.path, rel)
+        except ClientError:
+            if len(result.entries) != 1:
+                return
+            own = result.entries[0]
+        self.raise_for_resource(path, own)
+
     def is_missing(self, path: str) -> bool:
         """Whether a ``PROPFIND`` (depth 0) says ``path`` is not there: a ``404``, and nothing less.
 
         A server that cannot answer (``401``, ``403``, a ``PROPFIND`` it refuses) has not said so.
         """
         try:
-            self.propfind(path, headers={"Depth": "0"})
+            self.raise_for_own_response(
+                path, self.propfind(path, headers={"Depth": "0"})
+            )
         except ResourceNotFoundError:
             return True
         except WebDAVError:
@@ -167,7 +199,9 @@ class Remote:
         question must not replace the one it holds.
         """
         try:
-            self.propfind(path, headers={"Depth": "0"})
+            self.raise_for_own_response(
+                path, self.propfind(path, headers={"Depth": "0"})
+            )
         except WebDAVError:
             return False
         return True

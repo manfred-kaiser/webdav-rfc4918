@@ -2725,3 +2725,51 @@ def test_apache_unlocking_a_lock_null_resource_needs_the_lock_of_its_locked_pare
             assert child_lock.token not in {h.token for h in session.locks.held()}
             assert parent_lock.token in {h.token for h in session.locks.held()}
         assert not apache_client.exists(child)
+
+
+# ---------------------------------------------------------------------------
+# Locks and the resources they are on (RFC 4918 sec. 9.6, 9.9.3, 9.9.6, 7.6, 10.2)
+# ---------------------------------------------------------------------------
+
+
+def _upload(fs: FileSystem, path: str, data: bytes = b"x") -> None:
+    fs.upload_fileobj(io.BytesIO(data), path, overwrite=True)
+
+
+@pytest.mark.parametrize("verb", ["copy", "move"])
+def test_apache_an_overwrite_presents_the_token_of_a_locked_member_of_the_destination(
+    apache_client: FileSystem, scratch: str, verb: str
+) -> None:
+    apache_client.mkdir(f"{scratch}/src")
+    _upload(apache_client, f"{scratch}/src/a.txt")
+    apache_client.mkdir(f"{scratch}/dst")
+    _upload(apache_client, f"{scratch}/dst/inner.txt")
+    with apache_client.locked(f"{scratch}/dst/inner.txt"):
+        getattr(apache_client, verb)(f"{scratch}/src", f"{scratch}/dst", overwrite=True)
+    assert apache_client.exists(f"{scratch}/dst/a.txt")
+    assert not apache_client.exists(f"{scratch}/dst/inner.txt")
+
+
+def test_apache_a_deleted_resource_takes_its_lock_token_with_it(
+    apache_client: FileSystem, scratch: str
+) -> None:
+    path = f"{scratch}/gone.txt"
+    _upload(apache_client, path)
+    with apache_client.locked(path):
+        apache_client.remove(path)
+        assert not apache_client.session.locks.held()
+        _upload(apache_client, path, b"again")  # no stale token in the If header
+    assert apache_client.exists(path)
+
+
+def test_apache_a_moved_resource_takes_its_lock_token_with_it(
+    apache_client: FileSystem, scratch: str
+) -> None:
+    path = f"{scratch}/from.txt"
+    _upload(apache_client, path)
+    with apache_client.locked(path):
+        apache_client.move(path, f"{scratch}/to.txt")
+        assert not apache_client.session.locks.held()
+        _upload(apache_client, path, b"new")
+    assert apache_client.exists(path)
+    assert apache_client.exists(f"{scratch}/to.txt")

@@ -120,6 +120,11 @@ server root without one). You can pass it unchanged to `info`, `remove`,
 reported: `.is_dir`, `.size`, `.modified`, `.created`, `.etag`,
 `.content_type`, `.content_language`, `.display_name`.
 
+A member the server lists with an error status (a `403` for one the
+account may not read) stays in the listing. `.status` is that status, the
+other attributes are empty and `.is_dir` is `False`. It is `None` for every
+other resource. A member the server reports as `404` is left out.
+
 `ls` on a file raises `IsAResourceError`. Use `info` to describe a single
 resource.
 

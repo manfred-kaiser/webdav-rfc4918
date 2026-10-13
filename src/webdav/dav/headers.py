@@ -2,7 +2,7 @@
 
 import re
 from typing import TYPE_CHECKING
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from requests.utils import requote_uri
 
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 _ALLOWED_DEPTHS = {
     Method.PROPFIND: ("0", "1", "infinity"),
     Method.COPY: ("0", "infinity"),
-    Method.MOVE: ("0", "infinity"),
+    Method.MOVE: ("infinity",),
     Method.LOCK: ("0", "infinity"),
 }
 
@@ -62,6 +62,22 @@ def strong_etag(value: str) -> str:
         )
         raise ValueError(msg)
     return value if value == "*" else entity_tag(value)
+
+
+def _remove_dot_segments(path: str) -> str:
+    """``path`` without its ``.`` and ``..`` segments (RFC 3986 sec. 5.2.4); the rest is left as it is."""
+    kept: list[str] = []
+    segments = path.split("/")
+    for index, segment in enumerate(segments):
+        dots = segment.lower().replace("%2e", ".")
+        if dots not in (".", ".."):
+            kept.append(segment)
+            continue
+        if dots == ".." and len(kept) > 1:
+            kept.pop()
+        if index == len(segments) - 1:
+            kept.append("")
+    return "/".join(kept)
 
 
 def destination_header(
@@ -105,10 +121,13 @@ def destination_header(
             raise ClientError(msg)
         # ``requote_uri`` leaves a "%" that is not a valid escape as it is;
         # in a URI it can only mean a literal percent sign.
-        return str(requote_uri(re.sub(r"%(?![0-9A-Fa-f]{2})", "%25", destination)))
+        valid = str(requote_uri(re.sub(r"%(?![0-9A-Fa-f]{2})", "%25", destination)))
+        # RFC 4918 sec. 8.3: a sender "MUST NOT use dot-segments".
+        dest = urlsplit(valid)
+        return urlunsplit(dest._replace(path=_remove_dot_segments(dest.path)))
     if base_origin is not None:
         return resolve(destination)
     if destination.startswith("/"):
-        return quote(destination, safe="/")
+        return quote(_remove_dot_segments(destination), safe="/")
     msg = "a Destination is a full URL, or - with a base_url - a path"
     raise ClientError(msg)

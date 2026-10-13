@@ -27,6 +27,8 @@ from webdav.exceptions import MalformedResponseError, MultiStatusError
 from webdav.transport.body import content_within
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from requests import Response as HTTPResponse
 
 logger = logging.getLogger(__name__)
@@ -304,22 +306,39 @@ class MultiStatusResponse:
                     _reason_phrases.get(resp.status_code, str(resp.status_code)),
                     resp.error,
                 )
-            for propstat in resp.propstats:
-                if propstat.status_code == 0:
-                    msg = f"unparseable <d:status> in a <d:propstat> for {resp.href!r}"
-                    raise MalformedResponseError(msg)
-                if 200 <= propstat.status_code < 300:
-                    continue
-                reason = _reason_phrases.get(
-                    propstat.status_code, str(propstat.status_code)
-                )
-                for tag in propstat.properties:
-                    _, local_name = split_clark(tag)
-                    record(f"{resp.href} ({local_name})", reason, propstat.error)
+            for key, reason, error_el in _propstat_failures(resp):
+                record(key, reason, error_el)
 
         statuses = dict(sorted(statuses.items()))
         if statuses:
             raise MultiStatusError(statuses, error_codes=error_codes)
+
+
+def _propstat_failures(
+    resp: ResourceResponse,
+) -> "Iterator[tuple[str, str, Element | None]]":
+    """What each non-2xx ``<d:propstat>`` of ``resp`` reports: a key, the reason and its ``<d:error>``.
+
+    One entry per property it names - or, if it names none, one for the resource: a failure
+    status is no less one for that (RFC 4918 sec. 14.22: it applies to the properties in
+    ``<d:prop>``).
+
+    Raises:
+        MalformedResponseError: A ``<d:propstat>`` has no usable ``<d:status>``.
+
+    """
+    for propstat in resp.propstats:
+        if propstat.status_code == 0:
+            msg = f"unparseable <d:status> in a <d:propstat> for {resp.href!r}"
+            raise MalformedResponseError(msg)
+        if 200 <= propstat.status_code < 300:
+            continue
+        reason = _reason_phrases.get(propstat.status_code, str(propstat.status_code))
+        if not propstat.properties:
+            yield resp.href, reason, propstat.error
+        for tag in propstat.properties:
+            _, local_name = split_clark(tag)
+            yield f"{resp.href} ({local_name})", reason, propstat.error
 
 
 def _error_codes(error_el: Element | None) -> frozenset[str]:
