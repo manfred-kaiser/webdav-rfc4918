@@ -5,12 +5,17 @@ test say exactly what the server answers per request, and records every
 request it received (method, path, lower-cased headers, body).
 """
 
+import socket
+import ssl
 import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any
+
+from tests.certificates import Certificates
 
 Reply = tuple[int, dict[str, str], bytes]
 
@@ -116,3 +121,48 @@ def always(reply: Reply) -> Callable[[Seen], Reply]:
 MULTISTATUS_EMPTY = (
     b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"></d:multistatus>'
 )
+
+
+def record_server() -> Any:
+    """A scripted server that answers a ``PROPFIND`` with 404 and everything else with 204."""
+
+    def respond(seen: Seen) -> Reply:
+        return (404, {}, b"") if seen.method == "PROPFIND" else (204, {}, b"")
+
+    return scripted_server(respond)
+
+
+def closed_port() -> int:
+    """A port on 127.0.0.1 that nothing listens on."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+class QuietServer(HTTPServer):
+    """An ``HTTPServer`` that does not report a client that gave up."""
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """A client that gives up the handshake is the point of some tests, not news."""
+
+
+@contextmanager
+def tls_server(
+    certs: Certificates, respond: Any, *, max_version: "ssl.TLSVersion | None" = None
+) -> Iterator[tuple[str, Recorder]]:
+    """A scripted server speaking TLS with the certificate of ``certs`` (valid for 127.0.0.1)."""
+    recorder = Recorder()
+    server = QuietServer(("127.0.0.1", 0), _make_handler(respond, recorder))
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(str(certs.server_cert), str(certs.server_key))
+    if max_version is not None:
+        context.maximum_version = max_version
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"https://127.0.0.1:{server.server_address[1]}", recorder
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()

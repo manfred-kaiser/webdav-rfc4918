@@ -3,15 +3,12 @@
 # ruff: noqa: SIM117, PLC0415, S105, S108, S301, PT031, EM101
 
 import base64
-import contextlib
 import copy
 import logging
 import pickle
 import ssl
 import threading
 import warnings
-from collections.abc import Iterator
-from http.server import HTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -22,11 +19,10 @@ from tests import previous_release_pickles as old
 from tests.certificates import Certificates
 from tests.scripted_server import (
     OK,
-    Recorder,
-    _make_handler,
     always,
     redirect,
     scripted_server,
+    tls_server,
 )
 from webdav import RedirectPolicy, Session, exceptions
 from webdav.exceptions import ClientError, TLSConfigError
@@ -337,33 +333,6 @@ def certs(tmp_path_factory: pytest.TempPathFactory) -> Certificates:
 def other_ca(certs: Certificates) -> str:
     """The certificate file of a CA that signed nothing the servers here present."""
     return str(certs.issue_other_ca().with_suffix(".crt"))
-
-
-class _QuietServer(HTTPServer):
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        """A client that gives up the handshake is the point of some tests, not news."""
-
-
-@contextlib.contextmanager
-def tls_server(
-    certs: Certificates, respond: Any, *, max_version: "ssl.TLSVersion | None" = None
-) -> Iterator[tuple[str, Recorder]]:
-    """A scripted server speaking TLS with the certificate of ``certs`` (valid for 127.0.0.1)."""
-    recorder = Recorder()
-    server = _QuietServer(("127.0.0.1", 0), _make_handler(respond, recorder))
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(str(certs.server_cert), str(certs.server_key))
-    if max_version is not None:
-        context.maximum_version = max_version
-    server.socket = context.wrap_socket(server.socket, server_side=True)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"https://127.0.0.1:{server.server_address[1]}", recorder
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join()
 
 
 def test_a_clone_keeps_a_verify_that_was_set_after_construction(

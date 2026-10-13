@@ -4,12 +4,11 @@
 
 import errno
 import os
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from tests.credentials import AUTH
+from tests.builders import multistatus_ls
 from tests.scripted_server import Reply, Seen, always, scripted_server
 from webdav import FileSystem, _fsspec_guards
 from webdav.fsspec import WebdavFileSystem
@@ -191,13 +190,6 @@ def test_FS03_prepared_collision_check(tmp_path: Path) -> None:
     )  # the same name again is not a collision
 
 
-@pytest.fixture
-def ffs(server_url: str) -> Iterator[WebdavFileSystem]:
-    filesystem = WebdavFileSystem(server_url, auth=AUTH)
-    yield filesystem
-    filesystem.filesystem.close()
-
-
 def test_FS03_get_does_not_enforce_platform_name_rules(
     ffs: WebdavFileSystem, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
@@ -224,25 +216,12 @@ def test_FS03_guard_posix_names_download_as_they_are(
     )
 
 
-_MS = '<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">{}</d:multistatus>'
-
-
-def _multistatus_ls(*hrefs: str) -> bytes:
-    rows = "".join(
-        f"<d:response><d:href>{h}</d:href><d:propstat><d:prop><d:resourcetype>"
-        f"{'<d:collection/>' if h.endswith('/') else ''}</d:resourcetype></d:prop>"
-        f"<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
-        for h in hrefs
-    )
-    return _MS.format(rows).encode()
-
-
 def test_a_backslash_in_a_name_is_an_ordinary_character_on_posix() -> None:
     import os
 
     if os.name == "nt":
         pytest.skip("a backslash separates paths on Windows")
-    body = _multistatus_ls("/d/", "/d/a%5Cb.txt", "/d/c\\d.txt")
+    body = multistatus_ls("/d/", "/d/a%5Cb.txt", "/d/c\\d.txt")
     with scripted_server(always((207, {}, body))) as (url, _rec):
         assert sorted(FileSystem(retry=False).ls(f"{url}/d")) == [
             "d/a\\b.txt",

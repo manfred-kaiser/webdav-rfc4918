@@ -10,6 +10,7 @@ from xml.etree.ElementTree import fromstring
 import pytest
 import requests
 
+from tests.builders import DAV, entry, ms, multistatus_doc
 from tests.credentials import AUTH
 from tests.scripted_server import OK, Reply, Seen, always, scripted_server
 from webdav import FileSystem, Response, Session
@@ -446,15 +447,6 @@ def test_a_failed_delete_keeps_the_locks() -> None:
     assert len(session.locks.held()) == 1
 
 
-_NS = 'xmlns:d="DAV:"'
-
-
-def _multistatus(*responses: str) -> bytes:
-    return (
-        f'<?xml version="1.0"?><d:multistatus {_NS}>{"".join(responses)}</d:multistatus>'
-    ).encode()
-
-
 def _answers(body: bytes) -> "Reply":
     return 207, {"Content-Type": "application/xml"}, body
 
@@ -464,11 +456,11 @@ _LOCK_TOKEN = "opaquelocktoken:abc"
 
 def _lock_discovery(body_of_lockdiscovery: "str | None") -> bytes:
     if body_of_lockdiscovery is None:
-        return _multistatus(
+        return multistatus_doc(
             "<d:response><d:href>/f</d:href><d:propstat><d:prop><d:lockdiscovery/></d:prop>"
             "<d:status>HTTP/1.1 403 Forbidden</d:status></d:propstat></d:response>"
         )
-    return _multistatus(
+    return multistatus_doc(
         "<d:response><d:href>/f</d:href><d:propstat><d:prop><d:lockdiscovery>"
         f"{body_of_lockdiscovery}</d:lockdiscovery></d:prop>"
         "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
@@ -904,28 +896,6 @@ def test_only_the_tokens_the_request_carried_are_asked_about() -> None:
             session.put("/other.txt", data=b"x")  # no token for this path: 204
             assert session.locks
     assert not [seen for seen in recorder.requests if seen.method == "PROPFIND"]
-
-
-DAV = 'xmlns:d="DAV:"'
-
-
-def ms(*entries: str, root: str = f"d:multistatus {DAV}") -> bytes:
-    """A multistatus document around ``entries``."""
-    name = root.split(maxsplit=1)[0]
-    return f"<{root}>{''.join(entries)}</{name}>".encode()
-
-
-def entry(href: str, *, collection: bool = False, extra: str = "") -> str:
-    """A ``<d:response>`` with one 200 propstat."""
-    rtype = (
-        "<d:resourcetype><d:collection/></d:resourcetype>"
-        if collection
-        else "<d:resourcetype/>"
-    )
-    return (
-        f"<d:response><d:href>{href}</d:href><d:propstat><d:prop>{rtype}{extra}"
-        "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
-    )
 
 
 def test_dos05_defective_activelocks_log_once_without_a_traceback(

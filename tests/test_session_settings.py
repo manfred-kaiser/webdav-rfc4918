@@ -17,6 +17,7 @@ from tests.scripted_server import (
     NO_CONTENT_LENGTH,
     OK,
     always,
+    closed_port,
     redirect,
     scripted_server,
 )
@@ -376,18 +377,10 @@ def test_trust_env_is_a_bool_and_an_option_everywhere() -> None:
     assert pickle.loads(pickle.dumps(Session(trust_env=False))).trust_env is False
 
 
-def _closed_port() -> int:
-    import socket
-
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
 def test_a_connection_error_through_an_environment_proxy_says_so(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    dead = f"http://proxyuser:proxypw@127.0.0.1:{_closed_port()}"
+    dead = f"http://proxyuser:proxypw@127.0.0.1:{closed_port()}"
     monkeypatch.setenv("HTTP_PROXY", dead)
     monkeypatch.setenv("http_proxy", dead)
     monkeypatch.delenv("NO_PROXY", raising=False)

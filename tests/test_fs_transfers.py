@@ -13,6 +13,7 @@ import pytest
 import requests
 
 import webdav
+from tests.builders import multistatus_doc, sized_entry
 from tests.credentials import AUTH
 from tests.scripted_server import (
     NO_CONTENT_LENGTH,
@@ -20,6 +21,7 @@ from tests.scripted_server import (
     Reply,
     Seen,
     always,
+    record_server,
     scripted_server,
 )
 from webdav import FileSystem, Session, exceptions
@@ -187,30 +189,7 @@ def test_a_truncated_download_is_never_reported_as_complete() -> None:
     assert len(out.getvalue()) < 1000
 
 
-def _entry(href: str, is_dir: bool, size: "int | None" = None) -> str:
-    kind = (
-        "<d:resourcetype><d:collection/></d:resourcetype>"
-        if is_dir
-        else "<d:resourcetype/>"
-    )
-    length = (
-        f"<d:getcontentlength>{size}</d:getcontentlength>" if size is not None else ""
-    )
-    return (
-        f"<d:response><d:href>{href}</d:href><d:propstat><d:prop>{kind}{length}</d:prop>"
-        "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
-    )
-
-
-def _multistatus(*entries: str) -> bytes:
-    return (
-        '<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">'
-        + "".join(entries)
-        + "</d:multistatus>"
-    ).encode()
-
-
-PROPFIND_FILE = _multistatus(_entry("/f", False))
+PROPFIND_FILE = multistatus_doc(sized_entry("/f", False))
 
 
 def _text_server(content_type: "str | None", body: bytes) -> Any:
@@ -310,15 +289,8 @@ def test_BUG06_fifo(fs: FileSystem, tmp_path: Path) -> None:
     assert (tmp_path / "fifo.bin").read_bytes() == b"through a fifo"
 
 
-def _record_server() -> Any:
-    def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
-        return (404, {}, b"") if seen.method == "PROPFIND" else (204, {}, b"")
-
-    return scripted_server(respond)
-
-
 def test_BUG06_a_pipe_is_sent_chunked() -> None:
-    with _record_server() as (url, rec):
+    with record_server() as (url, rec):
         r, w = os.pipe()
         os.write(w, b"x")
         os.close(w)

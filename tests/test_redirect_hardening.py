@@ -7,29 +7,23 @@ servers that answer exactly what a hostile or merely odd server might.
 
 # ruff: noqa: SIM117, PLC0415, S301, PT031, EM101, S105, S108
 
-import contextlib
-import socket
-import ssl
-import threading
 import tracemalloc
-from collections.abc import Iterator
-from http.server import HTTPServer
 from typing import Any
 
 import pytest
 import requests
-from requests.structures import CaseInsensitiveDict
 
+from tests.builders import make_response
 from tests.certificates import Certificates
 from tests.scripted_server import (
     MULTISTATUS_EMPTY,
     OK,
-    Recorder,
     Seen,
-    _make_handler,
     always,
+    closed_port,
     redirect,
     scripted_server,
+    tls_server,
 )
 from webdav import RedirectNotFollowedError, RedirectPolicy, Session
 from webdav.dav.locks import LockRegistry
@@ -136,7 +130,9 @@ def test_a_300_or_a_304_is_never_treated_as_a_redirect_to_follow_or_refuse() -> 
         response = Session(redirect_policy=RedirectPolicy.NEVER).get(f"{url}/f")
     assert response.status_code == 300
     assert len(rec.requests) == 1
-    assert response.redirect_refusal is None  # not "refused" either - never redirect-handled at all
+    assert (
+        response.redirect_refusal is None
+    )  # not "refused" either - never redirect-handled at all
     response.raise_for_status()  # must not raise RedirectNotFollowedError
 
     with scripted_server(always((304, {}, b""))) as (url, rec):
@@ -149,7 +145,9 @@ def test_a_300_or_a_304_is_never_treated_as_a_redirect_to_follow_or_refuse() -> 
 def test_a_308_preserves_method_and_body_same_as_307() -> None:
     """RFC 9110 §15.4.9: 308, like 307, MUST NOT change the request method."""
     with scripted_server(
-        lambda r: redirect(308, "/dir/") if r.path == "/dir" else (207, {}, MULTISTATUS_EMPTY)
+        lambda r: (
+            redirect(308, "/dir/") if r.path == "/dir" else (207, {}, MULTISTATUS_EMPTY)
+        )
     ) as (url, rec):
         response = Session().propfind(f"{url}/dir", data=b"<propfind/>", depth=0)
     assert response.status_code == 207
@@ -764,33 +762,6 @@ def certs(tmp_path_factory: pytest.TempPathFactory) -> Certificates:
     return Certificates(tmp_path_factory.mktemp("ic-certs"))
 
 
-class _QuietServer(HTTPServer):
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        """A client that gives up the handshake is the point of some tests, not news."""
-
-
-@contextlib.contextmanager
-def tls_server(
-    certs: Certificates, respond: Any, *, max_version: "ssl.TLSVersion | None" = None
-) -> Iterator[tuple[str, Recorder]]:
-    """A scripted server speaking TLS with the certificate of ``certs`` (valid for 127.0.0.1)."""
-    recorder = Recorder()
-    server = _QuietServer(("127.0.0.1", 0), _make_handler(respond, recorder))
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(str(certs.server_cert), str(certs.server_key))
-    if max_version is not None:
-        context.maximum_version = max_version
-    server.socket = context.wrap_socket(server.socket, server_side=True)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"https://127.0.0.1:{server.server_address[1]}", recorder
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join()
-
-
 def test_a_chain_from_http_over_https_back_to_http_is_not_followed(
     certs: Certificates,
 ) -> None:
@@ -817,20 +788,13 @@ def test_http_to_https_with_all_still_follows(certs: Certificates) -> None:
     assert len(b_rec.requests) == 1
 
 
-def _closed_port() -> int:
-
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
 _SIGNATURE = "SECRETSIG-0123"
 
 
 def test_the_cause_chain_is_cleaned_in_place_not_cut() -> None:
     import urllib3.exceptions
 
-    url = f"http://127.0.0.1:{_closed_port()}/dl?sig={_SIGNATURE}"
+    url = f"http://127.0.0.1:{closed_port()}/dl?sig={_SIGNATURE}"
     with pytest.raises(requests.exceptions.ConnectionError) as caught:
         Session(retry=False).get(url)
     inner = caught.value.args[0]
@@ -888,32 +852,6 @@ def test_the_adapter_turns_a_location_error_into_an_invalid_url() -> None:
     prepared = requests.Request("GET", "http://a..b/").prepare()
     with pytest.raises(requests.exceptions.InvalidURL):
         DeadlineAdapter().send(prepared, timeout=1)
-
-
-def make_response(
-    status: int = 200,
-    body: bytes = b"",
-    *,
-    method: str = "PUT",
-    url: str = "http://dav.example/f",
-    headers: "dict[str, str] | None" = None,
-    request_headers: "dict[str, str] | None" = None,
-    reason: "str | None" = None,
-) -> Response:
-    """A fully read :class:`~webdav.Response` for ``method`` on ``url``."""
-    response = Response()
-    response.status_code = status
-    response.url = url
-    response.reason = reason  # type: ignore[assignment]
-    response.headers.update(headers or {})
-    response._content = body
-    response._content_consumed = True  # type: ignore[attr-defined]
-    request = requests.PreparedRequest()
-    request.method = method
-    request.url = url
-    request.headers = CaseInsensitiveDict(request_headers or {})
-    response.request = request
-    return response
 
 
 @pytest.mark.parametrize("status", [300, 301, 304, 305, 306])

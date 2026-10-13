@@ -1342,13 +1342,6 @@ def test_a_resource_without_a_size_cannot_be_opened_for_reading() -> None:
         fs.filesystem.close()
 
 
-@pytest.fixture
-def ffs(server_url: str) -> Iterator[WebdavFileSystem]:
-    filesystem = WebdavFileSystem(server_url, auth=AUTH)
-    yield filesystem
-    filesystem.filesystem.close()
-
-
 def test_BUG04_ls_keeps_a_trailing_space(ffs: WebdavFileSystem, tmp_path: Path) -> None:
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "plain.txt").write_text("1")

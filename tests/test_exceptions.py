@@ -9,11 +9,9 @@ from multiprocessing import get_context
 from typing import Any
 
 import pytest
-import requests
-from requests.structures import CaseInsensitiveDict
 
 import webdav.exceptions as exceptions_module
-from webdav import Response
+from tests.builders import make_response
 from webdav.exceptions import (
     HTTPStatusError,
     MultiStatusError,
@@ -21,32 +19,6 @@ from webdav.exceptions import (
     ResourceNotFoundError,
     WebDAVError,
 )
-
-
-def make_response(
-    status: int = 200,
-    body: bytes = b"",
-    *,
-    method: str = "PUT",
-    url: str = "http://dav.example/f",
-    headers: "dict[str, str] | None" = None,
-    request_headers: "dict[str, str] | None" = None,
-    reason: "str | None" = None,
-) -> Response:
-    """A fully read :class:`~webdav.Response` for ``method`` on ``url``."""
-    response = Response()
-    response.status_code = status
-    response.url = url
-    response.reason = reason  # type: ignore[assignment]
-    response.headers.update(headers or {})
-    response._content = body
-    response._content_consumed = True  # type: ignore[attr-defined]
-    request = requests.PreparedRequest()
-    request.method = method
-    request.url = url
-    request.headers = CaseInsensitiveDict(request_headers or {})
-    response.request = request
-    return response
 
 
 def _every_exception() -> "list[WebDAVError]":

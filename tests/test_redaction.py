@@ -7,10 +7,10 @@ import traceback
 
 import pytest
 import requests
-from requests.structures import CaseInsensitiveDict
 
-from tests.scripted_server import Seen, always, redirect, scripted_server
-from webdav import FileSystem, RedirectPolicy, Response, Session
+from tests.builders import entry, make_response, ms
+from tests.scripted_server import Seen, always, closed_port, redirect, scripted_server
+from webdav import FileSystem, RedirectPolicy, Session
 from webdav.dav.multistatus import MultiStatusResponse
 from webdav.exceptions import (
     ClientError,
@@ -37,14 +37,6 @@ def test_credentials_in_a_url_do_not_reach_messages_or_warnings() -> None:
     )  # credentials in a URL are refused before anything is sent
 
 
-def _closed_port() -> int:
-    import socket
-
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
 _SIGNATURE = "SECRETSIG-0123"
 
 
@@ -53,7 +45,7 @@ def _whole(exc: BaseException) -> str:
 
 
 def test_a_connection_error_after_a_redirect_does_not_show_the_signed_query() -> None:
-    target = f"http://127.0.0.1:{_closed_port()}/dl/file?X-Amz-Signature={_SIGNATURE}&token=TOK"
+    target = f"http://127.0.0.1:{closed_port()}/dl/file?X-Amz-Signature={_SIGNATURE}&token=TOK"
     with scripted_server(lambda _r: redirect(302, target)) as (url, _rec):
         session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
         with pytest.raises(requests.exceptions.ConnectionError) as caught:
@@ -64,7 +56,7 @@ def test_a_connection_error_after_a_redirect_does_not_show_the_signed_query() ->
 
 
 def test_a_connection_error_for_the_callers_own_query_does_not_show_it() -> None:
-    url = f"http://127.0.0.1:{_closed_port()}/dl?sig={_SIGNATURE}"
+    url = f"http://127.0.0.1:{closed_port()}/dl?sig={_SIGNATURE}"
     with pytest.raises(requests.exceptions.ConnectionError) as caught:
         Session(retry=False).get(url)
     assert _SIGNATURE not in _whole(caught.value)
@@ -74,7 +66,7 @@ def test_a_failed_unlock_logs_no_query(caplog: pytest.LogCaptureFixture) -> None
     client = FileSystem(retry=False)
     with caplog.at_level(logging.WARNING, logger="webdav"):
         client._unlock_quietly(
-            f"http://127.0.0.1:{_closed_port()}/a?sig={_SIGNATURE}",
+            f"http://127.0.0.1:{closed_port()}/a?sig={_SIGNATURE}",
             "opaquelocktoken:1",
         )
     assert caplog.records
@@ -88,32 +80,6 @@ def test_fs05_redact_url_neutralises_every_control_class() -> None:
     shown = redact_url(f"https://h.example/{NASTY}?token=secret")
     assert "secret" not in shown
     assert not any(c in shown for c in "\n\x1b\x85\u2028\u202e")
-
-
-def make_response(
-    status: int = 200,
-    body: bytes = b"",
-    *,
-    method: str = "PUT",
-    url: str = "http://dav.example/f",
-    headers: "dict[str, str] | None" = None,
-    request_headers: "dict[str, str] | None" = None,
-    reason: "str | None" = None,
-) -> Response:
-    """A fully read :class:`~webdav.Response` for ``method`` on ``url``."""
-    response = Response()
-    response.status_code = status
-    response.url = url
-    response.reason = reason  # type: ignore[assignment]
-    response.headers.update(headers or {})
-    response._content = body
-    response._content_consumed = True  # type: ignore[attr-defined]
-    request = requests.PreparedRequest()
-    request.method = method
-    request.url = url
-    request.headers = CaseInsensitiveDict(request_headers or {})
-    response.request = request
-    return response
 
 
 def test_fs05_a_reason_phrase_cannot_forge_a_log_line() -> None:
@@ -162,28 +128,6 @@ def test_fs05_ordinary_unicode_names_are_neither_rejected_nor_changed(
     exc = ResourceNotFoundError(make_response(404), path=name)
     assert name in str(exc)
     assert redact_url(f"https://h/{name}").endswith(name.replace("\\", "?"))
-
-
-DAV = 'xmlns:d="DAV:"'
-
-
-def ms(*entries: str, root: str = f"d:multistatus {DAV}") -> bytes:
-    """A multistatus document around ``entries``."""
-    name = root.split(maxsplit=1)[0]
-    return f"<{root}>{''.join(entries)}</{name}>".encode()
-
-
-def entry(href: str, *, collection: bool = False, extra: str = "") -> str:
-    """A ``<d:response>`` with one 200 propstat."""
-    rtype = (
-        "<d:resourcetype><d:collection/></d:resourcetype>"
-        if collection
-        else "<d:resourcetype/>"
-    )
-    return (
-        f"<d:response><d:href>{href}</d:href><d:propstat><d:prop>{rtype}{extra}"
-        "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
-    )
 
 
 def test_fs05_names_with_control_characters_are_still_listed() -> None:

@@ -11,6 +11,12 @@ from typing import Any
 import pytest
 
 import webdav
+from tests.builders import (
+    multistatus_doc,
+    multistatus_ls,
+    multistatus_of_hrefs,
+    sized_entry,
+)
 from tests.credentials import AUTH
 from tests.scripted_server import Reply, Seen, always, scripted_server
 from webdav import FileSystem, Session
@@ -117,20 +123,10 @@ def test_isdir_and_isfile_are_false_for_something_that_does_not_exist(
         assert fs.exists("nope") is False
 
 
-def _multistatus(*hrefs: str, collection: bool = True) -> bytes:
-    kind = "<d:collection/>" if collection else ""
-    responses = "".join(
-        f"<d:response><d:href>{h}</d:href><d:propstat><d:prop><d:resourcetype>{kind}"
-        "</d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
-        for h in hrefs
-    )
-    return f'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">{responses}</d:multistatus>'.encode()
-
-
 def test_walk_stops_a_server_that_invents_a_new_directory_at_every_level() -> None:
     def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
         path = seen.path.rstrip("/")
-        return 207, {}, _multistatus(f"{path}/", f"{path}/d/")
+        return 207, {}, multistatus_of_hrefs(f"{path}/", f"{path}/d/")
 
     with scripted_server(respond) as (url, rec):
         with pytest.raises(webdav.ClientError, match="walk"):
@@ -188,29 +184,6 @@ def test_BUG10_guard_copy_and_move_onto_an_existing_destination(fs: FileSystem) 
 XML = {"Content-Type": "application/xml"}
 
 
-def _entry(href: str, is_dir: bool, size: "int | None" = None) -> str:
-    kind = (
-        "<d:resourcetype><d:collection/></d:resourcetype>"
-        if is_dir
-        else "<d:resourcetype/>"
-    )
-    length = (
-        f"<d:getcontentlength>{size}</d:getcontentlength>" if size is not None else ""
-    )
-    return (
-        f"<d:response><d:href>{href}</d:href><d:propstat><d:prop>{kind}{length}</d:prop>"
-        "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
-    )
-
-
-def _multistatus_of_entries(*entries: str) -> bytes:
-    return (
-        '<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">'
-        + "".join(entries)
-        + "</d:multistatus>"
-    ).encode()
-
-
 def _tree_server(forbidden: "set[str]") -> Any:
     def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
         base = seen.path.rstrip("/")
@@ -220,15 +193,17 @@ def _tree_server(forbidden: "set[str]") -> Any:
             return (
                 207,
                 XML,
-                _multistatus_of_entries(
-                    _entry("/", True), _entry("/a/", True), _entry("/b/", True)
+                multistatus_doc(
+                    sized_entry("/", True),
+                    sized_entry("/a/", True),
+                    sized_entry("/b/", True),
                 ),
             )
         return (
             207,
             XML,
-            _multistatus_of_entries(
-                _entry(f"{base}/", True), _entry(f"{base}/f.txt", False, 1)
+            multistatus_doc(
+                sized_entry(f"{base}/", True), sized_entry(f"{base}/f.txt", False, 1)
             ),
         )
 
@@ -271,10 +246,13 @@ def _endless_server(counter: list[int]) -> Any:
         if seen.method == "PROPFIND":
             counter[0] += 1
             base = seen.path.rstrip("/")
-            entries = [_entry(base + "/", True)]
+            entries = [sized_entry(base + "/", True)]
             if seen.headers.get("depth") == "1":
-                entries += [_entry(base + "/d/", True), _entry(base + "/f", False, 3)]
-            return 207, XML, _multistatus_of_entries(*entries)
+                entries += [
+                    sized_entry(base + "/d/", True),
+                    sized_entry(base + "/f", False, 3),
+                ]
+            return 207, XML, multistatus_doc(*entries)
         return 200, {"Content-Length": "3"}, b"abc"
 
     return respond
@@ -321,25 +299,12 @@ def test_mkdir_with_a_full_url_adds_the_trailing_slash() -> None:
     assert [r.path for r in rec.requests] == ["/new/", "/other/"]
 
 
-_MS = '<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">{}</d:multistatus>'
-
-
-def _multistatus_ls(*hrefs: str) -> bytes:
-    rows = "".join(
-        f"<d:response><d:href>{h}</d:href><d:propstat><d:prop><d:resourcetype>"
-        f"{'<d:collection/>' if h.endswith('/') else ''}</d:resourcetype></d:prop>"
-        f"<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
-        for h in hrefs
-    )
-    return _MS.format(rows).encode()
-
-
 def test_a_case_insensitive_server_spelling_the_collection_differently_is_fine() -> (
     None
 ):
     def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
         upper = seen.path.upper().rstrip("/")
-        return 207, {}, _multistatus_ls(f"{upper}/", f"{upper}/File.txt")
+        return 207, {}, multistatus_ls(f"{upper}/", f"{upper}/File.txt")
 
     with scripted_server(respond) as (url, _rec):
         assert FileSystem(retry=False).ls(f"{url}/dav/dir") == ["DAV/DIR/File.txt"]
@@ -353,7 +318,7 @@ def test_walk_counts_queued_collections(monkeypatch: pytest.MonkeyPatch) -> None
         return (
             207,
             {},
-            _multistatus_ls(f"{base}/", *[f"{base}/sub{i}/" for i in range(200)]),
+            multistatus_ls(f"{base}/", *[f"{base}/sub{i}/" for i in range(200)]),
         )
 
     with scripted_server(respond) as (url, rec):

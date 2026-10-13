@@ -7,7 +7,7 @@ import pytest
 
 from tests.credentials import AUTH
 from webdav import FileSystem, Session
-
+from webdav.fsspec import WebdavFileSystem
 
 _PROXY_VARIABLES = (
     "http_proxy",
@@ -55,3 +55,11 @@ def client(server_url: str) -> Iterator[Session]:
 def fs(client: Session) -> FileSystem:
     """A :class:`FileSystem` sharing ``client``'s connection, cookies and locks."""
     return FileSystem.from_session(client)
+
+
+@pytest.fixture
+def ffs(server_url: str) -> Iterator[WebdavFileSystem]:
+    """An fsspec file system on the test server."""
+    filesystem = WebdavFileSystem(server_url, auth=AUTH)
+    yield filesystem
+    filesystem.filesystem.close()

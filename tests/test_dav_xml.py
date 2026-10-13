@@ -10,10 +10,10 @@ from xml.etree.ElementTree import fromstring
 
 import pytest
 import requests
-from requests.structures import CaseInsensitiveDict
 
+from tests.builders import entry, make_response, ms
 from tests.scripted_server import always, scripted_server
-from webdav import FileSystem, Response, Session, _xml_guard
+from webdav import FileSystem, Session, _xml_guard
 from webdav.dav.date_utils import from_rfc1123, fromisoformat
 from webdav.dav.multistatus import MultiStatusResponse, multistatus_failure
 from webdav.dav.properties import build_propfind_body, build_proppatch_body
@@ -257,9 +257,6 @@ def test_an_empty_proppatch_on_the_session_is_refused() -> None:
         Session().proppatch("http://unused.invalid/a")
 
 
-DAV = 'xmlns:d="DAV:"'
-
-
 BOMB = (
     '<?xml version="1.0"?><!DOCTYPE d [<!ENTITY big "'
     + "&#60;a/>" * 400
@@ -286,32 +283,6 @@ def test_dos01_a_parameter_entity_is_refused_too() -> None:
     body = b'<!DOCTYPE x [<!ENTITY % p "v">]><d:multistatus xmlns:d="DAV:"/>'
     with pytest.raises(MalformedResponseError, match="entity"):
         parse_xml(body)
-
-
-def make_response(
-    status: int = 200,
-    body: bytes = b"",
-    *,
-    method: str = "PUT",
-    url: str = "http://dav.example/f",
-    headers: "dict[str, str] | None" = None,
-    request_headers: "dict[str, str] | None" = None,
-    reason: "str | None" = None,
-) -> Response:
-    """A fully read :class:`~webdav.Response` for ``method`` on ``url``."""
-    response = Response()
-    response.status_code = status
-    response.url = url
-    response.reason = reason  # type: ignore[assignment]
-    response.headers.update(headers or {})
-    response._content = body
-    response._content_consumed = True  # type: ignore[attr-defined]
-    request = requests.PreparedRequest()
-    request.method = method
-    request.url = url
-    request.headers = CaseInsensitiveDict(request_headers or {})
-    response.request = request
-    return response
 
 
 def test_dos01_the_error_body_parser_does_not_expand_an_entity_either() -> None:
@@ -348,25 +319,6 @@ def test_dos01_an_html_error_page_with_a_doctype_is_still_no_multistatus() -> No
     page = b"<!DOCTYPE html><html><body>Forbidden</body></html>"
     assert multistatus_failure(make_response(403, page)) is None
     assert ResourceLockedError(make_response(423, page)).error_codes == frozenset()
-
-
-def ms(*entries: str, root: str = f"d:multistatus {DAV}") -> bytes:
-    """A multistatus document around ``entries``."""
-    name = root.split(maxsplit=1)[0]
-    return f"<{root}>{''.join(entries)}</{name}>".encode()
-
-
-def entry(href: str, *, collection: bool = False, extra: str = "") -> str:
-    """A ``<d:response>`` with one 200 propstat."""
-    rtype = (
-        "<d:resourcetype><d:collection/></d:resourcetype>"
-        if collection
-        else "<d:resourcetype/>"
-    )
-    return (
-        f"<d:response><d:href>{href}</d:href><d:propstat><d:prop>{rtype}{extra}"
-        "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
-    )
 
 
 @pytest.mark.parametrize(

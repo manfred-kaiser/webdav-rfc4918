@@ -6,7 +6,6 @@ fails, and the method needs a check of its own in ``GuardedFileSystem``.
 """
 
 import inspect
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -63,13 +62,6 @@ def test_every_path_method_of_fsspec_refuses_another_server() -> None:
         tried >= 25
     ), "the canary found hardly any methods: has fsspec changed its signatures?"
     assert not_refused == []
-
-
-@pytest.fixture
-def ffs(server_url: str) -> Iterator[WebdavFileSystem]:
-    filesystem = WebdavFileSystem(server_url, auth=AUTH)
-    yield filesystem
-    filesystem.filesystem.close()
 
 
 @pytest.fixture

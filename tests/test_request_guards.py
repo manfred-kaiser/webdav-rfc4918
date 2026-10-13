@@ -19,6 +19,7 @@ from tests.scripted_server import (
     OK,
     Seen,
     always,
+    record_server,
     redirect,
     scripted_server,
 )
@@ -159,9 +160,7 @@ def test_a_relative_destination_needs_a_base_url() -> None:
 def test_a_cross_origin_destination_is_refused() -> None:
     """RFC 6454: two origins are the same iff scheme, host and port all match - a COPY/MOVE across them is refused."""
     with pytest.raises(ClientError, match="not on this session's base_url"):
-        Session("http://dav.example", retry=False).move(
-            "/a", "http://evil.example/b"
-        )
+        Session("http://dav.example", retry=False).move("/a", "http://evil.example/b")
 
 
 def test_an_explicit_default_http_port_is_the_same_origin_as_none() -> None:
@@ -387,13 +386,6 @@ def test_move_and_copy_destinations_are_encoded_like_paths(
         )
 
 
-def _record_server() -> Any:
-    def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
-        return (404, {}, b"") if seen.method == "PROPFIND" else (204, {}, b"")
-
-    return scripted_server(respond)
-
-
 @pytest.mark.parametrize(
     "given",
     [
@@ -406,7 +398,7 @@ def _record_server() -> Any:
     ],
 )
 def test_BUG03_full_url_is_sent_as_written_without_base_url(given: str) -> None:
-    with _record_server() as (url, rec):
+    with record_server() as (url, rec):
         FileSystem(retry=False).remove(url + given)
     # ``requests`` itself spells the hex digits of an escape in capitals: the same bytes
     assert rec.requests[0].path.upper() == given.upper()
@@ -414,13 +406,13 @@ def test_BUG03_full_url_is_sent_as_written_without_base_url(given: str) -> None:
 
 @pytest.mark.parametrize("given", ["/dir/a%2Fb.txt", "/dir/caf%E9.txt"])
 def test_BUG03_guard_full_url_with_base_url_is_sent_as_written(given: str) -> None:
-    with _record_server() as (url, rec):
+    with record_server() as (url, rec):
         FileSystem(url, retry=False).remove(url + given)
     assert rec.requests[0].path == given
 
 
 def test_BUG03_guard_unencoded_space_and_unicode_are_encoded() -> None:
-    with _record_server() as (url, rec):
+    with record_server() as (url, rec):
         FileSystem(retry=False).remove(url + "/a b/café.txt")
     assert rec.requests[0].path == "/a%20b/caf%C3%A9.txt"
 
