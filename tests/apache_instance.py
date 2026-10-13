@@ -151,6 +151,10 @@ PidFile "logs/httpd.pid"
 ErrorLog "logs/error.log"
 LogLevel warn
 
+# What the tests read to see what the client really sent (see ``ACCESS_LOG``).
+LogFormat "%m %U%q depth=%{{Depth}}i if=%{{If}}i range=%{{Range}}i dest=%{{Destination}}i inm=%{{If-None-Match}}i -> %>s" webdav-test
+CustomLog "logs/access.log" webdav-test
+
 {load_modules}
 
 # Without this, mod_mime falls back to its compiled-in default TypesConfig,
@@ -181,6 +185,10 @@ DocumentRoot "{instance_dir}/dav-root"
 {extra_conf}
 """
 
+
+#: The access log of an instance, relative to its directory: one line per request, as
+#: ``METHOD /path?query depth=.. if=.. range=.. dest=.. inm=.. -> status`` (``-`` for no header).
+ACCESS_LOG = Path("logs") / "access.log"
 
 LOCK_DB_DIRECTIVE = 'DavLockDB "locks/davlock"'
 

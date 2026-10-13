@@ -43,12 +43,16 @@ $ pytest tests/test_apache_compliance.py -v
 Some tests start an extra, differently configured instance
 (`FileETag`, `DavDepthInfinity`, `DavMinTimeout`, no `DavLockDB`, no
 `mod_dav_lock`, `KeepAliveTimeout`, `MaxKeepAliveRequests`, `Timeout`,
-`LimitRequestBody`, the parallel tests) on ports 8781 to 8791 (`_PORTS` in
-the test module). Without a local install they are skipped. The file takes
-about forty seconds, mostly waiting for locks to run out.
+`LimitRequestBody`, `mod_dir` with a path prefix, the parallel tests) on
+ports 8781 to 8797 (`_PORTS` in the test module). Without a local install
+they are skipped. The file takes about a minute, mostly waiting for locks to
+run out.
 
-Most tests build on a `compliance/` directory an earlier test creates, so
-a `-k` subset has to include that test.
+Every instance this suite starts writes an access log (`logs/access.log`
+in its directory). Tests read it with `_requests_seen()` to check which
+requests the client sent: the method, the path, the `If`, `Range` and
+`Destination` headers and the status. Against `WEBDAV_TEST_APACHE_URL`
+those tests are skipped.
 
 ## Against a build of your own
 
@@ -183,6 +187,7 @@ The fixture's and the script's instance is a new `$TMPDIR/webdav-rfc4918-apache-
   (`pgrep -fa 'httpd.*apache-webdav-test\|apache2.*apache-webdav-test\|httpd.*webdav-rfc4918-apache-test\|apache2.*webdav-rfc4918-apache-test'`).
 - **"already exists" / 409 on the first test**: `dav-root` is left over
   from an uncleaned run. `rm -rf <instance-dir>/dav-root/*`.
-- **`-k` fails with 404/409 where a full run does not**: the test needs the
-  `compliance/` directory an earlier test creates. Run the full file, or
-  create `compliance/` first.
+- **`-k` fails with 409 for a test that uses `compliance/`**: the
+  `apache_client` fixture creates that directory if it is missing. A 409
+  means the instance is not the one the suite started (see
+  `WEBDAV_TEST_APACHE_URL`) and its `dav-root` has no such directory.

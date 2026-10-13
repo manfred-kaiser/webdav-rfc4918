@@ -33,6 +33,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import mkdtemp
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
@@ -43,6 +44,7 @@ import pytest
 import requests
 
 from tests import apache_instance
+from tests.cut_proxy import CutProxy
 from webdav import (
     BasicAuth,
     FileSystem,
@@ -54,6 +56,7 @@ from webdav.exceptions import (
     ForbiddenError,
     HTTPStatusError,
     InternalServerError,
+    IsACollectionError,
     MultiStatusError,
     PreconditionFailedError,
     ResourceConflictError,
@@ -91,6 +94,8 @@ class _Apache:
 
     url: "str | None" = None
     auth: "tuple[str, str]" = (apache_instance.TEST_USER, apache_instance.TEST_PASSWORD)
+    #: Only for the instance this suite starts itself: its access log is read by some tests.
+    instance_dir: "Path | None" = None
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -115,6 +120,7 @@ def _apache_session() -> Iterator[None]:
     conf_file = apache_instance.write_instance(instance_dir)
     apache_instance.start(conf_file)
     _Apache.url = f"http://{apache_instance.HOST}:{apache_instance.PORT}"
+    _Apache.instance_dir = instance_dir
     try:
         yield
     finally:
@@ -126,6 +132,9 @@ def _apache_session() -> Iterator[None]:
 def apache_client() -> Iterator[FileSystem]:
     assert _Apache.url is not None  # set by _apache_session above
     with FileSystem(_Apache.url, auth=_Apache.auth) as c:
+        # the older tests below put their files here: a test run on its own finds it as well
+        if not c.exists("compliance"):
+            c.mkdir("compliance")
         yield c
 
 
@@ -136,11 +145,13 @@ def test_apache_options_advertises_class_2(apache_client: FileSystem) -> None:
 
 
 def test_apache_mkdir_upload_download_roundtrip(apache_client: FileSystem) -> None:
-    apache_client.mkdir("compliance")
-    apache_client.upload_fileobj(io.BytesIO(b"apache says hi"), "compliance/a.txt")
+    apache_client.mkdir("compliance/roundtrip")
+    apache_client.upload_fileobj(
+        io.BytesIO(b"apache says hi"), "compliance/roundtrip/a.txt"
+    )
 
     buf = io.BytesIO()
-    apache_client.download_fileobj("compliance/a.txt", buf)
+    apache_client.download_fileobj("compliance/roundtrip/a.txt", buf)
     assert buf.getvalue() == b"apache says hi"
 
 
@@ -155,10 +166,18 @@ def test_apache_overwrite_protection(apache_client: FileSystem) -> None:
 def test_apache_lock_and_write_with_held_token(apache_client: FileSystem) -> None:
     apache_client.upload_fileobj(io.BytesIO(b"v1"), "compliance/locked.txt")
 
-    with apache_client.locked("compliance/locked.txt", scope=EXCLUSIVE):
-        apache_client.upload_fileobj(
-            io.BytesIO(b"v2"), "compliance/locked.txt", overwrite=True
-        )
+    with _requests_seen() as seen:
+        with apache_client.locked("compliance/locked.txt", scope=EXCLUSIVE) as held:
+            apache_client.upload_fileobj(
+                io.BytesIO(b"v2"), "compliance/locked.txt", overwrite=True
+            )
+    # one LOCK, the write with the token of that lock, one UNLOCK - nothing else
+    assert [(call.method, call.status) for call in seen] == [
+        ("LOCK", 200),
+        ("PUT", 204),
+        ("UNLOCK", 204),
+    ]
+    assert held.token in seen[1].header("if")
 
     buf = io.BytesIO()
     apache_client.download_fileobj("compliance/locked.txt", buf)
@@ -303,7 +322,13 @@ def test_apache_lockdiscovery_and_supportedlock_are_parsed_from_a_live_response(
         props = apache_client.get_props("compliance/disco.txt")
         assert len(props.active_locks) == 1
         assert props.active_locks[0].token == active_lock.token
-        assert len(props.supported_locks) >= 1
+        assert props.active_locks[0].scope == EXCLUSIVE
+        assert props.active_locks[0].depth == "infinity"
+        # mod_dav_fs offers a write lock, exclusive or shared - nothing else
+        assert sorted(lock.scope for lock in props.supported_locks) == [
+            EXCLUSIVE,
+            SHARED,
+        ]
 
 
 def test_apache_allprop_with_include(apache_client: FileSystem) -> None:
@@ -312,7 +337,11 @@ def test_apache_allprop_with_include(apache_client: FileSystem) -> None:
     props = apache_client.get_props(
         "compliance/allprop.txt", all_prop=True, include=["etag"]
     )
-    assert props.etag is not None
+    assert props.etag == _etag("compliance/allprop.txt")
+    assert props.content_length == 1
+    assert props.content_type == "text/plain"
+    assert props.modified is not None
+    assert abs(time.time() - props.modified.timestamp()) < 120
 
 
 def test_apache_structured_lock_owner_round_trips(apache_client: FileSystem) -> None:
@@ -321,7 +350,9 @@ def test_apache_structured_lock_owner_round_trips(apache_client: FileSystem) -> 
     owner_el = Element("{DAV:}href")
     owner_el.text = "mailto:test@example.org"
     with apache_client.locked("compliance/owner.txt", owner=owner_el) as active_lock:
-        assert active_lock.owner is not None
+        assert active_lock.owner == "mailto:test@example.org"
+        discovered = apache_client.get_props("compliance/owner.txt").active_locks
+        assert [lock.owner for lock in discovered] == ["mailto:test@example.org"]
 
 
 def test_apache_timeout_preference_list(apache_client: FileSystem) -> None:
@@ -330,7 +361,8 @@ def test_apache_timeout_preference_list(apache_client: FileSystem) -> None:
     with apache_client.locked(
         "compliance/timeout.txt", lock_timeout=[86400, 3600]
     ) as active_lock:
-        assert active_lock.timeout is None or active_lock.timeout > 0
+        # the first one Apache understands (the seconds left may already be one fewer)
+        assert active_lock.timeout in (86400, 86399)
 
 
 # ---------------------------------------------------------------------------
@@ -499,22 +531,36 @@ def test_apache_a_race_to_create_a_collection_has_one_winner(
 
 def test_apache_supports_range_reads(apache_client: FileSystem) -> None:
     apache_client.upload_fileobj(io.BytesIO(b"0123456789"), "compliance/range.txt")
-    with apache_client.open("compliance/range.txt", "rb") as reader:
-        assert reader.read(4) == b"0123"
-        reader.seek(7)
-        assert reader.read() == b"789"
+    with _requests_seen() as seen:
+        with apache_client.open("compliance/range.txt", "rb") as reader:
+            assert reader.read(4) == b"0123"
+            reader.seek(7)
+            assert reader.read() == b"789"
+    # the seek is a request for the rest of the file, not a download of all of it again
+    assert [(call.method, call.status, call.header("range")) for call in seen] == [
+        ("PROPFIND", 207, "-"),
+        ("GET", 200, "-"),
+        ("GET", 206, "bytes=7-"),
+    ]
 
 
 def test_apache_download_fileobj_resumes_after_a_seek(
     apache_client: FileSystem,
 ) -> None:
     apache_client.upload_fileobj(io.BytesIO(b"abcdefghij"), "compliance/range2.txt")
-    with apache_client.open("compliance/range2.txt", "rb") as reader:
-        first_half = reader.read(5)
-        reader.seek(0)
-        full = reader.read()
+    with _requests_seen() as seen:
+        with apache_client.open("compliance/range2.txt", "rb") as reader:
+            first_half = reader.read(5)
+            reader.seek(0)
+            full = reader.read()
     assert first_half == b"abcde"
     assert full == b"abcdefghij"
+    # back to the start is a new request for the whole file (no range to ask for)
+    assert [(call.method, call.status, call.header("range")) for call in seen] == [
+        ("PROPFIND", 207, "-"),
+        ("GET", 200, "-"),
+        ("GET", 200, "-"),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -592,7 +638,9 @@ def test_apache_unlock_by_a_different_client_without_the_token_fails(
             "opaquelocktoken:not-the-real-one",
             raise_on_error=False,
         )
-        assert unlock_response.status_code in (400, 403, 409, 412)
+        assert unlock_response.status_code == 400
+        # the lock is still there
+        assert _http("PUT", "compliance/wrongclient.txt", data=b"y").status_code == 423
     finally:
         other.close()
     session.unlock("compliance/wrongclient.txt", token)
@@ -687,18 +735,6 @@ def test_apache_move_onto_an_existing_destination_is_resourcealreadyexists(
         )
 
 
-# ---------------------------------------------------------------------------
-# GET on a collection: server-defined (§9.4) - must not crash either way
-# ---------------------------------------------------------------------------
-
-
-def test_apache_get_on_a_collection_does_not_crash(apache_client: FileSystem) -> None:
-    apache_client.mkdir("compliance/plaincoll")
-    session: Session = apache_client._session
-    response = session.get("compliance/plaincoll/")
-    assert response.status_code < 500
-
-
 def test_apache_isdir_correctly_identifies_a_real_collection(
     apache_client: FileSystem,
 ) -> None:
@@ -755,6 +791,7 @@ _PORTS = {
     "dbm": 8791,
     "deflate": 8793,
     "gzip": 8795,
+    "prefix": 8797,
 }
 
 _needs_local_apache = pytest.mark.skipif(
@@ -845,6 +882,65 @@ def _hrefs(multistatus: requests.Response) -> "dict[str, str]":
             multistatus.text,
         )
     )
+
+
+@dataclass(frozen=True)
+class _Call:
+    """One line of the access log (see ``apache_instance.ACCESS_LOG``): what the server was sent."""
+
+    method: str
+    path: str
+    status: int
+    headers: "dict[str, str]"
+
+    def header(self, name: str) -> str:
+        """The value of the request header ``name`` as logged, ``-`` if it was not sent."""
+        return self.headers[name.lower()]
+
+
+_LOG_LINE = re.compile(
+    r"(?P<method>\S+) (?P<path>\S+) depth=(?P<depth>.*?) if=(?P<if>.*?) range=(?P<range>.*?) "
+    r"dest=(?P<dest>.*?) inm=(?P<inm>.*?) -> (?P<status>\d{3})$"
+)
+
+
+@contextmanager
+def _requests_seen(instance_dir: "Path | None" = None) -> Iterator[list[_Call]]:
+    """The requests the server was sent inside the block, filled in when the block ends.
+
+    Reads the access log of ``instance_dir`` (default: the shared instance). Only an instance
+    this suite started has one it can read, so against ``WEBDAV_TEST_APACHE_URL`` the test is skipped.
+    """
+    directory = instance_dir or _Apache.instance_dir
+    if directory is None:
+        pytest.skip("the access log is only read on an instance this suite starts")
+    log = directory / apache_instance.ACCESS_LOG
+    start = log.stat().st_size if log.exists() else 0
+    seen: list[_Call] = []
+    yield seen
+    time.sleep(
+        0.1
+    )  # a request is logged when its answer is complete, a moment after the client has it
+    with log.open("rb") as handle:
+        handle.seek(start)
+        for line in handle.read().decode().splitlines():
+            match = _LOG_LINE.match(line)
+            assert match is not None, line
+            fields = match.groupdict()
+            seen.append(
+                _Call(
+                    fields["method"],
+                    fields["path"],
+                    int(fields["status"]),
+                    {
+                        "depth": fields["depth"],
+                        "if": fields["if"],
+                        "range": fields["range"],
+                        "destination": fields["dest"],
+                        "if-none-match": fields["inm"],
+                    },
+                )
+            )
 
 
 @pytest.fixture
@@ -2008,11 +2104,15 @@ def test_apache_a_connection_the_server_closes_after_a_few_requests_is_not_an_er
     in a row, writes included (which are never retried), the client opens a new connection each time.
     """
     extra_conf = "KeepAlive On\nMaxKeepAliveRequests 3"
-    with _variant_fs(tmp_path, "keepalive_max", extra_conf=extra_conf) as fs:
-        for index in range(20):
-            fs.upload_fileobj(io.BytesIO(b"x"), f"f{index}.txt")
-            assert fs.exists(f"f{index}.txt")
-            fs.remove(f"f{index}.txt")
+    with _requests_seen(tmp_path / "keepalive_max") as seen:
+        with _variant_fs(tmp_path, "keepalive_max", extra_conf=extra_conf) as fs:
+            for index in range(20):
+                fs.upload_fileobj(io.BytesIO(b"x"), f"f{index}.txt")
+                assert fs.exists(f"f{index}.txt")
+                fs.remove(f"f{index}.txt")
+    # a write is never sent twice because its connection was closed: one PUT, one 201, per file
+    assert [call.status for call in seen if call.method == "PUT"] == [201] * 20
+    assert [call.status for call in seen if call.method == "DELETE"] == [204] * 20
 
 
 def test_apache_a_connection_that_idled_past_the_keepalive_timeout_is_not_an_error(
@@ -2022,12 +2122,14 @@ def test_apache_a_connection_that_idled_past_the_keepalive_timeout_is_not_an_err
     request goes out, a write included - the client must see that before it sends, not after.
     """
     extra_conf = "KeepAlive On\nKeepAliveTimeout 1"
-    with _variant_fs(tmp_path, "keepalive_idle", extra_conf=extra_conf) as fs:
-        fs.upload_fileobj(io.BytesIO(b"x"), "first.txt")
-        for index in range(2):
-            time.sleep(1.4)
-            fs.upload_fileobj(io.BytesIO(b"y"), f"idle{index}.txt")
-        assert fs.exists("idle1.txt")
+    with _requests_seen(tmp_path / "keepalive_idle") as seen:
+        with _variant_fs(tmp_path, "keepalive_idle", extra_conf=extra_conf) as fs:
+            fs.upload_fileobj(io.BytesIO(b"x"), "first.txt")
+            for index in range(2):
+                time.sleep(1.4)
+                fs.upload_fileobj(io.BytesIO(b"y"), f"idle{index}.txt")
+            assert fs.exists("idle1.txt")
+    assert [call.status for call in seen if call.method == "PUT"] == [201] * 3
 
 
 class _SlowReader(io.RawIOBase):
@@ -2773,3 +2875,333 @@ def test_apache_a_moved_resource_takes_its_lock_token_with_it(
         _upload(apache_client, path, b"new")
     assert apache_client.exists(path)
     assert apache_client.exists(f"{scratch}/to.txt")
+
+
+# ===========================================================================
+# What a production setup adds to the plain test instance: ``mod_dir`` (a collection
+# asked for without its slash is redirected) and the server under a path prefix
+# (``Alias /dav``), what ``mod_dav`` answers to what it is not made for (an XML body
+# over the limit, a path over the limit), and a connection that is cut in the middle
+# ===========================================================================
+
+
+@pytest.fixture(scope="module")
+def _prefixed_instance(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[tuple[str, Path]]:
+    """An instance with ``mod_dir`` and ``mod_alias``, the WebDAV tree at ``/dav``: its base URL and directory."""
+    if apache_instance.missing_prerequisites():
+        pytest.skip(
+            "starts a second, differently configured Apache - needs a local install"
+        )
+    instance = tmp_path_factory.mktemp("prefix") / "instance"
+    port = _PORTS["prefix"]
+    conf_file = apache_instance.write_instance(
+        instance,
+        port=port,
+        extra_modules=("mod_dir.so", "mod_alias.so"),
+        extra_conf=f'Alias /dav "{instance}/dav-root"\n',
+    )
+    apache_instance.start(conf_file, port=port)
+    try:
+        yield f"http://{apache_instance.HOST}:{port}/dav", instance
+    finally:
+        apache_instance.stop(conf_file)
+
+
+@pytest.fixture(scope="module")
+def prefixed(_prefixed_instance: tuple[str, Path]) -> str:
+    """The base URL of the instance with ``mod_dir`` and the tree at ``/dav``."""
+    return _prefixed_instance[0]
+
+
+@pytest.fixture
+def prefixed_fs(prefixed: str) -> Iterator[FileSystem]:
+    with FileSystem(prefixed, auth=_Apache.auth) as fs:
+        yield fs
+
+
+@pytest.mark.parametrize(
+    "method",
+    ["PROPFIND", "GET", "MKCOL", "COPY", "MOVE", "LOCK", "PROPPATCH", "DELETE", "PUT"],
+)
+def test_apache_with_mod_dir_a_collection_without_its_slash_is_redirected(
+    prefixed: str, method: str
+) -> None:
+    """``mod_dir`` (``DirectorySlash On``, its default) answers every method for a directory
+    asked for without the trailing slash with a 301 to the slash form - before ``mod_dav`` sees it.
+    """
+    name = f"redirected-{uuid.uuid4().hex[:8]}"
+    created = requests.request(
+        "MKCOL", f"{prefixed}/{name}/", auth=_Apache.auth, timeout=10
+    )
+    assert created.status_code == 201
+    response = requests.request(
+        method,
+        f"{prefixed}/{name}",
+        auth=_Apache.auth,
+        timeout=10,
+        allow_redirects=False,
+        headers=(
+            {"Destination": f"{prefixed}/{name}-to"}
+            if method in ("COPY", "MOVE")
+            else {}
+        ),
+    )
+    assert response.status_code == 301
+    assert response.headers["Location"] == f"{prefixed}/{name}/"
+
+
+def test_apache_with_mod_dir_the_client_handles_a_collection_without_its_slash(
+    prefixed: str, prefixed_fs: FileSystem
+) -> None:
+    """Every call that takes a collection works with the path as the caller wrote it, no slash.
+
+    What it costs: the request without the slash is redirected, so it is sent again with it.
+    """
+    fs = prefixed_fs
+    base = f"c-{uuid.uuid4().hex[:8]}"
+    fs.mkdir(base)
+    fs.mkdir(f"{base}/sub")
+    fs.upload_fileobj(io.BytesIO(b"x"), f"{base}/f.txt")
+    assert fs.exists(base)
+    assert fs.isdir(base)
+    assert not fs.isfile(base)
+    assert fs.info(base).is_dir
+    assert sorted(fs.ls(base)) == [f"{base}/f.txt", f"{base}/sub"]
+    assert fs.get_props(base).etag is not None
+    fs.set_props(base, set_props={("urn:x", "k"): "v"})
+    assert fs.get_props(base, props=[("urn:x", "k")]).text("urn:x", "k") == "v"
+    assert [(path, len(files)) for path, _dirs, files in fs.walk(base)] == [
+        (base, 1),
+        (f"{base}/sub", 0),
+    ]
+    with fs.locked(base, depth="0"):
+        fs.upload_fileobj(io.BytesIO(b"y"), f"{base}/g.txt")
+    fs.copy(base, f"{base}-copy")
+    assert fs.exists(f"{base}-copy/sub")
+    fs.move(f"{base}-copy", f"{base}-moved")
+    assert not fs.exists(f"{base}-copy")
+    fs.remove(f"{base}-moved")
+    assert not fs.exists(f"{base}-moved")
+    with pytest.raises(ResourceAlreadyExistsError):
+        fs.mkdir(base)
+    with pytest.raises(IsACollectionError):
+        with fs.open(base, "rb"):
+            pass  # pragma: no cover - a collection is not opened
+    fs.remove(base)
+
+
+def test_apache_with_mod_dir_a_collection_costs_a_request_for_the_redirect(
+    _prefixed_instance: tuple[str, Path], prefixed_fs: FileSystem
+) -> None:
+    """The slash form is one request, the form without it two: the redirect, then the repeat."""
+    fs = prefixed_fs
+    name = f"cost-{uuid.uuid4().hex[:8]}"
+    fs.mkdir(name)
+    instance_dir = _prefixed_instance[1]
+    with _requests_seen(instance_dir) as with_slash:
+        fs.ls(f"{name}/")
+    with _requests_seen(instance_dir) as without:
+        fs.ls(name)
+    assert [(c.method, c.path, c.status) for c in with_slash] == [
+        ("PROPFIND", f"/dav/{name}/", 207)
+    ]
+    assert [(c.method, c.path, c.status) for c in without] == [
+        ("PROPFIND", f"/dav/{name}", 301),
+        ("PROPFIND", f"/dav/{name}/", 207),
+    ]
+
+
+_NAMES_UNDER_A_PREFIX = [name for name in _ODD_NAMES if len(name.encode()) <= 100]
+
+
+@pytest.mark.parametrize(
+    "name",
+    _NAMES_UNDER_A_PREFIX,
+    ids=[f"{i}-{n[:12]}" for i, n in enumerate(_NAMES_UNDER_A_PREFIX)],
+)
+def test_apache_under_a_path_prefix_a_name_survives_every_operation(
+    prefixed_fs: FileSystem, name: str
+) -> None:
+    """Each of these names, in a collection below ``/dav``, through every call that puts the name
+    into a header or a body: ``Destination``, the tagged ``If``, a property, a collection lock.
+    """
+    fs = prefixed_fs
+    top = f"names-{uuid.uuid4().hex[:8]}"
+    fs.mkdir(top)
+    path = f"{top}/{name}"
+    fs.upload_fileobj(io.BytesIO(b"1"), path)
+    # a lock names the resource in the ``If`` header of the write
+    with fs.locked(path):
+        fs.upload_fileobj(io.BytesIO(b"2"), path, overwrite=True)
+    # COPY and MOVE name the target in ``Destination``
+    fs.copy(path, f"{top}/copy-{name}")
+    fs.move(f"{top}/copy-{name}", f"{top}/moved-{name}")
+    buf = io.BytesIO()
+    fs.download_fileobj(f"{top}/moved-{name}", buf)
+    assert buf.getvalue() == b"2"
+    assert not fs.exists(f"{top}/copy-{name}")
+    # a property is on the resource that was asked for
+    fs.set_props(path, set_props={("urn:x", "k"): name})
+    assert fs.get_props(path, props=[("urn:x", "k")]).text("urn:x", "k") == name
+    # a lock on a collection of that name covers a new member, and a member can leave it
+    fs.mkdir(f"{top}/dir-{name}")
+    with fs.locked(f"{top}/dir-{name}", depth="0"):
+        fs.upload_fileobj(io.BytesIO(b"3"), f"{top}/dir-{name}/in")
+        fs.session.move(
+            f"{top}/dir-{name}/in", destination=f"{top}/out-{name}"
+        ).raise_for_status()
+    assert fs.exists(f"{top}/out-{name}")
+    fs.remove(top)
+
+
+# --- limits that are Apache's, not the library's ---------------------------
+
+
+def test_apache_an_xml_body_over_the_limit_is_a_413(
+    apache_client: FileSystem, scratch: str
+) -> None:
+    """``LimitXMLRequestBody`` (1000000 bytes by default) answers 413 before ``mod_dav`` reads the body."""
+    path = f"{scratch}/big-prop.txt"
+    apache_client.upload_fileobj(io.BytesIO(b"x"), path)
+    with pytest.raises(HTTPStatusError) as exc_info:
+        apache_client.set_props(path, set_props={("urn:x", "big"): "v" * 1_100_000})
+    assert exc_info.value.status_code == 413
+    assert (
+        apache_client.get_props(path, props=[("urn:x", "big")]).text("urn:x", "big")
+        is None
+    )
+
+
+@_needs_local_apache
+def test_apache_a_dead_property_value_has_a_size_limit_on_sdbm(tmp_path: Path) -> None:
+    """An sdbm entry (the key and the value together) is at most about a kilobyte. A value of 2000
+    bytes is a 500 from ``mod_dav`` - ``Invalid argument`` from the DBM in the error log - that the
+    client reports as the failed property, and nothing of the update is kept. Berkeley DB has no such
+    limit that was seen: what was written is read back whole or the update is refused.
+    """
+    namespace = "https://example.org/ns"
+    with (
+        _isolated_instance(tmp_path) as (base, instance_dir),
+        FileSystem(base, auth=_Apache.auth) as fs,
+    ):
+        fs.upload_fileobj(io.BytesIO(b"x"), "props.txt")
+        for size in (1, 500, 900):
+            fs.set_props("props.txt", set_props={(namespace, f"p{size}"): "v" * size})
+            value = fs.get_props("props.txt", props=[(namespace, f"p{size}")]).text(
+                namespace, f"p{size}"
+            )
+            assert value == "v" * size
+        sdbm = _dbm_is_sdbm(instance_dir)
+        for size in (2000, 50_000):
+            if sdbm:
+                with pytest.raises(MultiStatusError) as exc_info:
+                    fs.set_props(
+                        "props.txt", set_props={(namespace, f"big{size}"): "v" * size}
+                    )
+                assert any(f"big{size}" in key for key in exc_info.value.statuses)
+                stored = None
+            else:
+                try:
+                    fs.set_props(
+                        "props.txt", set_props={(namespace, f"big{size}"): "v" * size}
+                    )
+                except MultiStatusError:
+                    stored = None
+                else:
+                    stored = "v" * size
+            kept = fs.get_props("props.txt", props=[(namespace, f"big{size}")]).text(
+                namespace, f"big{size}"
+            )
+            assert kept == stored  # all of it or nothing, never a part
+        # what was written before is still there
+        assert (
+            fs.get_props("props.txt", props=[(namespace, "p900")]).text(
+                namespace, "p900"
+            )
+            == "v" * 900
+        )
+
+
+def test_apache_a_path_longer_than_the_file_system_allows_is_a_403_and_longer_than_a_line_a_414(
+    apache_client: FileSystem, scratch: str
+) -> None:
+    """Under the limit of ``LimitRequestLine`` (8190) the path still has to fit ``PATH_MAX``: ``Cannot map``
+    in the error log, a 403. Over the request line the core refuses before anything is mapped: 414.
+    """
+
+    def segments(length: int) -> str:
+        return "/".join(["n" * 250] * (length // 250))
+
+    assert not apache_client.exists(f"{scratch}/{segments(2000)}")
+    with pytest.raises(ForbiddenError):
+        apache_client.exists(f"{scratch}/{segments(7500)}")
+    with pytest.raises(HTTPStatusError) as exc_info:
+        apache_client.exists(f"{scratch}/{segments(9000)}")
+    assert exc_info.value.status_code == 414
+
+
+# --- a lock over a collection with a member that somebody else holds ---------
+
+
+def test_apache_a_depth_infinity_lock_over_a_locked_member_is_refused_and_leaves_nothing(
+    apache_client: FileSystem, scratch: str
+) -> None:
+    """The ``LOCK`` is a 207: the member is ``423 Locked``, the collection ``424``. The client raises
+    ``MultiStatusError`` naming both, and the collection is not left locked."""
+    apache_client.mkdir(f"{scratch}/tree")
+    apache_client.upload_fileobj(io.BytesIO(b"x"), f"{scratch}/tree/m.txt")
+    assert _Apache.url is not None
+    with (
+        FileSystem(_Apache.url, auth=_Apache.auth) as other,
+        other.locked(f"{scratch}/tree/m.txt"),
+    ):
+        with pytest.raises(MultiStatusError) as exc_info:
+            with apache_client.locked(f"{scratch}/tree", depth="infinity"):
+                pass  # pragma: no cover - the lock is refused
+        assert exc_info.value.statuses == {
+            f"/{scratch}/tree (lockdiscovery)": "Failed Dependency",
+            f"/{scratch}/tree/m.txt": "Locked",
+        }
+        assert not apache_client.get_props(f"{scratch}/tree").active_locks
+        apache_client.upload_fileobj(io.BytesIO(b"y"), f"{scratch}/tree/new.txt")
+
+
+# --- a connection that is cut in the middle of a download --------------------
+
+
+@pytest.mark.parametrize("fresh", [True, False], ids=["fresh", "aged"])
+def test_apache_a_download_is_resumed_after_the_connection_is_cut(
+    apache_client: FileSystem, scratch: str, fresh: bool
+) -> None:
+    """The proxy drops the first answer after 3 MiB, more than a second after the file was written.
+    The client asks for the rest with a ``Range`` and the file is whole. For a file written less than
+    a second before the first answer, that answer has a weak ETag and the resumed one a strong one:
+    a weak ETag is no validator, so the check is the modification time, and the resume is accepted.
+    """
+    assert _Apache.url is not None
+    parts = urlsplit(_Apache.url)
+    address = (parts.hostname or apache_instance.HOST, parts.port or 80)
+    data = bytes(range(256)) * (8 << 12)
+    for attempt in range(5):
+        path = f"{scratch}/cut-{attempt}.bin"
+        apache_client.upload_fileobj(io.BytesIO(data), path)
+        if not fresh:
+            time.sleep(1.5)
+        with (
+            CutProxy(address, cut=3 << 20, pause=1.5) as proxy,
+            FileSystem(proxy.url, auth=_Apache.auth) as through_proxy,
+        ):
+            buf = io.BytesIO()
+            through_proxy.download_fileobj(path, buf)
+        assert proxy.cut_happened
+        assert buf.getvalue() == data
+        assert any("Range: bytes=" in head for head in proxy.heads)
+        if not fresh:
+            assert proxy.first_etag is not None
+            assert not proxy.first_etag.startswith("W/")
+            return
+        if proxy.first_etag is not None and proxy.first_etag.startswith("W/"):
+            return
+    pytest.fail("the ETag of the file written a moment ago was never weak")

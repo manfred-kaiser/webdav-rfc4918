@@ -3,7 +3,7 @@
 This page is for deploying against Apache httpd with `mod_dav` and
 `mod_dav_fs`, the primary deployment target of this project. It lists
 where Apache behaves differently from what the RFC or other servers lead
-you to expect. Over 100 tests check each finding against a real Apache;
+you to expect. Over 200 tests check each finding against a real Apache;
 the rest of the suite runs against WsgiDAV. Servers disagree most on
 locking and properties, so most findings are about those.
 
@@ -18,6 +18,8 @@ locking and properties, so most findings are about those.
 | Properties and reading | `PROPFIND Depth: infinity` needs `DavDepthInfinity On`; a failed `PROPPATCH` is all-or-nothing |
 | Over time | An expired lock is dropped lazily, on the next request that looks at it - and can break the collection's next listing once |
 | Size and names | 255-byte name limit; `.DAV` is refused at any level - on a server new enough to check |
+| With `mod_dir` | A collection asked for without its slash is a `301` for every method; the client repeats the request |
+| Limits | Dead property over ~1 KB fails on sdbm; XML body over 1 MB is `413`; path over `PATH_MAX` is `403`, over the request line `414` |
 | Parallel | Exactly one writer wins a race, reliably only with sdbm |
 | The DBM type decides | Debian/Ubuntu's Berkeley-DB build can silently lose concurrent locks and properties |
 
@@ -123,6 +125,11 @@ hold a lock; Apache enforces those. \
   token is enough to write. Exclusive and shared locks exclude each other.
   A `LOCK` without `Depth` is `infinity`. \
   *Test: `test_apache_any_one_shared_token_is_enough_to_write`.*
+- **A `Depth: infinity` `LOCK` over a collection with a locked member is a
+  `207`.** The member is `423`, the collection `424`, and no lock is
+  granted. The client raises `MultiStatusError` naming both and leaves
+  nothing locked. \
+  *Test: `test_apache_a_depth_infinity_lock_over_a_locked_member_is_refused_and_leaves_nothing`.*
 - **`DAV: 1,2` does not mean locking works.** `mod_dav_fs` always has lock
   hooks, so it advertises class 2 (`dav_method_options`). Without
   `DavLockDB` a `LOCK` is a `500` ("A lock database was not specified").
@@ -167,6 +174,15 @@ hold a lock; Apache enforces those. \
   status line itself: `HTTP/1.1 409 (status)`. The update is all or
   nothing. \
   *Test: `test_apache_a_proppatch_is_all_or_nothing`.*
+- **A dead property value of about 1 KB or more fails on sdbm.** An sdbm
+  entry holds the key and the value together in about a kilobyte (900 bytes
+  work, 1000 do not). `mod_dav` answers `500` ("Invalid argument" from the
+  DBM in the error log), the client names the property, and nothing of the
+  update is kept. Berkeley DB showed no such limit. \
+  *Test: `test_apache_a_dead_property_value_has_a_size_limit_on_sdbm`.*
+- **An XML request body over 1000000 bytes is a `413`**
+  (`LimitXMLRequestBody`), before `mod_dav` reads it. \
+  *Test: `test_apache_an_xml_body_over_the_limit_is_a_413`.*
 - **`PROPFIND` with `Depth: infinity`, or without `Depth`, on a collection
   is a `403`** unless `DavDepthInfinity On` (`dav_method_propfind`). A file
   needs no `Depth`. This library has no default depth on purpose. \
@@ -178,6 +194,29 @@ hold a lock; Apache enforces those. \
   existing destination is `412` for `COPY` and `MOVE`; a missing parent is
   `409`. \
   *Test: `test_apache_ranges_are_answered_by_the_core`.*
+
+### With `mod_dir` and a path prefix
+
+The shared test instance loads only the modules `mod_dav` needs. Most
+installations also load `mod_dir`, and often serve WebDAV below a prefix
+(`Alias /dav`).
+
+- **`mod_dir` answers a collection without its trailing slash with a
+  `301`** to the slash form, for every method: `PROPFIND`, `GET`, `MKCOL`,
+  `COPY`, `MOVE`, `LOCK`, `PROPPATCH`, `DELETE`, `PUT`. The client repeats
+  the request with the slash, so `ls("dir")` is two requests and
+  `ls("dir/")` one. \
+  *Tests: `test_apache_with_mod_dir_a_collection_without_its_slash_is_redirected`,
+  `test_apache_with_mod_dir_a_collection_costs_a_request_for_the_redirect`.*
+- **Every call that takes a collection works without the slash** (`exists`,
+  `isdir`, `info`, `ls`, `walk`, `get_props`, `set_props`, `locked`, `copy`,
+  `move`, `remove`). `mkdir` of an existing collection raises
+  `ResourceAlreadyExistsError` and `open` raises `IsACollectionError`. \
+  *Test: `test_apache_with_mod_dir_the_client_handles_a_collection_without_its_slash`.*
+- **Under a prefix every name of the list below still goes through lock,
+  `COPY`, `MOVE`, property and collection lock**, so `Destination` and the
+  tagged `If` header carry the right URL. \
+  *Test: `test_apache_under_a_path_prefix_a_name_survives_every_operation`.*
 
 ### Over time
 
@@ -226,6 +265,15 @@ Limits, each on an instance of its own:
   ~690 MiB/s and downloads at ~1260 MiB/s, byte for byte. With 3000
   members in one collection, `ls()` and `walk()` take 0.16 s each, and
   the `DELETE` of the collection 0.03 s.
+- **A path over `PATH_MAX` is a `403`, over the request line a `414`.** A
+  path of 7500 characters fails in the file system (`Cannot map` in the
+  error log); 9000 characters exceed `LimitRequestLine` (8190). \
+  *Test: `test_apache_a_path_longer_than_the_file_system_allows_is_a_403_and_longer_than_a_line_a_414`.*
+- **A download cut in the middle is resumed with a `Range` request.** For a
+  file written less than a second ago the first answer has a weak ETag and
+  the resumed one a strong one. The client takes the modification time as
+  the check then, and the file arrives whole. \
+  *Test: `test_apache_a_download_is_resumed_after_the_connection_is_cut`.*
 - **Names survive being a URL**: spaces, `#`, `?`, `%`, `%20` (stays six
   characters), `%2F`, `+`, `&`, `;`, `=`, quotes, `<>`, `|`, `[]`, Japanese,
   emoji, combining accents, leading and trailing spaces, dot names, 255
