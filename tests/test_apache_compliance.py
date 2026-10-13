@@ -942,6 +942,8 @@ def _requests_seen(instance_dir: "Path | None" = None) -> Iterator[list[_Call]]:
     if directory is None:
         pytest.skip("the access log is only read on an instance this suite starts")
     log = directory / apache_instance.ACCESS_LOG
+    # the last request before the block may still be logged: let it, so that it is not counted
+    time.sleep(0.3)
     start = log.stat().st_size if log.exists() else 0
     seen: list[_Call] = []
     yield seen
