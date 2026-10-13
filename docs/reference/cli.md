@@ -91,10 +91,19 @@ $ dav cp webdavs://webdav.example.org/a.txt webdavs://webdav.example.org/copy.tx
 $ dav mv webdavs://webdav.example.org/a.txt webdavs://webdav.example.org/b.txt
 $ dav cat webdavs://webdav.example.org/notes.txt
 $ dav info webdavs://webdav.example.org/notes.txt
+$ dav lock webdavs://webdav.example.org/notes.txt
+opaquelocktoken:6c1e0b5a-2f4d-4c0a-9d3e-0f1a2b3c4d5e
+$ dav unlock webdavs://webdav.example.org/notes.txt opaquelocktoken:6c1e0b5a-2f4d-4c0a-9d3e-0f1a2b3c4d5e
 ```
 
 `mv` and `cp` run on the server (`MOVE` and `COPY`). Both URLs must
 therefore point at the same server.
+
+`lock` prints the lock token on one line and leaves the lock on the
+server until `unlock` releases it or it times out. It takes `--shared`,
+`--depth 0|infinity`, `--lock-timeout SECONDS|infinite` (default 600) and
+`--owner TEXT`. While the lock is held, writes from another `dav` call are
+refused with `423`, because that call does not know the token.
 
 ## Connection options
 

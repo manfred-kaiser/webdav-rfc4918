@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `insecure_transport=InsecureTransport.WARN` (also `"warn"`, `ERROR`, `ALLOW`) and `dav --allow-insecure`. The refusal quotes RFC 4918 section 20.1.
 - `trust_env` and `dav --no-proxy` to ignore `HTTP_PROXY`/`NO_PROXY`.
 - `dav --password-stdin`, `--password-file` and a password prompt.
+- `dav lock` and `dav unlock`.
 - `BasicAuth(user, password, encoding=)`.
 - `FileSystem.walk(onerror=)`, `follow_symlinks` on `upload_file`, `safe_local_name()`, `Resource.basename`, `ActiveLock.timeout_raw`.
 

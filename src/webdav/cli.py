@@ -31,6 +31,7 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 import requests.exceptions
 
+from webdav.dav.locks import DEFAULT_LOCK_TIMEOUT, EXCLUSIVE, SHARED
 from webdav.fs import FileSystem
 from webdav.transport.redirects import RedirectPolicy
 from webdav.transport.tls import DEFAULT_MINIMUM_TLS_VERSION, TLSOptions
@@ -417,6 +418,40 @@ def _cmd_cp(args: argparse.Namespace) -> None:
         client.copy(src_path, dst_path, overwrite=args.overwrite)
 
 
+def _lock_timeout(value: str) -> "int | None":
+    """Argparse type: a number of seconds, or ``infinite`` (``None``)."""
+    if value.lower() == "infinite":
+        return None
+    try:
+        seconds = int(value)
+    except ValueError:
+        seconds = -1
+    if not 0 <= seconds < 2**32:
+        msg = f"must be a number of seconds or 'infinite', got {value!r}"
+        raise argparse.ArgumentTypeError(msg)
+    return seconds
+
+
+def _cmd_lock(args: argparse.Namespace) -> None:
+    client, path = _client_for(args.url, args)
+    with client:
+        response = client.session.lock(
+            path,
+            scope=SHARED if args.shared else EXCLUSIVE,
+            owner=args.owner,
+            depth=args.depth,
+            lock_timeout=args.lock_timeout,
+            raise_on_error=True,
+        )
+        print(_printable(response.active_lock.token))
+
+
+def _cmd_unlock(args: argparse.Namespace) -> None:
+    client, path = _client_for(args.url, args)
+    with client:
+        client.session.unlock(path, args.token, raise_on_error=True)
+
+
 def _add_client_args(parser: argparse.ArgumentParser) -> None:
     """Add every flag that configures the underlying :class:`~webdav.session.Session`."""
     auth = parser.add_argument_group("authentication")
@@ -588,6 +623,44 @@ def _add_client_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_lock_parsers(
+    subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
+) -> None:
+    """Add ``lock`` and ``unlock``."""
+    lock_parser = subparsers.add_parser(
+        "lock", help="lock a resource and print the lock token"
+    )
+    lock_parser.add_argument("url")
+    lock_parser.add_argument(
+        "--shared", action="store_true", help="a shared lock (default: exclusive)"
+    )
+    lock_parser.add_argument(
+        "--depth",
+        choices=("0", "infinity"),
+        default="infinity",
+        help="lock only the resource, or a collection and everything in it (default: infinity)",
+    )
+    lock_parser.add_argument(
+        "--lock-timeout",
+        type=_lock_timeout,
+        default=DEFAULT_LOCK_TIMEOUT,
+        metavar="SECONDS",
+        help="how long the lock is asked for, in seconds or 'infinite' "
+        "(the server may grant less; default: %(default)s)",
+    )
+    lock_parser.add_argument(
+        "--owner", help="text that says who holds the lock (shown to other clients)"
+    )
+    _add_client_args(lock_parser)
+    lock_parser.set_defaults(func=_cmd_lock)
+
+    unlock_parser = subparsers.add_parser("unlock", help="release a lock by its token")
+    unlock_parser.add_argument("url")
+    unlock_parser.add_argument("token", help="the token `dav lock` printed")
+    _add_client_args(unlock_parser)
+    unlock_parser.set_defaults(func=_cmd_unlock)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser."""
     parser = argparse.ArgumentParser(prog="dav", description=__doc__)
@@ -656,6 +729,8 @@ def build_parser() -> argparse.ArgumentParser:
     cp_parser.add_argument("--overwrite", action="store_true")
     _add_client_args(cp_parser)
     cp_parser.set_defaults(func=_cmd_cp)
+
+    _add_lock_parsers(subparsers)
 
     return parser
 

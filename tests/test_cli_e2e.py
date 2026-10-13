@@ -106,3 +106,56 @@ def test_a_limit_that_cannot_work_is_a_clean_argparse_error(
         cli.main(["ls", _url(server_url, ""), *flags])
     assert exc_info.value.code == 2
     capsys.readouterr()
+
+
+def test_lock_prints_a_token_that_unlock_releases(
+    server_url: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    local = tmp_path / "local.txt"
+    local.write_text("x")
+    target = _url(server_url, "locked.txt")
+    assert cli.main(["put", str(local), target]) == 0
+    capsys.readouterr()
+
+    assert cli.main(["lock", target, "--owner", "tester", "--lock-timeout", "60"]) == 0
+    token = capsys.readouterr().out.strip()
+    assert token
+    assert "\n" not in token
+
+    # Another process (a new command) is refused while the lock is held ...
+    assert cli.main(["put", str(local), target, "--overwrite"]) == 1
+    assert cli.main(["lock", target]) == 1
+    assert "locked" in capsys.readouterr().err.lower()
+
+    # ... and may write again once the token has been released.
+    assert cli.main(["unlock", target, token]) == 0
+    assert cli.main(["put", str(local), target, "--overwrite"]) == 0
+
+
+def test_a_shared_lock_at_depth_zero_is_taken(
+    server_url: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    local = tmp_path / "local.txt"
+    local.write_text("x")
+    target = _url(server_url, "shared.txt")
+    assert cli.main(["put", str(local), target]) == 0
+    capsys.readouterr()
+    assert cli.main(["lock", target, "--shared", "--depth", "0"]) == 0
+    token = capsys.readouterr().out.strip()
+    assert cli.main(["unlock", target, token]) == 0
+
+
+def test_unlock_with_an_unknown_token_is_an_error(
+    server_url: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["unlock", _url(server_url, ""), "opaquelocktoken:nope"]) == 1
+    assert capsys.readouterr().err.startswith("dav unlock:")
+
+
+@pytest.mark.parametrize("value", ["-1", "abc", "4294967296", ""])
+def test_a_lock_timeout_that_is_no_number_of_seconds_is_an_argparse_error(
+    value: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["lock", "http://127.0.0.1:9/x", "--lock-timeout", value])
+    assert "--lock-timeout" in capsys.readouterr().err
