@@ -489,7 +489,7 @@ def test_a_control_character_in_an_href_is_refused() -> None:
 def test_a_backslash_in_an_href_is_still_an_ordinary_character() -> None:
     """Unlike the control-character check above, a backslash is deliberately
     still accepted here - an ordinary POSIX file-name character, not part of
-    an authority a parser could misread (see test_second_round.py's
+    an authority a parser could misread (see test_send_hardening.py's
     test_a_backslash_in_a_name_is_an_ordinary_character_on_posix)."""
     body = _multistatus("/a/", "/a/x\\y.txt")
     with scripted_server(always((207, {}, body))) as (url, _rec):
