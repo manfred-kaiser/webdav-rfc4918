@@ -713,10 +713,6 @@ class WebdavFileSystem(GuardedFileSystem):
         with translate_exceptions():
             return self.filesystem.content_length(path)
 
-    def sign(self, path: str, expiration: int = 100, **kwargs: Any) -> NoReturn:
-        """Not supported - WebDAV has no notion of a signed/pre-authorized URL."""
-        raise NotImplementedError
-
     def pipe_file(
         self, path: str, value: bytes, mode: str = "overwrite", **kwargs: Any
     ) -> None:

@@ -6,15 +6,13 @@ backend takes it out in ``_get_kwargs_from_urls`` and leaves the path in ``_stri
 
 from urllib.parse import urlsplit
 
-from webdav.url_safety import redact_url
+from webdav.url_safety import DEFAULT_PORTS, redact_url
 
 #: The two schemes the fsspec filesystem accepts, and the transport each implies
 #: when a URL names a host without a ``base_url`` - same convention as the CLI's
 #: own ``_SCHEME_MAPPING`` (``webdav``/``dav`` are plain HTTP, ``webdavs``/``davs``
 #: are TLS, like ``ftp``/``ftps``).
 _TRANSPORTS = {"webdav": "http", "webdavs": "https"}
-
-_DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
 def _scheme_and_rest(path: str) -> "tuple[str, str] | None":
@@ -117,7 +115,7 @@ def check_host(base_url: str, host: str, port: "int | None") -> None:
     """
     given = urlsplit(base_url)
     if (given.hostname or "").lower() != host.lower() or (
-        port is not None and port != (given.port or _DEFAULT_PORTS.get(given.scheme))
+        port is not None and port != (given.port or DEFAULT_PORTS.get(given.scheme))
     ):
         msg = (
             f"the URL names {host}{f':{port}' if port else ''}, "

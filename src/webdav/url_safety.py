@@ -16,7 +16,7 @@ import urllib3.util
 
 #: Default port per scheme, so "https://host" and "https://host:443"
 #: compare equal when deciding whether a redirect stays within one origin.
-_DEFAULT_PORTS = {"http": 80, "https": 443}
+DEFAULT_PORTS = {"http": 80, "https": 443}
 
 #: Anything a redirect ``Location`` must never contain: control characters
 #: (header/URL smuggling) and backslashes (which some URL parsers treat as
@@ -88,7 +88,7 @@ def _checked_origin(url: str) -> Origin:
     explicit_port = parts.port  # ValueError above 65535
     if explicit_port == 0:
         raise ValueError(msg)  # port 0 is no port a connection is made to
-    port = explicit_port if explicit_port is not None else _DEFAULT_PORTS.get(scheme, 0)
+    port = explicit_port if explicit_port is not None else DEFAULT_PORTS.get(scheme, 0)
     # urllib3 keeps the brackets of an IPv6 literal; urllib.parse drops them.
     wire_origin = (
         wire.scheme,
@@ -97,7 +97,7 @@ def _checked_origin(url: str) -> Origin:
     )
     problems = (
         _FORBIDDEN_URL_CHARS.search(final),
-        scheme not in _DEFAULT_PORTS,
+        scheme not in DEFAULT_PORTS,
         not host,
         parts.username is not None or parts.password is not None or "@" in parts.netloc,
         wire_origin != (scheme, host, port),
