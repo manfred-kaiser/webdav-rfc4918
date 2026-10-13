@@ -28,7 +28,7 @@ def _listing(*names: str) -> bytes:
     ).encode()
 
 
-def _server(*names: str):  # noqa: ANN202
+def _listing_server(*names: str):  # noqa: ANN202
     def respond(seen: Seen) -> Reply:
         if seen.method == "PROPFIND":
             return 207, {"Content-Type": "application/xml"}, _listing(*names)
@@ -44,7 +44,7 @@ def test_windows_refuses_what_is_not_a_windows_file_name(
     name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(_fsspec_guards, "_on_windows", lambda: True)
-    with _server(name) as (url, _):
+    with _listing_server(name) as (url, _):
         with pytest.raises(OSError, match="Windows") as caught:
             WebdavFileSystem(url).get("/dir", str(tmp_path / "dst"), recursive=True)
     assert caught.value.errno == errno.EINVAL
@@ -57,7 +57,7 @@ def test_windows_accepts_a_plain_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(_fsspec_guards, "_on_windows", lambda: True)
-    with _server("ok.txt") as (url, _):
+    with _listing_server("ok.txt") as (url, _):
         WebdavFileSystem(url).get("/dir", str(tmp_path / "dst"), recursive=True)
     assert (tmp_path / "dst" / "ok.txt").read_bytes() == b"hi"
 
@@ -67,7 +67,7 @@ def test_other_platforms_keep_these_names(name: str, tmp_path: Path) -> None:
     """On Linux and macOS a colon or a backslash is an ordinary character; ``CON`` a name."""
     if os.name == "nt":
         pytest.skip("Windows")
-    with _server(name) as (url, _):
+    with _listing_server(name) as (url, _):
         WebdavFileSystem(url).get("/dir", str(tmp_path / "dst"), recursive=True)
     assert (tmp_path / "dst" / name).read_bytes() == b"hi"
 

@@ -24,7 +24,7 @@ pytestmark = pytest.mark.filterwarnings(
 )
 
 
-def _session(mode: str) -> Any:
+def _get_with_mode(mode: str) -> Any:
     kwargs: dict[str, Any] = {"insecure_transport": mode} if mode else {}
     return Session(f"http://{HOST}", auth=AUTH, **SHORT, **kwargs).get("/x")
 
@@ -51,7 +51,7 @@ def _fsspec_url(mode: str) -> Any:
     )
 
 
-ENTRY_POINTS = [_session, _filesystem, _short_form, _fsspec_class, _fsspec_url]
+ENTRY_POINTS = [_get_with_mode, _filesystem, _short_form, _fsspec_class, _fsspec_url]
 
 
 @pytest.mark.parametrize("call", ENTRY_POINTS)

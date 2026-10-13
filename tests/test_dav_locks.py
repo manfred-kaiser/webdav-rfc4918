@@ -97,7 +97,7 @@ LOCK_BODY = f"""<?xml version="1.0"?>
 </d:activelock></d:lockdiscovery></d:prop>""".encode()
 
 
-def _server(unlock_status: int = 204) -> Any:
+def _lock_responder(unlock_status: int = 204) -> Any:
     def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
         if seen.method == "LOCK":
             return 200, {"Lock-Token": f"<{TOKEN}>"}, LOCK_BODY
@@ -110,7 +110,7 @@ def _server(unlock_status: int = 204) -> Any:
 
 @pytest.mark.parametrize("status", [403, 423, 500])
 def test_a_lock_the_server_refused_to_release_stays_recorded(status: int) -> None:
-    with scripted_server(_server(unlock_status=status)) as (url, _rec):
+    with scripted_server(_lock_responder(unlock_status=status)) as (url, _rec):
         session = Session(retry=False)
         session.locks.add(f"{url}/f", TOKEN, "infinity")
         assert session.unlock(f"{url}/f", f"<{TOKEN}>").status_code == status
@@ -124,7 +124,7 @@ def test_a_lock_the_server_says_is_gone_is_forgotten_for_that_url_only(
     # RFC 4918 sec. 9.11.1: 409 - not locked, or the URL is outside the lock's
     # scope. For the URL the lock was recorded for that means it is gone (timed
     # out); a dead token must not make every later write fail with 412.
-    with scripted_server(_server(unlock_status=status)) as (url, _rec):
+    with scripted_server(_lock_responder(unlock_status=status)) as (url, _rec):
         session = Session(retry=False)
         session.locks.add(f"{url}/f", TOKEN, "infinity")
         session.locks.add(f"{url}/other", TOKEN, "0")
@@ -134,7 +134,7 @@ def test_a_lock_the_server_says_is_gone_is_forgotten_for_that_url_only(
 
 
 def test_a_409_for_another_url_than_the_recorded_one_keeps_the_lock() -> None:
-    with scripted_server(_server(unlock_status=409)) as (url, _rec):
+    with scripted_server(_lock_responder(unlock_status=409)) as (url, _rec):
         session = Session(retry=False)
         session.locks.add(f"{url}/dir/", TOKEN, "infinity")
         session.unlock(f"{url}/elsewhere", TOKEN)  # outside the lock's scope
@@ -153,7 +153,7 @@ def test_a_token_the_caller_gives_that_is_unusable_is_a_value_error(token: str) 
 
 
 def test_unlock_discards_the_token_wherever_it_was_recorded() -> None:
-    with scripted_server(_server()) as (url, _rec):
+    with scripted_server(_lock_responder()) as (url, _rec):
         session = Session(retry=False)
         session.locks.add(f"{url}/a", TOKEN, "0")
         session.locks.add(f"{url}/b/", TOKEN, "infinity")
@@ -175,7 +175,7 @@ def test_the_status_code_table_cannot_be_changed_from_outside() -> None:
 def test_send_hands_back_a_webdav_response_even_from_an_adapter_the_caller_mounted() -> (
     None
 ):
-    with scripted_server(_server()) as (url, _rec):
+    with scripted_server(_lock_responder()) as (url, _rec):
         session = Session(retry=False)
         session.mount("http://", requests.adapters.HTTPAdapter())
         prepared = session.prepare_request(
@@ -191,7 +191,7 @@ def test_a_lock_the_server_would_not_release_is_reported_not_swallowed(
     caplog: pytest.LogCaptureFixture, status: int
 ) -> None:
     # RFC 4918 sec. 9.11.1: 403 - the principal may not remove the lock.
-    with scripted_server(_server(unlock_status=status)) as (url, rec):
+    with scripted_server(_lock_responder(unlock_status=status)) as (url, rec):
         with caplog.at_level("WARNING", logger="webdav"):
             with FileSystem(retry=False).locked(f"{url}/f"):
                 pass
@@ -206,7 +206,7 @@ def test_a_lock_the_server_would_not_release_is_reported_not_swallowed(
 def test_a_lock_that_was_already_gone_is_reported_as_that(
     caplog: pytest.LogCaptureFixture, status: int
 ) -> None:
-    with scripted_server(_server(unlock_status=status)) as (url, _rec):
+    with scripted_server(_lock_responder(unlock_status=status)) as (url, _rec):
         with caplog.at_level("WARNING", logger="webdav"):
             with FileSystem(retry=False).locked(f"{url}/f"):
                 pass
@@ -216,7 +216,7 @@ def test_a_lock_that_was_already_gone_is_reported_as_that(
 
 
 def test_a_released_lock_is_not_reported(caplog: pytest.LogCaptureFixture) -> None:
-    with scripted_server(_server()) as (url, rec):
+    with scripted_server(_lock_responder()) as (url, rec):
         with caplog.at_level("WARNING", logger="webdav"):
             with FileSystem(retry=False).locked(f"{url}/f"):
                 pass
@@ -226,7 +226,7 @@ def test_a_released_lock_is_not_reported(caplog: pytest.LogCaptureFixture) -> No
 
 
 def test_unlock_is_never_retried() -> None:
-    with scripted_server(_server(unlock_status=503)) as (url, rec):
+    with scripted_server(_lock_responder(unlock_status=503)) as (url, rec):
         assert Session().unlock(f"{url}/f", TOKEN).status_code == 503
     assert [r.method for r in rec.requests] == ["UNLOCK"]
 
@@ -284,7 +284,7 @@ def test_the_owner_of_a_lock_is_read_whatever_it_holds(
 
 
 def test_a_granted_lock_is_recorded_so_writes_carry_its_token_until_unlock() -> None:
-    with scripted_server(_server()) as (url, rec):
+    with scripted_server(_lock_responder()) as (url, rec):
         session = Session(retry=False)
         assert session.lock(f"{url}/f").status_code == 200
         assert session.locks.token_for(f"{url}/f") == TOKEN
@@ -298,7 +298,7 @@ def test_a_granted_lock_is_recorded_so_writes_carry_its_token_until_unlock() -> 
 
 
 def test_recording_a_lock_is_not_repeated_when_the_caller_also_adds_it() -> None:
-    with scripted_server(_server()) as (url, rec):
+    with scripted_server(_lock_responder()) as (url, rec):
         session = Session(retry=False)
         session.lock(f"{url}/f")
         session.locks.add(f"{url}/f", TOKEN, "infinity")

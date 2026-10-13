@@ -50,7 +50,7 @@ def _never_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @contextmanager
-def _server() -> Iterator[tuple[str, Recorder]]:
+def _created_server() -> Iterator[tuple[str, Recorder]]:
     with scripted_server(always(_CREATED)) as (url, recorder):
         yield url.removeprefix("http://"), recorder
 
@@ -77,7 +77,7 @@ def _run(
     monkeypatch.setattr(sys, "stdin", _Tty(stdin))
     err = _Tty()
     monkeypatch.setattr(sys, "stderr", err)
-    with _server() as (host, recorder):
+    with _created_server() as (host, recorder):
         code = cli.main([a.replace("HOST", host) for a in argv])
         _last[:] = [recorder]
     return code, err.getvalue()
@@ -392,7 +392,7 @@ def _prompting(
 
 
 def _main_against_server(argv: list[str]) -> tuple[int, set[str | None]]:
-    with _server() as (host, recorder):
+    with _created_server() as (host, recorder):
         code = cli.main([a.replace("HOST", host) for a in argv])
     return code, _sent(recorder)
 

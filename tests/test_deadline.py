@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 
 @contextlib.contextmanager
-def raw_server(handler: "Callable[[socket.socket], None]") -> "Iterator[str]":
+def socket_server(handler: "Callable[[socket.socket], None]") -> "Iterator[str]":
     """A TCP server that hands every accepted connection to ``handler``."""
     listener = socket.create_server(("127.0.0.1", 0))
     listener.settimeout(0.2)
@@ -81,7 +81,7 @@ def _drip(conn: socket.socket, data: bytes, pause: float, limit: float = 10) -> 
         time.sleep(pause)
 
 
-def _session(max_time: float) -> Session:
+def _deadline_session(max_time: float) -> Session:
     session = Session(retry=False, timeout=2)
     session.max_response_time = max_time
     return session
@@ -100,8 +100,8 @@ def test_header_lines_that_trickle_in_are_cut_off() -> None:
         conn.sendall(b"HTTP/1.1 200 OK\r\n")
         _drip(conn, b"X-Slow: " + b"a" * 500 + b"\r\n", 0.05)
 
-    with raw_server(handler) as url:
-        _assert_cut_off(lambda: _session(0.5).get(f"{url}/x"), 0.5)
+    with socket_server(handler) as url:
+        _assert_cut_off(lambda: _deadline_session(0.5).get(f"{url}/x"), 0.5)
 
 
 def test_an_endless_run_of_100_continue_is_cut_off() -> None:
@@ -112,8 +112,8 @@ def test_an_endless_run_of_100_continue_is_cut_off() -> None:
             conn.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
             time.sleep(0.05)
 
-    with raw_server(handler) as url:
-        _assert_cut_off(lambda: _session(0.5).get(f"{url}/x"), 0.5)
+    with socket_server(handler) as url:
+        _assert_cut_off(lambda: _deadline_session(0.5).get(f"{url}/x"), 0.5)
 
 
 def test_chunked_trailers_that_never_end_are_cut_off() -> None:
@@ -127,8 +127,8 @@ def test_chunked_trailers_that_never_end_are_cut_off() -> None:
             conn.sendall(b"X-Trailer: 1\r\n")
             time.sleep(0.05)
 
-    with raw_server(handler) as url:
-        _assert_cut_off(lambda: _session(0.5).get(f"{url}/x"), 0.5)
+    with socket_server(handler) as url:
+        _assert_cut_off(lambda: _deadline_session(0.5).get(f"{url}/x"), 0.5)
 
 
 def test_a_status_line_that_trickles_in_is_cut_off() -> None:
@@ -136,8 +136,8 @@ def test_a_status_line_that_trickles_in_is_cut_off() -> None:
         _read_request_head(conn)
         _drip(conn, b"HTTP/1.1 200 OK" + b" " * 2000, 0.05)
 
-    with raw_server(handler) as url:
-        _assert_cut_off(lambda: _session(0.5).get(f"{url}/x"), 0.5)
+    with socket_server(handler) as url:
+        _assert_cut_off(lambda: _deadline_session(0.5).get(f"{url}/x"), 0.5)
 
 
 def test_an_upload_the_server_reads_slowly_is_cut_off() -> None:
@@ -154,8 +154,10 @@ def test_an_upload_the_server_reads_slowly_is_cut_off() -> None:
         for _ in range(1000):
             yield b"x" * 65536
 
-    with raw_server(handler) as url:
-        _assert_cut_off(lambda: _session(0.8).put(f"{url}/x", data=body()), 0.8)
+    with socket_server(handler) as url:
+        _assert_cut_off(
+            lambda: _deadline_session(0.8).put(f"{url}/x", data=body()), 0.8
+        )
 
 
 def test_a_single_large_upload_the_server_reads_slowly_is_cut_off() -> None:
@@ -166,9 +168,12 @@ def test_a_single_large_upload_the_server_reads_slowly_is_cut_off() -> None:
                 return
             time.sleep(0.02)
 
-    with raw_server(handler) as url:
+    with socket_server(handler) as url:
         _assert_cut_off(
-            lambda: _session(0.8).put(f"{url}/x", data=b"x" * (64 * 1024 * 1024)), 0.8
+            lambda: _deadline_session(0.8).put(
+                f"{url}/x", data=b"x" * (64 * 1024 * 1024)
+            ),
+            0.8,
         )
 
 
@@ -177,7 +182,7 @@ def test_a_stalled_tls_handshake_is_cut_off() -> None:
         conn.recv(65536)  # the ClientHello; no ServerHello ever comes
         time.sleep(10)
 
-    with raw_server(handler) as url:
+    with socket_server(handler) as url:
         https = url.replace("http://", "https://")
         session = Session(retry=False, timeout=5)
         session.max_response_time = 0.5
@@ -191,8 +196,8 @@ def test_a_proxy_that_trickles_its_answer_to_connect_is_cut_off() -> None:
         conn.sendall(b"HTTP/1.1 200 Connection established\r\n")
         _drip(conn, b"X-Slow: " + b"a" * 500 + b"\r\n", 0.05)
 
-    with raw_server(handler) as proxy:
-        session = _session(0.5)
+    with socket_server(handler) as proxy:
+        session = _deadline_session(0.5)
         session.trust_env = False
         _assert_cut_off(
             lambda: session.get("https://webdav.invalid/x", proxies={"https": proxy}),
@@ -206,8 +211,8 @@ def test_the_deadline_covers_a_body_read_by_request_and_not_streamed() -> None:
         conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n")
         _drip(conn, b"x" * 1000, 0.05)
 
-    with raw_server(handler) as url:
-        _assert_cut_off(lambda: _session(0.5).get(f"{url}/x"), 0.5)
+    with socket_server(handler) as url:
+        _assert_cut_off(lambda: _deadline_session(0.5).get(f"{url}/x"), 0.5)
 
 
 def test_a_streamed_body_read_after_the_request_returned_uses_the_read_timeout() -> (
@@ -220,8 +225,8 @@ def test_a_streamed_body_read_after_the_request_returned_uses_the_read_timeout()
         conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n")
         _drip(conn, b"y" * 20, 0.05)
 
-    with raw_server(handler) as url:
-        session = _session(0.3)
+    with socket_server(handler) as url:
+        session = _deadline_session(0.3)
         response = session.get(f"{url}/x", stream=True)
         assert response.raw.read() == b"y" * 20  # ~1 s, well past the deadline
 
@@ -233,8 +238,8 @@ def test_a_pooled_connection_is_usable_after_a_request_close_to_its_deadline() -
             time.sleep(delay)
             conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
 
-    with raw_server(handler) as url:
-        session = _session(0.5)
+    with socket_server(handler) as url:
+        session = _deadline_session(0.5)
         for _ in range(3):
             assert session.get(f"{url}/x").content == b"ok"
 
@@ -249,8 +254,8 @@ def test_a_slow_but_steady_streamed_response_is_not_affected_by_a_stale_cap() ->
         time.sleep(0.6)  # longer than what was left, shorter than timeout=2
         conn.sendall(b"ok")
 
-    with raw_server(handler) as url:
-        response = _session(0.3).get(f"{url}/x", stream=True)
+    with socket_server(handler) as url:
+        response = _deadline_session(0.3).get(f"{url}/x", stream=True)
         assert response.raw.read() == b"ok"
 
 
@@ -258,7 +263,7 @@ def test_an_ordinary_network_error_is_not_reported_as_the_deadline() -> None:
     with socket.create_server(("127.0.0.1", 0)) as s:
         port = s.getsockname()[1]
     with pytest.raises(requests.exceptions.ConnectionError):
-        _session(30).get(f"http://127.0.0.1:{port}/x")
+        _deadline_session(30).get(f"http://127.0.0.1:{port}/x")
 
 
 def test_a_large_upload_and_download_within_the_deadline_arrive_intact() -> None:
@@ -281,8 +286,8 @@ def test_a_large_upload_and_download_within_the_deadline_arrive_intact() -> None
             b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(got) + bytes(got)
         )
 
-    with raw_server(handler) as url:
-        session = _session(30)
+    with socket_server(handler) as url:
+        session = _deadline_session(30)
         session.max_response_size = None
         assert session.put(f"{url}/x", data=payload).content == payload
 
@@ -294,8 +299,8 @@ def test_no_thread_is_started_for_the_deadline() -> None:
             b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\nok"
         )
 
-    with raw_server(handler) as url:
-        session = _session(5)
+    with socket_server(handler) as url:
+        session = _deadline_session(5)
         client = threading.current_thread()
         started_here: list[threading.Thread] = []
         original = threading.Thread.start
@@ -334,8 +339,8 @@ def test_https_within_the_deadline_works(certs: Certificates) -> None:
                 _read_request_head(tls)
                 tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
 
-    with raw_server(handler) as url:
-        session = _session(5)
+    with socket_server(handler) as url:
+        session = _deadline_session(5)
         https = url.replace("http://", "https://")
         for _ in range(2):
             got = session.get(f"{https}/x", verify=str(certs.ca_cert))
@@ -351,8 +356,8 @@ def test_a_trickled_body_over_https_is_cut_off(certs: Certificates) -> None:
             tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n")
             _drip(tls, b"x" * 1000, 0.05)
 
-    with raw_server(handler) as url:
-        session = _session(0.5)
+    with socket_server(handler) as url:
+        session = _deadline_session(0.5)
         https = url.replace("http://", "https://")
         _assert_cut_off(
             lambda: session.get(f"{https}/x", verify=str(certs.ca_cert)), 0.5
@@ -389,8 +394,8 @@ def test_an_inner_tls_handshake_trickled_through_an_https_proxy_is_cut_off(
             inner.do_handshake()
         _drip(outer, outgoing.read(), 0.05)  # ServerHello etc., byte by byte
 
-    with raw_server(_tls_proxy(certs, origin)) as proxy:
-        session = _session(0.8)
+    with socket_server(_tls_proxy(certs, origin)) as proxy:
+        session = _deadline_session(0.8)
         session.trust_env = False
         https_proxy = proxy.replace("http://", "https://")
         _assert_cut_off(
@@ -442,8 +447,8 @@ def test_a_body_trickled_through_an_https_proxy_tunnel_is_cut_off(
             pump()
             time.sleep(0.05)
 
-    with raw_server(_tls_proxy(certs, origin)) as proxy:
-        session = _session(1.0)
+    with socket_server(_tls_proxy(certs, origin)) as proxy:
+        session = _deadline_session(1.0)
         session.trust_env = False
         https_proxy = proxy.replace("http://", "https://")
         _assert_cut_off(
