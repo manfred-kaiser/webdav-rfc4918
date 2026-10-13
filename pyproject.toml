@@ -252,9 +252,6 @@ max-module-lines = 1200
 # by default - verified empirically against this project's own Python floor.
 skips = [ "B101", "B405" ]
 
-[tool.codespell]
-ignore-words-list = "cachable"
-
 [tool.pytest.ini_options]
 testpaths = [ "tests" ]
 addopts = "-ra -nauto --dist=loadgroup --cov=webdav --cov-report=term-missing"
