@@ -188,6 +188,14 @@ again, and never hand `href` to a `Session` without a `base_url`.
   `ClientError`. A `Content-Encoding` on a file (Apache with `AddEncoding x-gzip .gz`)
   is not undone: the bytes are the stored ones.
 
+Not every method is protected against a slow server. `max_response_time`
+covers the headers of a block, not its body, which is read with `timeout`
+for each single read. A server that sends one byte every few seconds can
+keep `open().read()`, `cat_file` and anything built on them (`pandas.read_csv`,
+Dask, zarr) waiting for hours. Use a server you trust for these.
+`get_file` and `get` can be stopped with a callback, see
+[Local files](#local-files).
+
 `open()` asks for the size with one `PROPFIND` first, so a resource
 without a size cannot be read this way. For a dataset of many small files,
 such as a directory of Parquet part files, that is one extra round trip
@@ -243,6 +251,37 @@ for example `fs.get("/Photos", "photos", recursive=True)`.
 - `get` replaces an existing local file. It writes to a temporary file
   first, so a failed download leaves the old local file as it was, and a
   symlink at the destination file is refused.
+- `get_file` and `get` take fsspec's `callback=`. A callback whose
+  `relative_update` raises stops a download that is too slow, with the same
+  cleanup as `download_file`: see
+  [Stopping a slow download](filesystem.md#stopping-a-slow-download). `get`
+  gives each file it fetches the callback that `callback.branched()` returns,
+  and fsspec's default is a callback that does nothing. A callback that
+  should also stop `get` therefore returns itself from `branched`:
+
+  ```python
+  import time
+  from fsspec.callbacks import Callback
+
+
+  class Within(Callback):
+      def __init__(self, seconds):
+          super().__init__()
+          self.started = time.monotonic()
+          self.seconds = seconds
+
+      def relative_update(self, inc=1):
+          if time.monotonic() - self.started > self.seconds:
+              raise TimeoutError("download took too long")
+          super().relative_update(inc)
+
+      def branched(self, path_1, path_2, **kwargs):
+          return self
+
+
+  fs.get("/Videos/talk.mp4", "talk.mp4", callback=Within(600))
+  ```
+
 - A recursive `get`, or one with a pattern, does not write through a symlink
   *below* the destination directory that leads out of it, and a recursive
   `put` does not upload a file a symlink in the source tree leads out of.

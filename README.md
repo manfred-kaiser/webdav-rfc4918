@@ -139,6 +139,8 @@ list of defaults:
   headers and body. `timeout` only limits each single read.
 - A streamed download (`stream=True`, `download_file`) is bounded per read
   only. Neither `max_response_size` nor `max_response_time` applies to it.
+  A `callback=` that raises stops one that is too slow:
+  [Stopping a slow download](https://webdav.readthedocs.io/en/latest/reference/filesystem.html#stopping-a-slow-download).
 - XML from the server is parsed with the standard library's expat parser.
   External entities are never resolved, and a document that declares an entity
   at all is refused with `MalformedResponseError`. How well expat itself holds

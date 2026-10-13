@@ -6,8 +6,9 @@ import errno
 import io
 import os
 import stat
+import time
 from pathlib import Path
-from typing import Any, BinaryIO, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
 import pytest
 import requests
@@ -16,6 +17,7 @@ import webdav
 from tests.builders import multistatus_doc, sized_entry
 from tests.credentials import AUTH
 from tests.scripted_server import (
+    DRIP,
     NO_CONTENT_LENGTH,
     OK,
     Reply,
@@ -30,6 +32,9 @@ from webdav.exceptions import (
     HTTPStatusError,
     WebDAVError,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def test_a_failed_download_leaves_an_existing_local_file_alone(
@@ -604,3 +609,102 @@ def test_a_new_download_gets_the_umask_permissions(
     finally:
         os.umask(previous)
     assert (tmp_path / "new.txt").stat().st_mode & 0o777 == 0o644
+
+
+# A callback that raises is how a streamed download is bounded: neither
+# max_response_size nor max_response_time applies to it.
+
+
+class _TooSlowError(Exception):
+    """What the callbacks below raise."""
+
+
+def _within(seconds: float) -> "Callable[[int], None]":
+    """A callback that raises once the transfer has taken longer than ``seconds``."""
+    started = time.monotonic()
+
+    def callback(_nbytes: int) -> None:
+        if time.monotonic() - started > seconds:
+            raise _TooSlowError
+
+    return callback
+
+
+def _at_least(bytes_per_second: float, window: float) -> "Callable[[int], None]":
+    """A callback that raises when fewer than ``bytes_per_second`` arrive over ``window`` seconds."""
+    window_start = time.monotonic()
+    received = 0
+
+    def callback(nbytes: int) -> None:
+        nonlocal window_start, received
+        received += nbytes
+        elapsed = time.monotonic() - window_start
+        if elapsed >= window:
+            if received / elapsed < bytes_per_second:
+                raise _TooSlowError
+            window_start, received = time.monotonic(), 0
+
+    return callback
+
+
+def _dripping_file() -> "Callable[[Seen], Reply]":
+    """A server that answers the download with 20 bytes a second, for twenty seconds."""
+    return cast(
+        "Callable[[Seen], Reply]", _file_server((200, {DRIP: "0.05"}, b"x" * 400))
+    )
+
+
+def test_a_raising_callback_stops_a_download_that_drips(tmp_path: Path) -> None:
+    target = tmp_path / "out.bin"
+    with scripted_server(_dripping_file()) as (url, _rec):
+        with FileSystem(url, retry=False, timeout=2) as fs:
+            started = time.monotonic()
+            with pytest.raises(_TooSlowError):
+                fs.download_file("f", target, callback=_within(0.5))
+            assert time.monotonic() - started < 3
+    assert list(tmp_path.iterdir()) == []  # no target, no .part file
+
+
+def test_a_stopped_download_leaves_the_file_it_would_have_replaced(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "keep.bin"
+    target.write_bytes(b"precious")
+    with scripted_server(_dripping_file()) as (url, _rec):
+        with FileSystem(url, retry=False, timeout=2) as fs:
+            with pytest.raises(_TooSlowError):
+                fs.download_file("f", target, overwrite=True, callback=_within(0.5))
+    assert target.read_bytes() == b"precious"
+    assert [p.name for p in tmp_path.iterdir()] == ["keep.bin"]
+
+
+def test_a_minimum_rate_callback_stops_a_download_that_drips(tmp_path: Path) -> None:
+    with scripted_server(_dripping_file()) as (url, _rec):
+        with FileSystem(url, retry=False, timeout=2) as fs:
+            with pytest.raises(_TooSlowError):
+                fs.download_file(
+                    "f", tmp_path / "out.bin", callback=_at_least(100, 0.5)
+                )
+
+
+def test_a_raising_callback_stops_download_fileobj() -> None:
+    with scripted_server(_dripping_file()) as (url, _rec):
+        with FileSystem(url, retry=False, timeout=2) as fs:
+            with pytest.raises(_TooSlowError):
+                fs.download_fileobj("f", io.BytesIO(), callback=_within(0.5))
+
+
+def test_a_raising_callback_stops_the_short_form_download(tmp_path: Path) -> None:
+    with scripted_server(_dripping_file()) as (url, _rec):
+        with pytest.raises(_TooSlowError):
+            webdav.download_file(
+                f"{url}/f", tmp_path / "out.bin", callback=_within(0.5), retry=False
+            )
+
+
+def test_the_session_is_usable_after_a_download_was_stopped(tmp_path: Path) -> None:
+    with scripted_server(_dripping_file()) as (url, _rec):
+        with FileSystem(url, retry=False, timeout=2) as fs:
+            with pytest.raises(_TooSlowError):
+                fs.download_file("f", tmp_path / "out.bin", callback=_within(0.5))
+            assert fs.isdir("f") is False

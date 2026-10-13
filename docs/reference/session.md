@@ -308,7 +308,9 @@ These limits apply to a `Session`, a `FileSystem` and the short form alike.
   When the time is up, the request fails with a `ClientError`. `timeout`
   only limits each single read.
 - A streamed download (`stream=True`, `download_file`) is bounded per read
-  only. It can be as large and take as long as the server makes it.
+  only. It can be as large and take as long as the server makes it. A
+  `callback=` that raises stops one that is too slow, see
+  [Stopping a slow download](filesystem.md#stopping-a-slow-download).
 - Credentials in a URL (`https://user:pw@host/`) are refused. Pass `auth=`.
 
 Both limits are constructor arguments and can also be set later as

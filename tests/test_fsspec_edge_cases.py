@@ -18,15 +18,18 @@ import os
 import pickle
 import re
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar, cast
 
 import fsspec
 import pytest
+from fsspec.callbacks import Callback
 
+from tests.builders import multistatus_doc, sized_entry
 from tests.credentials import AUTH
-from tests.scripted_server import Reply, Seen, scripted_server
+from tests.scripted_server import DRIP, Reply, Seen, scripted_server
 from webdav.exceptions import (
     ClientError,
     HTTPStatusError,
@@ -1678,3 +1681,67 @@ def test_FS02_guard_the_source_root_may_be_a_symlink(
     (base / "link").symlink_to(base / "real")
     ffs.put(str(base / "link") + "/", "/dest/", recursive=True)
     assert (tmp_path / "dest" / "a.txt").read_text() == "a"
+
+
+# A callback that raises is how a streamed download is bounded: neither
+# max_response_size nor max_response_time applies to it.
+
+
+class _TooSlowError(Exception):
+    """What the callbacks below raise."""
+
+
+class _Within(Callback):
+    """A callback that raises once the transfer has taken longer than ``seconds``."""
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__()
+        self.seconds = seconds
+        self.started = time.monotonic()
+
+    def relative_update(self, inc: int = 1) -> None:
+        if time.monotonic() - self.started > self.seconds:
+            raise _TooSlowError
+        super().relative_update(inc)
+
+
+class _WithinForChildren(_Within):
+    """The same, handed on to the transfers ``get`` starts (fsspec gives them no-op callbacks otherwise)."""
+
+    def branched(self, path_1: str, path_2: str, **kwargs: object) -> "Callback":
+        return self
+
+
+def _dripping_file(seen: Seen) -> Reply:
+    if seen.method == "PROPFIND":
+        entry = sized_entry("/f", is_dir=False, size=400)
+        return 207, {"Content-Type": "application/xml"}, multistatus_doc(entry)
+    return 200, {DRIP: "0.05"}, b"x" * 400  # 20 bytes a second, for twenty seconds
+
+
+def test_get_file_stops_when_the_callback_raises(tmp_path: Path) -> None:
+    with scripted_server(_dripping_file) as (url, _rec):
+        filesystem = WebdavFileSystem(url, retry=False, timeout=2)
+        with pytest.raises(_TooSlowError):
+            filesystem.get_file("f", str(tmp_path / "out"), callback=_Within(0.5))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_get_stops_when_a_callback_that_hands_itself_on_raises(tmp_path: Path) -> None:
+    with scripted_server(_dripping_file) as (url, _rec):
+        filesystem = WebdavFileSystem(url, retry=False, timeout=2)
+        with pytest.raises(_TooSlowError):
+            filesystem.get("f", str(tmp_path / "out"), callback=_WithinForChildren(0.5))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_get_of_several_files_stops_when_the_callback_raises(tmp_path: Path) -> None:
+    with scripted_server(_dripping_file) as (url, _rec):
+        filesystem = WebdavFileSystem(url, retry=False, timeout=2)
+        with pytest.raises(_TooSlowError):
+            filesystem.get(
+                ["f", "f"],
+                [str(tmp_path / "one"), str(tmp_path / "two")],
+                callback=_WithinForChildren(0.5),
+            )
+    assert list(tmp_path.iterdir()) == []

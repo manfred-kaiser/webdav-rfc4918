@@ -228,12 +228,72 @@ fs.download_fileobj("Documents/hello.txt", buffer)
 buffer.getvalue()  # b"hello"
 ```
 
-The transfer methods also take `chunk_size=` and a `callback=` that is
-called with the number of bytes of each chunk, for a progress bar:
+The transfer methods also take `chunk_size=` and a `callback=`. It is called
+with the number of bytes of each piece as it arrives. Two uses: a time or
+rate limit (see below), and a progress bar:
 
 ```python
 fs.upload_file("Gorilla.jpg", "Photos/Gorilla.jpg", overwrite=True, callback=print)
 ```
+
+### Stopping a slow download
+
+`max_response_time` does not apply to a download. A server that sends one
+byte every few seconds stays inside `timeout` and can keep a download open
+for hours. The `callback` runs for every piece that arrives, however small,
+so it can check the clock and raise. The exception ends the download and
+reaches your code unchanged. The connection is closed, the temporary file is
+removed, and a file that `overwrite=True` would have replaced stays as it was.
+
+A limit on the total time:
+
+```python
+import time
+
+
+class TooSlow(Exception):
+    pass
+
+
+def within(seconds):
+    started = time.monotonic()
+
+    def callback(nbytes):
+        if time.monotonic() - started > seconds:
+            raise TooSlow
+
+    return callback
+
+
+fs.download_file("Videos/talk.mp4", "talk.mp4", callback=within(600))
+```
+
+A limit on the rate suits files whose size you do not know in advance. This
+one stops a download that receives less than 10 000 bytes per second over
+30 seconds:
+
+```python
+def at_least(bytes_per_second, window=30):
+    start, received = time.monotonic(), 0
+
+    def callback(nbytes):
+        nonlocal start, received
+        received += nbytes
+        elapsed = time.monotonic() - start
+        if elapsed >= window:
+            if received / elapsed < bytes_per_second:
+                raise TooSlow
+            start, received = time.monotonic(), 0
+
+    return callback
+
+
+fs.download_file("Videos/talk.mp4", "talk.mp4", callback=at_least(10_000))
+```
+
+This works for `download_file`, `download_fileobj` and the short form
+`webdav.download_file(url, ..., callback=...)`. For fsspec, see
+[Local files](fsspec.md#local-files).
 
 A download gives the bytes the server stores. The request says
 `Accept-Encoding: identity`; a server that labels the file with a
