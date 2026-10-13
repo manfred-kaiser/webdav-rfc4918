@@ -4,6 +4,8 @@ Every server here keeps each single socket operation well inside the
 per-read ``timeout=``; only the deadline over the whole request stops it.
 """
 
+# ruff: noqa: SIM117, PLC0415, PTH208, S105, RUF001
+
 import contextlib
 import socket
 import ssl
@@ -14,7 +16,9 @@ from typing import TYPE_CHECKING
 import pytest
 import requests
 
+import webdav
 from tests.certificates import Certificates
+from tests.scripted_server import DRIP, NO_CONTENT_LENGTH, always, scripted_server
 from webdav import Session
 from webdav.exceptions import ClientError
 
@@ -88,11 +92,6 @@ def _assert_cut_off(call: "Callable[[], object]", max_time: float) -> None:
     with pytest.raises(ClientError, match="did not complete within"):
         call()
     assert time.monotonic() - started < max_time + 1.0
-
-
-# ---------------------------------------------------------------------------
-# Every part of an exchange is held to the deadline
-# ---------------------------------------------------------------------------
 
 
 def test_header_lines_that_trickle_in_are_cut_off() -> None:
@@ -211,11 +210,6 @@ def test_the_deadline_covers_a_body_read_by_request_and_not_streamed() -> None:
         _assert_cut_off(lambda: _session(0.5).get(f"{url}/x"), 0.5)
 
 
-# ---------------------------------------------------------------------------
-# What the deadline leaves alone
-# ---------------------------------------------------------------------------
-
-
 def test_a_streamed_body_read_after_the_request_returned_uses_the_read_timeout() -> (
     None
 ):
@@ -318,11 +312,6 @@ def test_no_thread_is_started_for_the_deadline() -> None:
         finally:
             threading.Thread.start = original  # type: ignore[method-assign]
         assert [(t.name, getattr(t, "_target", None)) for t in started_here] == []
-
-
-# ---------------------------------------------------------------------------
-# TLS, and TLS inside TLS (an https:// proxy to an https:// origin)
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
@@ -465,3 +454,16 @@ def test_a_body_trickled_through_an_https_proxy_tunnel_is_cut_off(
             ),
             1.0,
         )
+
+
+def test_a_response_that_drips_forever_hits_a_total_deadline() -> None:
+    import time
+
+    reply = (200, {DRIP: "0.05", NO_CONTENT_LENGTH: "1"}, b"x" * 400)
+    with scripted_server(always(reply)) as (url, _rec):
+        session = Session(retry=False)
+        session.max_response_time = 0.5
+        started = time.monotonic()
+        with pytest.raises(webdav.ClientError, match="time"):
+            session.get(f"{url}/f")
+        assert time.monotonic() - started < 5

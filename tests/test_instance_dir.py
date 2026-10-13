@@ -45,3 +45,21 @@ class TestInstanceDirectory:
         monkeypatch.setattr(os, "getuid", lambda: tmp_path.stat().st_uid + 1)
         with pytest.raises(RuntimeError, match="not owned by you"):
             ensure_private_dir(tmp_path)
+
+
+@pytest.mark.skipif(not hasattr(os, "getgid"), reason="POSIX owner and mode")
+def test_a_directory_with_the_callers_group_writable_is_fine(tmp_path: Path) -> None:
+    """``mkdir`` leaves 0775 under ``umask 002``, the default of several distributions."""
+    target = tmp_path / "instance"
+    target.mkdir()
+    target.chmod(0o770)
+    ensure_private_dir(target)
+
+
+@pytest.mark.skipif(not hasattr(os, "getgid"), reason="POSIX owner and mode")
+def test_a_directory_others_can_write_is_refused(tmp_path: Path) -> None:
+    target = tmp_path / "instance"
+    target.mkdir()
+    target.chmod(0o707)
+    with pytest.raises(RuntimeError, match="writable by others"):
+        ensure_private_dir(target)

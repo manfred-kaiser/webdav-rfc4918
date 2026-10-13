@@ -5,13 +5,15 @@ docstring for why) - only ``webdav.fs``'s file-system-shaped functions are
 checked here.
 """
 
+# ruff: noqa: SIM117, PLC0415
+
 import inspect
 from typing import Any, get_type_hints
 
 import pytest
 
 import webdav
-from webdav import FileSystem
+from webdav import FileSystem, Session
 
 _FUNCTIONS = sorted(
     name
@@ -73,9 +75,16 @@ def test_the_options_of_every_entry_point_are_those_of_session() -> None:
 
 
 def test_a_filesystem_hands_out_its_session() -> None:
-    from webdav import FileSystem, Session  # noqa: PLC0415
+    from webdav import FileSystem  # noqa: PLC0415
 
     own = FileSystem("http://dav.example")
     assert isinstance(own.session, Session)
     shared = Session("http://dav.example")
     assert FileSystem.from_session(shared).session is shared
+
+
+def test_the_module_level_functions_reject_typos_at_the_call() -> None:
+    import webdav
+
+    with pytest.raises(TypeError, match="bogus"):
+        webdav.walk("http://unused.invalid/", bogus=1)  # type: ignore[call-arg]

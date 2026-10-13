@@ -1,9 +1,11 @@
 """The checks a request passes before it leaves: what URL, where to, with which headers."""
 
-# ruff: noqa: SIM117
+# ruff: noqa: SIM117, PLC0415, S301, PT031, EM101, S105, S108, PTH208, RUF001
 
 import contextlib
 import copy
+import io
+import os
 import warnings
 from pathlib import Path
 from typing import Any
@@ -11,19 +13,25 @@ from typing import Any
 import pytest
 import requests
 
-from tests.scripted_server import OK, always, redirect, scripted_server
+from tests.credentials import AUTH
+from tests.scripted_server import (
+    NO_CONTENT_LENGTH,
+    OK,
+    Seen,
+    always,
+    redirect,
+    scripted_server,
+)
 from webdav import FileSystem, RedirectPolicy, Session
+from webdav.dav.conditional import Condition, build_if_header_single
 from webdav.exceptions import (
     ClientError,
     InsecureTransportWarning,
     ResourceNotFoundError,
     TLSHardeningDisabledWarning,
+    WebDAVError,
 )
 from webdav.url_safety import effective_origin
-
-# ---------------------------------------------------------------------------
-# Only full http(s) URLs are ever requested
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -57,11 +65,6 @@ def test_a_full_url_outside_the_base_url_is_a_client_error_for_the_filesystem() 
         )
 
 
-# ---------------------------------------------------------------------------
-# request() keeps requests' positional calling convention
-# ---------------------------------------------------------------------------
-
-
 def test_request_takes_requests_positional_arguments() -> None:
     with scripted_server(always(OK)) as (url, rec):
         Session(retry=False).request("GET", f"{url}/p", {"a": "1"})
@@ -78,11 +81,6 @@ def test_request_refuses_an_argument_given_twice() -> None:
         Session("http://dav.example").request(
             "GET", "/x", {"a": "1"}, params={"b": "2"}
         )
-
-
-# ---------------------------------------------------------------------------
-# What is sent
-# ---------------------------------------------------------------------------
 
 
 def test_a_text_body_is_sent_as_utf8_whatever_the_method() -> None:
@@ -131,11 +129,6 @@ def test_a_header_that_is_never_forwarded_stays_home_even_when_whitelisted() -> 
             )
     (seen,) = storage.requests
     assert never.isdisjoint(seen.headers)
-
-
-# ---------------------------------------------------------------------------
-# COPY/MOVE Destination
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -190,22 +183,12 @@ def test_a_relative_destination_resolves_to_the_expected_absolute_url() -> None:
     assert rec.requests[0].headers["destination"] == f"{url}/b"
 
 
-# ---------------------------------------------------------------------------
-# Server features
-# ---------------------------------------------------------------------------
-
-
 def test_a_failed_feature_probe_gives_empty_features_and_is_not_remembered() -> None:
     session = Session(retry=False, timeout=(0.2, 0.2))
     features = session.features_for("http://127.0.0.1:1/")
     assert features.supports_ranges is False
     assert features.dav_compliances == set()
     assert session._features == {}
-
-
-# ---------------------------------------------------------------------------
-# Warnings point at the code that made the call
-# ---------------------------------------------------------------------------
 
 
 def _is_this_file(warning: warnings.WarningMessage) -> bool:
@@ -266,11 +249,6 @@ def test_features_of_a_url_that_cannot_be_requested_are_an_error_not_unknown() -
         Session(retry=False).features_for("http://[bad")
 
 
-# ---------------------------------------------------------------------------
-# raise_on_error per call
-# ---------------------------------------------------------------------------
-
-
 def test_raise_on_error_can_be_overridden_for_one_call() -> None:
     with scripted_server(always((404, {}, b""))) as (url, _rec):
         strict = Session(retry=False, raise_on_error=True)
@@ -283,11 +261,6 @@ def test_raise_on_error_can_be_overridden_for_one_call() -> None:
             lax.get(f"{url}/x", raise_on_error=True)
         with pytest.raises(ResourceNotFoundError):
             lax.request("GET", f"{url}/x", raise_on_error=True)
-
-
-# ---------------------------------------------------------------------------
-# A typo in an option is an error, never a request that does the opposite
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -362,11 +335,6 @@ def test_a_flag_of_the_session_has_to_be_a_bool_too(option: str, value: object) 
             Session(raise_on_error=value)  # type: ignore[arg-type]
 
 
-# ---------------------------------------------------------------------------
-# PROPFIND request kinds (RFC 4918 sec. 9.1)
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("options", "element"),
     [
@@ -401,3 +369,242 @@ def test_propfind_sends_the_kind_of_request_that_was_asked_for(
 def test_propfind_refuses_to_mix_request_kinds(options: "dict[str, Any]") -> None:
     with pytest.raises(ValueError, match="only one|either data"):
         Session("http://dav.example").propfind("/x", depth=0, **options)
+
+
+@pytest.mark.parametrize(
+    "name", ["a%20b.txt", "100%.txt", "sp ace.txt", "ünï.txt", "h#x.txt"]
+)
+def test_move_and_copy_destinations_are_encoded_like_paths(
+    server_url: str, storage_dir: Path, name: str
+) -> None:
+    """(Names with ``?``/``;`` are left out only because wsgidav re-splits a decoded Destination.)"""
+    with Session(server_url, auth=AUTH, retry=False) as session:
+        session.put(name, b"data")
+        assert session.copy(name, destination="copy-" + name).status_code == 201
+        assert session.move(name, destination="moved-" + name).status_code == 201
+        assert sorted(os.listdir(storage_dir)) == sorted(
+            ["copy-" + name, "moved-" + name]
+        )
+
+
+def _record_server() -> Any:
+    def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
+        return (404, {}, b"") if seen.method == "PROPFIND" else (204, {}, b"")
+
+    return scripted_server(respond)
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        "/dir/a%2Fb.txt",
+        "/dir/caf%E9.txt",
+        "/dir/x%2fy/",
+        "/dir/a%20b.txt",
+        "/dir/caf%C3%A9.txt",
+        "/dir/100%25.txt",
+    ],
+)
+def test_BUG03_full_url_is_sent_as_written_without_base_url(given: str) -> None:
+    with _record_server() as (url, rec):
+        FileSystem(retry=False).remove(url + given)
+    # ``requests`` itself spells the hex digits of an escape in capitals: the same bytes
+    assert rec.requests[0].path.upper() == given.upper()
+
+
+@pytest.mark.parametrize("given", ["/dir/a%2Fb.txt", "/dir/caf%E9.txt"])
+def test_BUG03_guard_full_url_with_base_url_is_sent_as_written(given: str) -> None:
+    with _record_server() as (url, rec):
+        FileSystem(url, retry=False).remove(url + given)
+    assert rec.requests[0].path == given
+
+
+def test_BUG03_guard_unencoded_space_and_unicode_are_encoded() -> None:
+    with _record_server() as (url, rec):
+        FileSystem(retry=False).remove(url + "/a b/café.txt")
+    assert rec.requests[0].path == "/a%20b/caf%C3%A9.txt"
+
+
+def test_BUG03_guard_mkdir_adds_the_slash_to_the_raw_path() -> None:
+    with scripted_server(always((201, {}, b""))) as (url, rec):
+        FileSystem(retry=False).mkdir(url + "/d%2Fx")
+    assert rec.requests[0].path == "/d%2Fx/"
+
+
+@pytest.mark.parametrize(
+    ("destination", "sent"),
+    [
+        ("{url}/t2/x/../file2.txt", "{url}/t2/file2.txt"),
+        ("{url}/t2/./file2.txt", "{url}/t2/file2.txt"),
+        ("{url}/t2/x/%2e%2e/file2.txt", "{url}/t2/file2.txt"),
+        ("{url}/a/b/..", "{url}/a/"),
+        ("{url}/../x", "{url}/x"),
+        ("/t2/x/../file2.txt", "/t2/file2.txt"),
+    ],
+)
+def test_a_destination_has_no_dot_segments(destination: str, sent: str) -> None:
+    with scripted_server(always((201, {}, b""))) as (url, rec):
+        Session(retry=False).copy(f"{url}/t2/file.txt", destination.format(url=url))
+    assert rec.requests[0].headers["destination"] == sent.format(url=url)
+
+
+@pytest.mark.parametrize(
+    ("given", "rendered"),
+    [
+        ('"abc"', '["abc"]'),
+        ("abc", '["abc"]'),
+        ('W/"abc"', '[W/"abc"]'),
+    ],
+)
+def test_an_etag_in_an_if_header_is_quoted_exactly_once(
+    given: str, rendered: str
+) -> None:
+    assert Condition(etag=given).render() == rendered
+    assert build_if_header_single([Condition(etag=given)]) == f"({rendered})"
+
+
+@pytest.mark.parametrize("bad", ['a"b', "a\nb", "a\x00b", '"a"b"', '"a b"', "a b"])
+def test_an_etag_that_would_break_out_of_its_brackets_is_refused(bad: str) -> None:
+    with pytest.raises(ValueError, match="entity-tag"):
+        Condition(etag=bad).render()
+
+
+def test_send_still_sends_and_returns_a_webdav_response() -> None:
+    with scripted_server(always((200, {}, b"hello"))) as (url, _rec):
+        session = Session(retry=False)
+        response = session.send(
+            session.prepare_request(requests.Request("GET", f"{url}/a"))
+        )
+    assert response.content == b"hello"
+    assert response.__class__.__module__ == "webdav.response"
+
+
+def test_an_absolute_destination_is_percent_encoded_once(server_url: str) -> None:
+    with Session(auth=AUTH, retry=False) as session:
+        session.put(f"{server_url}/a.txt", b"x")
+        response = session.move(
+            f"{server_url}/a.txt", destination=f"{server_url}/ünï code.txt"
+        )
+        assert response.status_code == 201
+        assert FileSystem.from_session(session).exists(
+            f"{server_url}/%C3%BCn%C3%AF%20code.txt"
+        )
+
+
+def test_a_bare_etag_is_quoted_for_if_match() -> None:
+    with scripted_server(always(OK)) as (url, rec):
+        session = Session(retry=False)
+        session.put(f"{url}/a", b"x", if_match="35256-abc-1")
+        session.put(f"{url}/b", b"x", if_match='"quoted"')
+        session.delete(f"{url}/c", if_match="bare")
+    assert [r.headers["if-match"] for r in rec.requests] == [
+        '"35256-abc-1"',
+        '"quoted"',
+        '"bare"',
+    ]
+
+
+def test_a_scheme_relative_or_foreign_destination_is_refused() -> None:
+    with pytest.raises(ClientError):
+        Session("http://dav.example").move("/a", destination="//evil.example/x")
+    with pytest.raises(ClientError):
+        Session("http://dav.example").move("/a", destination="http://evil.example/x")
+
+
+def test_an_absolute_destination_with_a_space_or_percent_is_made_valid() -> None:
+    with scripted_server(always(OK)) as (url, rec):
+        session = Session(retry=False)
+        session.move(f"{url}/a", destination=f"{url}/a b/100%.txt")
+    destination = rec.requests[0].headers["destination"]
+    assert " " not in destination
+    assert destination.endswith("/a%20b/100%25.txt")
+
+
+def test_dotdot_past_the_root_is_an_error_even_with_a_root_base_url() -> None:
+    session = Session("http://dav.example")
+    for path in ("../x", "a/../../x", "..", "/../x"):
+        with pytest.raises(ClientError):
+            session.resolve_url(path)
+    assert session.resolve_url("a/../b") == "http://dav.example/b"
+
+
+_MS = '<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">{}</d:multistatus>'
+
+
+def test_a_weak_etag_is_not_a_validator_for_resuming_a_download() -> None:
+
+    calls = {"n": 0}
+
+    def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
+        if seen.method == "PROPFIND":
+            return (
+                207,
+                {"Content-Type": "application/xml"},
+                _MS.format(
+                    "<d:response><d:href>/f</d:href><d:propstat><d:prop><d:resourcetype/></d:prop>"
+                    "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
+                ).encode(),
+            )
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return (
+                200,
+                {
+                    "Content-Length": "1000",
+                    "ETag": 'W/"weak"',
+                    "Accept-Ranges": "bytes",
+                    NO_CONTENT_LENGTH: "1",
+                },
+                b"x" * 100,
+            )
+        return (
+            206,
+            {"Content-Range": "bytes 100-999/1000", "ETag": 'W/"weak"'},
+            b"y" * 900,
+        )
+
+    out = io.BytesIO()
+    with scripted_server(respond) as (url, _rec):
+        with pytest.raises((WebDAVError, requests.RequestException)):
+            FileSystem(retry=False).download_fileobj(f"{url}/f", out)
+
+
+def test_send_refuses_another_origin_than_the_base_url() -> None:
+    with scripted_server(always(OK)) as (other, other_rec):
+        with scripted_server(always(OK)) as (url, rec):
+            session = Session(
+                url, auth=("u", "p"), headers={"X-Api-Key": "K"}, retry=False
+            )
+            prepared = session.prepare_request(requests.Request("GET", f"{other}/x"))
+            assert prepared.headers[
+                "Authorization"
+            ]  # prepare_request prepares as asked
+            with pytest.raises(ClientError, match="base_url"):
+                session.send(prepared)
+            ok = session.prepare_request(requests.Request("GET", f"{url}/y"))
+            assert session.send(ok).status_code == 204
+    assert other_rec.requests == []
+    assert len(rec.requests) == 1
+
+
+def test_send_refuses_a_url_with_credentials_in_it() -> None:
+    with scripted_server(always(OK)) as (url, rec):
+        host = url.removeprefix("http://")
+        session = Session(retry=False)
+        prepared = session.prepare_request(
+            requests.Request("GET", f"http://u:p@{host}/x")
+        )
+        with pytest.raises(ClientError, match="credentials"):
+            session.send(prepared)
+    assert rec.requests == []
+
+
+def test_send_without_a_base_url_still_sends_to_any_http_url() -> None:
+    with scripted_server(always(OK)) as (url, _rec):
+        session = Session(retry=False)
+        assert (
+            session.send(
+                session.prepare_request(requests.Request("GET", f"{url}/x"))
+            ).status_code
+            == 204
+        )

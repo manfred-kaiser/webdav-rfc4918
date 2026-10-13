@@ -1,9 +1,8 @@
-"""Hardening of the transport, the streams and the download path.
+"""Reading and writing response bodies: streams, content codings, ``Content-Range`` and resuming."""
 
-One block per behaviour; each has a test of the misbehaviour and one of the behaviour that
-has always been right and must stay so.
-"""
+# ruff: noqa: SIM117, PLC0415, PTH208, S105, RUF001
 
+import contextlib
 import gzip
 import io
 import socket
@@ -19,16 +18,82 @@ import requests
 
 from tests.scripted_server import (
     NO_CONTENT_LENGTH,
-    always,
     Reply,
     Seen,
+    always,
     scripted_server,
 )
-from webdav import FileSystem, RedirectPolicy, Session
-from webdav.exceptions import ClientError
+from webdav import FileSystem, Session
+from webdav.exceptions import ClientError, WebDAVError
 from webdav.fs.streams import IterStream
 from webdav.fsspec import WebdavFileSystem
-from webdav.transport.deadline import DeadlineAdapter
+from webdav.transport.parse_utils import parse_content_range
+
+
+@pytest.mark.parametrize("length", ["²", "9" * 5000, "-5", "1e3", "０"])
+def test_a_hostile_content_length_never_raises_a_bare_valueerror(length: str) -> None:
+    reply = (200, {"Content-Length": length, NO_CONTENT_LENGTH: "1"}, b"hello")
+    with scripted_server(always(reply)) as (url, _rec):
+        # Refusing the response is fine, and so is a network-level error;
+        # a bare ValueError (or anything else) escaping is what must not happen.
+        with contextlib.suppress(WebDAVError, requests.RequestException):
+            Session(retry=False).get(f"{url}/f")
+
+
+def test_send_reads_a_no_length_body_normally() -> None:
+    with scripted_server(always((200, {NO_CONTENT_LENGTH: "1"}, b"abc"))) as (
+        url,
+        _rec,
+    ):
+        session = Session(retry=False)
+        assert (
+            session.send(
+                session.prepare_request(requests.Request("GET", f"{url}/a"))
+            ).content
+            == b"abc"
+        )
+
+
+def test_stacked_content_codings_are_refused() -> None:
+    import gzip
+
+    body = gzip.compress(gzip.compress(gzip.compress(b"0" * 1_000_000)))
+    with scripted_server(
+        always((207, {"Content-Encoding": "gzip, gzip, gzip"}, body))
+    ) as (url, _r):
+        with pytest.raises(ClientError, match="stacked"):
+            Session(retry=False).propfind(url, depth=0)
+
+
+def test_a_head_reply_is_not_refused_for_the_length_of_the_body_it_does_not_carry() -> (
+    None
+):
+    reply: tuple[int, dict[str, str], bytes] = (
+        200,
+        {"Content-Length": "200000000", NO_CONTENT_LENGTH: "1"},
+        b"",
+    )
+    with scripted_server(always(reply)) as (url, _rec):
+        response = Session(retry=False, max_response_size=1024).head(f"{url}/big")
+        assert response.status_code == 200
+        assert response.headers["Content-Length"] == "200000000"
+        assert response.content == b""
+    not_modified = (304, {"Content-Length": "999999999", NO_CONTENT_LENGTH: "1"}, b"")
+    with scripted_server(always(not_modified)) as (url, _rec):
+        assert (
+            Session(retry=False, max_response_size=1024).get(f"{url}/x").status_code
+            == 304
+        )
+
+
+@pytest.mark.parametrize("unit", ["bytes", "Bytes", "BYTES"])
+def test_the_range_unit_is_case_insensitive(unit: str) -> None:
+    assert parse_content_range(f"{unit} 0-9/10") == (0, 9, 10)
+
+
+def test_another_unit_is_not_a_byte_range() -> None:
+    assert parse_content_range("items 0-9/10") is None
+
 
 _PROPFIND = (
     b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/f</d:href>'
@@ -51,98 +116,6 @@ def file_server(
     return respond
 
 
-def serves(data: bytes, **extra: str) -> "Callable[[Seen], Reply]":
-    """A GET answered like a server that knows ranges (and an ETag) answers it."""
-
-    def respond(seen: Seen) -> Reply:
-        headers = {"ETag": '"v1"', "Accept-Ranges": "bytes", **extra}
-        requested = seen.headers.get("range")
-        if requested is None:
-            return 200, headers, data
-        first, _, last = requested.removeprefix("bytes=").partition("-")
-        start = int(first)
-        stop = min(int(last) if last else len(data) - 1, len(data) - 1)
-        headers["Content-Range"] = f"bytes {start}-{stop}/{len(data)}"
-        return 206, headers, data[start : stop + 1]
-
-    return respond
-
-
-class RawServer:
-    """A keep-alive HTTP server that answers with exactly the bytes a handler sends."""
-
-    def __init__(
-        self, handler: "Callable[[RawServer, socket.socket, Seen], str | None]"
-    ):
-        self.handler = handler
-        self.requests: list[Seen] = []
-        self.connections = 0
-        self._sock = socket.socket()
-        self._sock.bind(("127.0.0.1", 0))
-        self._sock.listen(20)
-        self.url = f"http://127.0.0.1:{self._sock.getsockname()[1]}"
-        threading.Thread(target=self._accept, daemon=True).start()
-
-    def _accept(self) -> None:
-        while True:
-            try:
-                conn, _ = self._sock.accept()
-            except OSError:
-                return
-            self.connections += 1
-            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
-
-    def _serve(self, conn: socket.socket) -> None:
-        try:
-            while True:
-                data = b""
-                while b"\r\n\r\n" not in data:
-                    more = conn.recv(65536)
-                    if not more:
-                        return
-                    data += more
-                head, _, rest = data.partition(b"\r\n\r\n")
-                lines = head.decode("latin1").split("\r\n")
-                method, path, _ = lines[0].split(" ", 2)
-                headers = {
-                    k.lower(): v.strip()
-                    for k, _, v in (line.partition(":") for line in lines[1:])
-                }
-                length = int(headers.get("content-length", 0))
-                while len(rest) < length:
-                    rest += conn.recv(65536)
-                seen = Seen(method, path, headers, rest[:length])
-                self.requests.append(seen)
-                if self.handler(self, conn, seen) == "close":
-                    return
-        except OSError:
-            pass
-        finally:
-            conn.close()
-
-    def close(self) -> None:
-        self._sock.close()
-
-
-@contextmanager
-def raw_server(
-    handler: "Callable[[RawServer, socket.socket, Seen], str | None]",
-) -> Iterator[RawServer]:
-    server = RawServer(handler)
-    try:
-        yield server
-    finally:
-        server.close()
-
-
-def _propfind_reply(conn: socket.socket, size: int) -> None:
-    body = _PROPFIND % size
-    conn.sendall(
-        b"HTTP/1.1 207 Multi-Status\r\nContent-Type: application/xml\r\n"
-        b"Content-Length: %d\r\n\r\n" % len(body) + body
-    )
-
-
 class Sink:
     """A file object that collects what is written."""
 
@@ -152,14 +125,6 @@ class Sink:
     def write(self, chunk: bytes) -> int:
         self.data += chunk
         return len(chunk)
-
-
-_BODY = bytes(range(256)) * 40  # 10 KiB
-
-
-# ---------------------------------------------------------------------------
-# a stored file labelled with a Content-Encoding is read as the bytes it is
-# ---------------------------------------------------------------------------
 
 
 _GZIPPED = gzip.compress(b"A" * 100_000)
@@ -239,9 +204,21 @@ def test_an_answer_that_inflates_past_the_limit_is_refused() -> None:
                 s.get("/x")
 
 
-# ---------------------------------------------------------------------------
-# skipping forward does not buffer what is skipped
-# ---------------------------------------------------------------------------
+def serves(data: bytes, **extra: str) -> "Callable[[Seen], Reply]":
+    """A GET answered like a server that knows ranges (and an ETag) answers it."""
+
+    def respond(seen: Seen) -> Reply:
+        headers = {"ETag": '"v1"', "Accept-Ranges": "bytes", **extra}
+        requested = seen.headers.get("range")
+        if requested is None:
+            return 200, headers, data
+        first, _, last = requested.removeprefix("bytes=").partition("-")
+        start = int(first)
+        stop = min(int(last) if last else len(data) - 1, len(data) - 1)
+        headers["Content-Range"] = f"bytes {start}-{stop}/{len(data)}"
+        return 206, headers, data[start : stop + 1]
+
+    return respond
 
 
 def test_a_forward_seek_does_not_hold_what_it_skips() -> None:
@@ -262,31 +239,71 @@ def test_a_forward_seek_does_not_hold_what_it_skips() -> None:
         assert peak < 6 * 2**20
 
 
-# ---------------------------------------------------------------------------
-# an address urllib3 cannot parse is an InvalidURL
-# ---------------------------------------------------------------------------
+class RawServer:
+    """A keep-alive HTTP server that answers with exactly the bytes a handler sends."""
 
-
-def test_a_redirect_to_an_unparseable_host_is_an_invalid_url() -> None:
-    with scripted_server(lambda _s: (302, {"Location": "http://a..b/"}, b"")) as (
-        url,
-        _rec,
+    def __init__(
+        self, handler: "Callable[[RawServer, socket.socket, Seen], str | None]"
     ):
-        session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
-        with pytest.raises(requests.exceptions.InvalidURL) as excinfo:
-            session.get(f"{url}/x")
-    assert isinstance(excinfo.value, ValueError)
+        self.handler = handler
+        self.requests: list[Seen] = []
+        self.connections = 0
+        self._sock = socket.socket()
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(20)
+        self.url = f"http://127.0.0.1:{self._sock.getsockname()[1]}"
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self) -> None:
+        while True:
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                return
+            self.connections += 1
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    def _serve(self, conn: socket.socket) -> None:
+        try:
+            while True:
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    more = conn.recv(65536)
+                    if not more:
+                        return
+                    data += more
+                head, _, rest = data.partition(b"\r\n\r\n")
+                lines = head.decode("latin1").split("\r\n")
+                method, path, _ = lines[0].split(" ", 2)
+                headers = {
+                    k.lower(): v.strip()
+                    for k, _, v in (line.partition(":") for line in lines[1:])
+                }
+                length = int(headers.get("content-length", 0))
+                while len(rest) < length:
+                    rest += conn.recv(65536)
+                seen = Seen(method, path, headers, rest[:length])
+                self.requests.append(seen)
+                if self.handler(self, conn, seen) == "close":
+                    return
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    def close(self) -> None:
+        self._sock.close()
 
 
-def test_the_adapter_turns_a_location_error_into_an_invalid_url() -> None:
-    prepared = requests.Request("GET", "http://a..b/").prepare()
-    with pytest.raises(requests.exceptions.InvalidURL):
-        DeadlineAdapter().send(prepared, timeout=1)
-
-
-# ---------------------------------------------------------------------------
-# a held bodyless response does not poison the connection
-# ---------------------------------------------------------------------------
+@contextmanager
+def raw_server(
+    handler: "Callable[[RawServer, socket.socket, Seen], str | None]",
+) -> Iterator[RawServer]:
+    server = RawServer(handler)
+    try:
+        yield server
+    finally:
+        server.close()
 
 
 @pytest.mark.parametrize("method", ["put", "delete", "head"])
@@ -313,11 +330,6 @@ def test_a_held_bodyless_response_does_not_break_the_next_request(method: str) -
         assert server.connections == 1  # and the connection was kept alive, not dropped
 
 
-# ---------------------------------------------------------------------------
-# the corners of IterStream
-# ---------------------------------------------------------------------------
-
-
 def _stream(url: str, session: Session) -> IterStream:
     return IterStream(session, f"{url}/f", chunk_size=100)
 
@@ -327,6 +339,9 @@ def test_seeking_to_the_end_of_an_empty_file_is_position_zero() -> None:
         with _stream(url, Session(url)) as stream:
             assert stream.seek(0, 2) == 0
             assert stream.read() == b""
+
+
+_BODY = bytes(range(256)) * 40  # 10 KiB
 
 
 def test_read_none_reads_everything() -> None:
@@ -370,11 +385,6 @@ def test_seeking_and_reading_an_open_stream_still_works() -> None:
             assert stream.read(2) == _BODY[3:5]
 
 
-# ---------------------------------------------------------------------------
-# a write that takes less than it was given
-# ---------------------------------------------------------------------------
-
-
 class Raw:
     """A raw stream: ``write`` takes at most ``limit`` bytes at a time and says how many."""
 
@@ -388,6 +398,13 @@ class Raw:
         return len(taken)
 
 
+def test_a_partial_write_is_written_to_the_end() -> None:
+    with scripted_server(file_server(len(_BODY), serves(_BODY))) as (url, _rec):
+        raw = Raw(limit=1000)
+        FileSystem(url).download_fileobj("/f", raw, chunk_size=4096)  # type: ignore[arg-type]
+        assert raw.data == _BODY
+
+
 class Silent:
     """A file object whose ``write`` returns nothing (many wrappers)."""
 
@@ -396,13 +413,6 @@ class Silent:
 
     def write(self, chunk: bytes) -> None:
         self.data += chunk
-
-
-def test_a_partial_write_is_written_to_the_end() -> None:
-    with scripted_server(file_server(len(_BODY), serves(_BODY))) as (url, _rec):
-        raw = Raw(limit=1000)
-        FileSystem(url).download_fileobj("/f", raw, chunk_size=4096)  # type: ignore[arg-type]
-        assert raw.data == _BODY
 
 
 def test_a_write_that_returns_none_counts_as_complete() -> None:
@@ -416,11 +426,6 @@ def test_a_file_object_that_takes_nothing_is_an_error_not_an_endless_loop() -> N
     with scripted_server(file_server(len(_BODY), serves(_BODY))) as (url, _rec):
         with pytest.raises(OSError, match="accepted no more data"):
             FileSystem(url).download_fileobj("/f", Raw(limit=0))  # type: ignore[arg-type]
-
-
-# ---------------------------------------------------------------------------
-# Content-Range is checked as a whole
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(

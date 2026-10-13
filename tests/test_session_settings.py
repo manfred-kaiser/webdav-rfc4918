@@ -1,19 +1,27 @@
 """The settings of a session: what is accepted, when it is refused, and that it survives a pickle."""
 
+# ruff: noqa: SIM117, PLC0415, PTH208, S105, RUF001, S301, PT031, EM101
+
+import base64
 import copy
+import logging
 import pickle
 from typing import Any
 
 import pytest
+import requests
 
 import webdav
-from tests.scripted_server import OK, always, redirect, scripted_server
+from tests import previous_release_pickles as old
+from tests.scripted_server import (
+    NO_CONTENT_LENGTH,
+    OK,
+    always,
+    redirect,
+    scripted_server,
+)
 from webdav import FileSystem, RedirectPolicy, Session
 from webdav.transport.tls import TLSOptions
-
-# ---------------------------------------------------------------------------
-# Every setting is checked where it is set
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -103,11 +111,6 @@ def test_a_redirect_policy_given_for_one_call_is_checked_too() -> None:
         session.get("/x", redirect_policy=RedirectPolicy.WHITELIST)
 
 
-# ---------------------------------------------------------------------------
-# max_redirects is a real limit
-# ---------------------------------------------------------------------------
-
-
 def _chain(box: "dict[str, str]") -> Any:
     def respond(seen: Any) -> Any:
         return redirect(307, f"{box['url']}/{int(seen.path.lstrip('/')) + 1}")
@@ -141,11 +144,6 @@ def test_a_max_redirects_that_is_no_count_is_refused(count: object) -> None:
         Session(max_redirects=count)  # type: ignore[arg-type]
 
 
-# ---------------------------------------------------------------------------
-# max_response_time is given to the constructor like every other limit
-# ---------------------------------------------------------------------------
-
-
 def test_max_response_time_is_a_constructor_argument_everywhere() -> None:
     assert Session(max_response_time=7).max_response_time == 7
     assert Session(max_response_time=None).max_response_time is None
@@ -155,11 +153,6 @@ def test_max_response_time_is_a_constructor_argument_everywhere() -> None:
         # removing the root is refused by the library before anything is sent.
         with pytest.raises(webdav.ClientError, match="root"):
             webdav.remove(f"{url}/", max_response_time=3)
-
-
-# ---------------------------------------------------------------------------
-# A session can be copied and pickled (fsspec needs it) - credentials included
-# ---------------------------------------------------------------------------
 
 
 def _configured() -> Session:
@@ -242,11 +235,6 @@ def test_what_cannot_be_pickled_says_so() -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# retry is a setting like the others
-# ---------------------------------------------------------------------------
-
-
 def test_retry_can_be_switched_and_replaced_after_construction() -> None:
     calls: list[str] = []
 
@@ -280,3 +268,134 @@ def test_a_changed_retry_survives_a_copy() -> None:
     session.retry = False
     assert copy.copy(session).retry is not session.retry  # rebuilt, not shared
     assert copy.copy(session)._retry_arg is False
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, "8", True])
+def test_chunk_size_must_be_a_positive_integer(bad: object) -> None:
+    with pytest.raises(ValueError, match="chunk_size"):
+        Session(chunk_size=bad)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("bad", [0, -1, "5", True, float("nan"), float("inf")])
+def test_response_limits_are_validated(bad: object) -> None:
+    session = Session()
+    with pytest.raises(ValueError, match="max_response_time"):
+        session.max_response_time = bad  # type: ignore[assignment]
+    with pytest.raises(ValueError, match="max_response_size"):
+        Session(max_response_size=bad)  # type: ignore[arg-type]
+
+
+def test_valid_response_limits_are_accepted() -> None:
+    session = Session(max_response_size=10)
+    session.max_response_time = None
+    session.max_response_time = 12.5
+    assert session.max_response_time == 12.5
+
+
+def test_a_session_takes_max_response_time_after_construction() -> None:
+    with scripted_server(always((200, {NO_CONTENT_LENGTH: "1"}, b"x" * 100))) as (
+        url,
+        _rec,
+    ):
+        session = Session()
+        session.max_response_time = 30
+        assert session.get(f"{url}/f").content == b"x" * 100
+
+
+def test_pickles_of_the_previous_release_still_load() -> None:
+    plain = pickle.loads(base64.b64decode("".join(old.PLAIN)))
+    assert plain.base_url == "https://dav.example.org/base/"
+    assert plain.auth == ("alice", "s3cret")
+    assert plain.headers["X-Test"] == "1"
+    assert plain.cookies.get("sid") == "abc"
+    assert plain.verify is True
+    # ... and the loaded session works like a new one.
+    with scripted_server(always(OK)) as (url, rec):
+        clone = pickle.loads(base64.b64decode("".join(old.PLAIN)))
+        clone._base_url = None  # pytest-only: point it at the local server
+        clone.get(f"{url}/x")
+    assert rec.requests[0].headers["authorization"].startswith("Basic ")
+
+
+def test_a_filesystem_pickle_of_the_previous_release_loads() -> None:
+    client = pickle.loads(base64.b64decode("".join(old.FILESYSTEM)))
+    assert client.session.auth == ("bob", "pw")
+
+
+def test_a_copy_does_not_share_its_containers() -> None:
+    session = Session(headers={"X-A": "1"})
+    session.params = {"a": "1"}
+    session.proxies = {"http": "http://proxy.example:3128"}
+    session.cookies.set("c", "1", domain="h.example")
+    clone = copy.copy(session)
+    clone.headers["X-B"] = "2"
+    clone.params["b"] = "2"
+    clone.proxies["https"] = "http://other.example:3128"
+    clone.cookies.set("d", "2", domain="h.example")
+    clone.hooks["response"].append(lambda r, **_k: r)
+    assert "X-B" not in session.headers
+    assert session.params == {"a": "1"}
+    assert "https" not in session.proxies
+    assert session.cookies.get("d") is None
+    assert session.hooks["response"] == []
+    assert clone.headers["X-A"] == "1"
+    assert clone.cookies.get("c") == "1"
+
+
+def test_a_pickle_roundtrip_is_unchanged() -> None:
+    session = Session("https://h.example", auth=("u", "p"), headers={"X-A": "1"})
+    clone = pickle.loads(pickle.dumps(session))
+    assert clone.auth == ("u", "p")
+    assert clone.headers["X-A"] == "1"
+
+
+def test_trust_env_false_ignores_the_environment_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with scripted_server(always(OK)) as (proxy, proxy_rec):
+        monkeypatch.setenv("HTTP_PROXY", proxy)
+        monkeypatch.setenv("http_proxy", proxy)
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
+        Session(retry=False).get(
+            "http://dav.invalid/x"
+        )  # the default: through the proxy
+        assert len(proxy_rec.requests) == 1
+        with pytest.raises(requests.exceptions.ConnectionError):
+            Session(retry=False, trust_env=False, timeout=(0.5, 0.5)).get(
+                "http://dav.invalid/x"
+            )
+        assert len(proxy_rec.requests) == 1
+
+
+def test_trust_env_is_a_bool_and_an_option_everywhere() -> None:
+    with pytest.raises(TypeError):
+        Session(trust_env=0)  # type: ignore[arg-type]
+    assert Session().trust_env is True
+    assert FileSystem("http://dav.example", trust_env=False).session.trust_env is False
+    assert pickle.loads(pickle.dumps(Session(trust_env=False))).trust_env is False
+
+
+def _closed_port() -> int:
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def test_a_connection_error_through_an_environment_proxy_says_so(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    dead = f"http://proxyuser:proxypw@127.0.0.1:{_closed_port()}"
+    monkeypatch.setenv("HTTP_PROXY", dead)
+    monkeypatch.setenv("http_proxy", dead)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    with caplog.at_level(logging.WARNING, logger="webdav"):
+        with pytest.raises(requests.exceptions.ConnectionError) as caught:
+            Session(retry=False).get("http://dav.invalid/x")
+    notes = " ".join(getattr(caught.value, "__notes__", []))
+    assert "trust_env=False" in notes
+    assert "trust_env=False" in caplog.text
+    assert "proxypw" not in notes + caplog.text

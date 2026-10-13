@@ -30,3 +30,25 @@ def test_a_url_is_shown_without_its_secrets() -> None:
 
 def test_a_plain_path_is_shown_as_it_is() -> None:
     assert display_url("/docs/a b.txt") == "/docs/a b.txt"
+
+
+@pytest.mark.parametrize(
+    "authority", ["h:²", "h:٣٠", "[::1]:٨٠", "h:1_0", "h:+80", "h:8 0"]
+)
+def test_EXC06_a_port_is_ascii_digits(authority: str) -> None:
+    from webdav._webdavs_url import host_and_port
+
+    with pytest.raises(ValueError, match="host"):
+        host_and_port(authority)
+
+
+@pytest.mark.parametrize(
+    ("authority", "expected"),
+    [("h:80", ("h", 80)), ("[::1]:8080", ("::1", 8080)), ("h", ("h", None))],
+)
+def test_EXC06_guard_ordinary_authorities(
+    authority: str, expected: "tuple[str, int | None]"
+) -> None:
+    from webdav._webdavs_url import host_and_port
+
+    assert host_and_port(authority) == expected
