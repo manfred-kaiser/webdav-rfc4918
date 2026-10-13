@@ -26,7 +26,9 @@ from tests.instance_dir import ensure_private_dir
 #: via zypper at the time this was written) - add a profile below if one
 #: turns up, same as apache_instance.py's own multi-profile story.
 TEST_USER = "testuser"
-TEST_PASSWORD = "testpass123"  # noqa: S105
+TEST_PASSWORD = (
+    "testpass123"  # noqa: S105 - made-up credentials of the throwaway instance
+)
 HOST = "127.0.0.1"
 PORT = 8766
 
@@ -166,7 +168,9 @@ def wait_until_up(url: str, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=0.5):  # noqa: S310
+            with urllib.request.urlopen(  # noqa: S310 - the URL of the instance this module started
+                url, timeout=0.5
+            ):
                 pass
         except urllib.error.HTTPError as exc:
             exc.close()  # an open HTTPError is a ResourceWarning when collected (Python 3.14)

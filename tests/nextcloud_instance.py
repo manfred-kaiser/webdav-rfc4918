@@ -22,7 +22,9 @@ import urllib.request
 IMAGE = "nextcloud:35.0.1-apache"
 CONTAINER_NAME = "webdav-rfc4918-nextcloud-test"
 TEST_USER = "admin"
-TEST_PASSWORD = "testpass123"  # noqa: S105
+TEST_PASSWORD = (
+    "testpass123"  # noqa: S105 - made-up credentials of the throwaway instance
+)
 HOST = "127.0.0.1"
 PORT = 8767
 
@@ -37,7 +39,9 @@ def missing_prerequisites() -> list[str]:
     docker = _docker_binary()
     if docker is None:
         return ["docker"]
-    result = subprocess.run([docker, "info"], capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        [docker, "info"], capture_output=True, text=True, check=False
+    )
     if result.returncode != 0:
         return ["a running docker daemon (docker info failed - started? permissions?)"]
     return []
@@ -68,7 +72,9 @@ def start(*, timeout: float = 180.0) -> None:
         raise RuntimeError(msg)
     docker = _docker_binary()
     assert docker is not None  # checked above
-    subprocess.run([docker, "rm", "-f", CONTAINER_NAME], capture_output=True, check=False)
+    subprocess.run(
+        [docker, "rm", "-f", CONTAINER_NAME], capture_output=True, check=False
+    )
     result = subprocess.run(
         [
             docker,
@@ -105,7 +111,7 @@ def start(*, timeout: float = 180.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(status_url, timeout=2) as resp:  # noqa: S310
+            with urllib.request.urlopen(status_url, timeout=2) as resp:
                 status = json.loads(resp.read())
         except (urllib.error.URLError, json.JSONDecodeError, OSError):
             time.sleep(1)
@@ -127,4 +133,6 @@ def stop() -> None:
     docker = _docker_binary()
     if docker is None:
         return
-    subprocess.run([docker, "rm", "-f", CONTAINER_NAME], capture_output=True, check=False)
+    subprocess.run(
+        [docker, "rm", "-f", CONTAINER_NAME], capture_output=True, check=False
+    )

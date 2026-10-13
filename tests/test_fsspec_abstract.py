@@ -40,6 +40,7 @@ class WebdavAbstractFixtures(AbstractFixtures):
     """
 
     @pytest.fixture
+    # pylint: disable-next=arguments-differ
     def fs(self, server_url: str) -> "Iterator[WebdavFileSystem]":
         """A :class:`~webdav.fsspec.WebdavFileSystem` against a fresh test server."""
         fs = WebdavFileSystem(server_url, auth=AUTH)

@@ -1,6 +1,7 @@
-"""``insecure_transport`` is an ``InsecureTransport``; the refusal cites RFC 4918 section 20.1 for Basic."""
+"""``insecure_transport`` is an ``InsecureTransport``.
 
-# ruff: noqa: SIM117, PLC0415, S105, S108, S301, PT031, EM101
+The refusal cites RFC 4918 section 20.1 for Basic.
+"""
 
 import base64
 import contextlib
@@ -22,6 +23,7 @@ from webdav import (
     FileSystem,
     InsecureTransport,
     Session,
+    cli,
     exceptions,
 )
 from webdav.exceptions import InsecureTransportWarning
@@ -84,7 +86,7 @@ def test_the_refusal_of_basic_cites_the_rfc(auth: object) -> None:
 
 
 def test_an_authorization_basic_header_counts_as_basic() -> None:
-    with pytest.raises(ClientError, match="RFC 4918 section 20.1"):
+    with pytest.raises(ClientError, match=r"RFC 4918 section 20\.1"):
         Session(**QUICK).get(REMOTE, headers={"Authorization": "Basic dXNlcjpwdw=="})
 
 
@@ -103,9 +105,11 @@ def test_the_refusal_of_other_credentials_does_not_claim_the_rfc_forbids_them(
 @pytest.mark.parametrize("mode", ["warn", InsecureTransport.WARN])
 def test_the_warning_for_basic_cites_the_rfc(mode: object) -> None:
     session = Session(auth=("user", "secret"), insecure_transport=mode, **QUICK)  # type: ignore[arg-type]
-    with pytest.warns(InsecureTransportWarning, match="RFC 4918 section 20.1"):
-        with pytest.raises(Exception, match=r"192\.0\.2\.1"):
-            session.get(REMOTE)
+    with (
+        pytest.warns(InsecureTransportWarning, match="RFC 4918 section 20.1"),
+        pytest.raises(Exception, match=r"192\.0\.2\.1"),
+    ):
+        session.get(REMOTE)
 
 
 def test_the_insecure_transport_warning_names_no_password_and_sees_url_credentials() -> (
@@ -209,10 +213,12 @@ def test_the_mode_is_validated_and_can_be_changed() -> None:
 
 
 def test_loopback_http_with_credentials_is_untouched() -> None:
-    with scripted_server(always(OK)) as (url, rec):
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            Session(url, auth=("u", "p"), retry=False).get("/x")
+    with (
+        scripted_server(always(OK)) as (url, rec),
+        warnings.catch_warnings(),
+    ):
+        warnings.simplefilter("error")
+        Session(url, auth=("u", "p"), retry=False).get("/x")
     assert len(rec.requests) == 1
 
 
@@ -242,8 +248,6 @@ def test_loopback_does_not_count_for_an_environment_proxy_either(
 def test_the_cli_flag_allows_what_the_default_refuses(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from webdav import cli
-
     args = ["ls", "http://u:p@192.0.2.1:9/", "--timeout", "0.05", "--no-retry"]
     assert cli.main(args) == 1
     assert "refusing to send credentials" in capsys.readouterr().err

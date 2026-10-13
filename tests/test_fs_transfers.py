@@ -1,14 +1,19 @@
-"""Moving content between the server and local files or file objects: uploads, downloads, ``open()``, text decoding, symlinks, part files and local names."""
+"""Moving content between the server and local files or file objects.
 
-# ruff: noqa: SIM117, PLC0415, S105, S108, PTH208, RUF001
+Uploads, downloads, ``open()``, text decoding, symlinks, part files and local names.
+"""
 
+import contextlib
 import errno
+import inspect
 import io
 import os
+import shutil
 import stat
+import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import requests
@@ -35,6 +40,7 @@ from webdav.exceptions import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from typing import BinaryIO
 
 
 def test_a_failed_download_leaves_an_existing_local_file_alone(
@@ -42,9 +48,11 @@ def test_a_failed_download_leaves_an_existing_local_file_alone(
 ) -> None:
     target = tmp_path / "keep.txt"
     target.write_bytes(b"precious")
-    with FileSystem(server_url, auth=AUTH, retry=False) as fs:
-        with pytest.raises(webdav.ResourceNotFoundError):
-            fs.download_file("missing.txt", target, overwrite=True)
+    with (
+        FileSystem(server_url, auth=AUTH, retry=False) as fs,
+        pytest.raises(webdav.ResourceNotFoundError),
+    ):
+        fs.download_file("missing.txt", target, overwrite=True)
     assert target.read_bytes() == b"precious"
     assert [p.name for p in tmp_path.iterdir()] == ["keep.txt"]  # no stray partial file
 
@@ -97,16 +105,16 @@ def test_a_per_call_chunk_size_is_validated_too(
 def test_open_validates_chunk_size_up_front_like_the_other_transfers(
     server_url: str, mode: str
 ) -> None:
-    """Unlike download_file/download_fileobj/upload_fileobj, open() used to pass
-    chunk_size straight through unchecked - a read never validated it at all,
-    and a write only found out after the whole body had been spooled."""
+    """Unlike download_file/download_fileobj/upload_fileobj, open() used to pass chunk_size straight through unchecked - a read never validated it at all, and a write only found out after the whole body had been spooled."""
     with Session(server_url, auth=AUTH, retry=False) as session:
         session.put("a.txt", b"x")
-        with pytest.raises(ValueError, match="chunk_size"):
-            with FileSystem.from_session(session).open(  # type: ignore[call-overload]
+        with (
+            pytest.raises(ValueError, match="chunk_size"),
+            FileSystem.from_session(session).open(  # type: ignore[call-overload]
                 "a.txt", mode, chunk_size=0
-            ):
-                pass
+            ),
+        ):
+            pass
 
 
 def test_module_level_transfers_reject_unknown_arguments_and_forward_known_ones(
@@ -135,7 +143,7 @@ _FILE_PROPS = (
 )
 
 
-def _file_server(get_reply: "tuple[int, dict[str, str], bytes]"):  # type: ignore[no-untyped-def]
+def _file_server(get_reply: "tuple[int, dict[str, str], bytes]") -> Any:
     def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
         if seen.method == "PROPFIND":
             return 207, {"Content-Type": "application/xml"}, _FILE_PROPS
@@ -145,21 +153,21 @@ def _file_server(get_reply: "tuple[int, dict[str, str], bytes]"):  # type: ignor
 
 
 def test_a_416_on_the_first_get_is_an_error_not_an_empty_download() -> None:
-    import io
-
-    with scripted_server(_file_server((416, {}, b""))) as (url, _rec):
-        with pytest.raises(HTTPStatusError):
-            FileSystem(retry=False).download_fileobj(f"{url}/f", io.BytesIO())
+    with (
+        scripted_server(_file_server((416, {}, b""))) as (url, _rec),
+        pytest.raises(HTTPStatusError),
+    ):
+        FileSystem(retry=False).download_fileobj(f"{url}/f", io.BytesIO())
 
 
 @pytest.mark.parametrize("status", [403, 404])
 def test_a_failed_download_gives_its_connection_back(status: int) -> None:
     """The error response of a streamed GET is not read; nothing may keep its connection checked out."""
-    import io
-
-    with scripted_server(_file_server((status, {}, b"not for you"))) as (url, _rec):
-        with pytest.raises(HTTPStatusError) as caught:
-            FileSystem(retry=False).download_fileobj(f"{url}/f", io.BytesIO())
+    with (
+        scripted_server(_file_server((status, {}, b"not for you"))) as (url, _rec),
+        pytest.raises(HTTPStatusError) as caught,
+    ):
+        FileSystem(retry=False).download_fileobj(f"{url}/f", io.BytesIO())
     assert caught.value.status_code == status
     assert caught.value.response.raw.closed
     assert (
@@ -169,8 +177,6 @@ def test_a_failed_download_gives_its_connection_back(status: int) -> None:
 
 def test_a_truncated_download_is_never_reported_as_complete() -> None:
     """Server promises 1000 bytes, sends 100, then answers the resume with 416."""
-    import io
-
     calls = {"n": 0}
 
     def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
@@ -211,54 +217,56 @@ def _text_server(content_type: "str | None", body: bytes) -> Any:
 
 
 def _read_text(content_type: "str | None", body: bytes, **options: Any) -> str:
-    with scripted_server(_text_server(content_type, body)) as (url, _):
-        with FileSystem(retry=False).open(f"{url}/f", **options) as f:
-            return str(f.read())
+    with (
+        scripted_server(_text_server(content_type, body)) as (url, _),
+        FileSystem(retry=False).open(f"{url}/f", **options) as f,
+    ):
+        return str(f.read())
 
 
-def test_BUG02_text_without_charset_is_utf8() -> None:
+def test_bug02_text_without_charset_is_utf8() -> None:
     assert _read_text("text/plain", "héllo wörld €".encode()) == "héllo wörld €"
 
 
-def test_BUG02_no_content_type_is_utf8() -> None:
+def test_bug02_no_content_type_is_utf8() -> None:
     assert _read_text(None, "héllo €".encode()) == "héllo €"
 
 
-def test_BUG02_guard_declared_latin1_is_honoured() -> None:
+def test_bug02_guard_declared_latin1_is_honoured() -> None:
     assert (
         _read_text("text/plain; charset=iso-8859-1", "héllo".encode("latin-1"))
         == "héllo"
     )
 
 
-def test_BUG02_guard_quoted_and_uppercase_charset() -> None:
+def test_bug02_guard_quoted_and_uppercase_charset() -> None:
     assert _read_text('text/plain; Charset="UTF-8"', "héllo".encode()) == "héllo"
 
 
-def test_BUG02_guard_explicit_encoding_wins() -> None:
+def test_bug02_guard_explicit_encoding_wins() -> None:
     assert (
         _read_text("text/plain", "héllo".encode("latin-1"), encoding="iso-8859-1")
         == "héllo"
     )
 
 
-def test_BUG02_legacy_latin1_without_charset_needs_encoding() -> None:
+def test_bug02_legacy_latin1_without_charset_needs_encoding() -> None:
     with pytest.raises(UnicodeDecodeError):
         _read_text("text/plain", "héllo".encode("latin-1"))
 
 
-def test_BUG02_guard_hostile_charset_is_not_used() -> None:
+def test_bug02_guard_hostile_charset_is_not_used() -> None:
     assert _read_text("text/plain; charset=rot13", "héllo".encode()) == "héllo"
 
 
-def test_BUG06_fileobj_not_at_offset_zero(fs: FileSystem, tmp_path: Path) -> None:
+def test_bug06_fileobj_not_at_offset_zero(fs: FileSystem, tmp_path: Path) -> None:
     buf = io.BytesIO(b"HEADER:payload-bytes")
     buf.seek(7)
     fs.upload_fileobj(buf, "/off.bin")
     assert (tmp_path / "off.bin").read_bytes() == b"payload-bytes"
 
 
-def test_BUG06_real_file_at_an_offset(fs: FileSystem, tmp_path: Path) -> None:
+def test_bug06_real_file_at_an_offset(fs: FileSystem, tmp_path: Path) -> None:
     src = tmp_path / "s.bin"
     src.write_bytes(b"HEADER:payload-bytes")
     with src.open("rb") as fobj:
@@ -267,7 +275,7 @@ def test_BUG06_real_file_at_an_offset(fs: FileSystem, tmp_path: Path) -> None:
     assert (tmp_path / "off2.bin").read_bytes() == b"payload-bytes"
 
 
-def test_BUG06_pipe(fs: FileSystem, tmp_path: Path) -> None:
+def test_bug06_pipe(fs: FileSystem, tmp_path: Path) -> None:
     r, w = os.pipe()
     os.write(w, b"from a pipe")
     os.close(w)
@@ -276,9 +284,7 @@ def test_BUG06_pipe(fs: FileSystem, tmp_path: Path) -> None:
     assert (tmp_path / "pipe.bin").read_bytes() == b"from a pipe"
 
 
-def test_BUG06_fifo(fs: FileSystem, tmp_path: Path) -> None:
-    import threading
-
+def test_bug06_fifo(fs: FileSystem, tmp_path: Path) -> None:
     fifo = tmp_path / "fifo"
     os.mkfifo(fifo)
 
@@ -294,44 +300,45 @@ def test_BUG06_fifo(fs: FileSystem, tmp_path: Path) -> None:
     assert (tmp_path / "fifo.bin").read_bytes() == b"through a fifo"
 
 
-def test_BUG06_a_pipe_is_sent_chunked() -> None:
+def test_bug06_a_pipe_is_sent_chunked() -> None:
     with record_server() as (url, rec):
         r, w = os.pipe()
         os.write(w, b"x")
         os.close(w)
-        with os.fdopen(r, "rb") as fobj:
-            try:
-                FileSystem(retry=False).upload_fileobj(fobj, url + "/p", overwrite=True)
-            except Exception:  # the scripted server does not de-chunk  # noqa: BLE001
-                pass
+        with (
+            os.fdopen(r, "rb") as fobj,
+            # the scripted server does not de-chunk, so the upload itself may fail
+            contextlib.suppress(Exception),
+        ):
+            FileSystem(retry=False).upload_fileobj(fobj, url + "/p", overwrite=True)
     assert rec.requests
     assert "content-length" not in rec.requests[0].headers
     assert rec.requests[0].headers.get("transfer-encoding") == "chunked"
 
 
-def test_BUG06_guard_sizes(fs: FileSystem, tmp_path: Path) -> None:
+def test_bug06_guard_sizes(fs: FileSystem, tmp_path: Path) -> None:
     fs.upload_fileobj(io.BytesIO(b""), "/empty")
     fs.upload_fileobj(io.BytesIO(b"abc"), "/abc")
     assert (tmp_path / "empty").read_bytes() == b""
     assert (tmp_path / "abc").read_bytes() == b"abc"
 
 
-def test_BUG06_guard_a_longer_file_than_declared_still_errors(fs: FileSystem) -> None:
+def test_bug06_guard_a_longer_file_than_declared_still_errors(fs: FileSystem) -> None:
     with pytest.raises(ClientError):
         fs.upload_fileobj(io.BytesIO(b"abcdef"), "/x", size=3)
 
 
-def test_FS02_upload_file_can_refuse_a_symlink(
+def test_fs02_upload_file_can_refuse_a_symlink(
     fs: FileSystem, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     base = tmp_path_factory.mktemp("up")
     (base / "secret.txt").write_text("TOP-SECRET")
     (base / "innocent.txt").symlink_to(base / "secret.txt")
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match="symbolic links"):
         fs.upload_file(base / "innocent.txt", "/innocent.txt", follow_symlinks=False)
 
 
-def test_FS02_guard_upload_file_follows_a_symlink_by_default(
+def test_fs02_guard_upload_file_follows_a_symlink_by_default(
     fs: FileSystem, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     base = tmp_path_factory.mktemp("up")
@@ -341,17 +348,11 @@ def test_FS02_guard_upload_file_follows_a_symlink_by_default(
     assert (tmp_path / "link.txt").read_text() == "data"
 
 
-def test_FS02_the_module_function_has_the_parameter(
-    tmp_path_factory: pytest.TempPathFactory,
-) -> None:
-    import inspect
-
-    import webdav
-
+def test_fs02_the_module_function_has_the_parameter() -> None:
     assert "follow_symlinks" in inspect.signature(webdav.upload_file).parameters
 
 
-def test_FS04_the_part_file_is_private_while_it_is_written(
+def test_fs04_the_part_file_is_private_while_it_is_written(
     fs: FileSystem, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fs.upload_fileobj(io.BytesIO(b"x" * 1000), "/a.txt")
@@ -369,7 +370,7 @@ def test_FS04_the_part_file_is_private_while_it_is_written(
     assert modes[0] == 0o600
 
 
-def test_FS04_guard_the_final_mode_follows_the_umask(
+def test_fs04_guard_the_final_mode_follows_the_umask(
     fs: FileSystem, tmp_path: Path
 ) -> None:
     fs.upload_fileobj(io.BytesIO(b"x"), "/a.txt")
@@ -389,11 +390,9 @@ def test_FS04_guard_the_final_mode_follows_the_umask(
     )  # what is replaced keeps its own
 
 
-def test_FS04_a_file_system_that_refuses_chmod_still_gets_the_download(
+def test_fs04_a_file_system_that_refuses_chmod_still_gets_the_download(
     fs: FileSystem, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import shutil
-
     fs.upload_fileobj(io.BytesIO(b"x"), "/a.txt")
 
     def refuse(*_args: Any, **_kwargs: Any) -> None:
@@ -404,7 +403,7 @@ def test_FS04_a_file_system_that_refuses_chmod_still_gets_the_download(
     assert (tmp_path / "n.txt").read_bytes() == b"x"
 
 
-def test_FS04_a_failed_download_leaves_no_part_file(
+def test_fs04_a_failed_download_leaves_no_part_file(
     fs: FileSystem, tmp_path: Path
 ) -> None:
     fs.upload_fileobj(io.BytesIO(b"x" * 100), "/a.txt")
@@ -473,33 +472,35 @@ class _Liar(io.RawIOBase):
 
 
 def test_a_file_that_grows_during_upload_is_an_error_and_never_sent_truncated() -> None:
-    with scripted_server(always(OK)) as (url, rec):
-        with pytest.raises(ClientError, match="longer"):
-            FileSystem(retry=False).upload_fileobj(
-                cast("BinaryIO", _Liar(100, 5000)),
-                f"{url}/f",
-                overwrite=True,
-                size=100,
-                chunk_size=64,
-            )
+    with (
+        scripted_server(always(OK)) as (url, rec),
+        pytest.raises(ClientError, match="longer"),
+    ):
+        FileSystem(retry=False).upload_fileobj(
+            cast("BinaryIO", _Liar(100, 5000)),
+            f"{url}/f",
+            overwrite=True,
+            size=100,
+            chunk_size=64,
+        )
     assert len(rec.requests) <= 1  # no surplus bytes parsed as a second request
 
 
 @pytest.mark.parametrize("size", [3, 10])
 def test_a_body_that_does_not_match_its_declared_size_is_refused(size: int) -> None:
-    with scripted_server(always(OK)) as (url, _rec):
-        with pytest.raises(ClientError, match="declared"):
-            FileSystem(retry=False, timeout=5).upload_fileobj(
-                io.BytesIO(b"abcdef" if size == 3 else b"abc"),
-                f"{url}/f",
-                overwrite=True,
-                size=size,
-            )
+    with (
+        scripted_server(always(OK)) as (url, _rec),
+        pytest.raises(ClientError, match="declared"),
+    ):
+        FileSystem(retry=False, timeout=5).upload_fileobj(
+            io.BytesIO(b"abcdef" if size == 3 else b"abc"),
+            f"{url}/f",
+            overwrite=True,
+            size=size,
+        )
 
 
 def test_a_file_that_shrinks_during_upload_is_an_error_not_a_hang() -> None:
-    import time
-
     with scripted_server(always(OK)) as (url, _rec):
         started = time.monotonic()
         with pytest.raises((ClientError, requests.RequestException)):
@@ -527,9 +528,11 @@ def test_a_hostile_charset_never_picks_the_text_codec(charset: str) -> None:
             return 207, {}, body
         return 200, {"Content-Type": f"text/plain; charset={charset}"}, "héllo".encode()
 
-    with scripted_server(respond) as (url, _rec):
-        with FileSystem(retry=False).open(f"{url}/f") as fobj:
-            assert fobj.read() == "héllo"
+    with (
+        scripted_server(respond) as (url, _rec),
+        FileSystem(retry=False).open(f"{url}/f") as fobj,
+    ):
+        assert fobj.read() == "héllo"
 
 
 _FOUND = (
@@ -554,7 +557,6 @@ def test_a_412_is_a_precondition_failure_not_necessarily_an_existing_resource() 
         assert not isinstance(excinfo.value, exceptions.ResourceAlreadyExistsError)
         assert "already exists" not in str(excinfo.value)
         # ...while an upload that asked for "create only" knows what a 412 means:
-        import io
 
         with pytest.raises(exceptions.ResourceAlreadyExistsError):
             fs.upload_fileobj(io.BytesIO(b"x"), f"{url}/a")
@@ -566,8 +568,6 @@ def test_a_412_is_a_precondition_failure_not_necessarily_an_existing_resource() 
 def test_download_does_not_touch_the_process_umask(
     server_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import os
-
     def forbidden(_mask: int) -> int:
         msg = "the process-wide umask must not be changed"
         raise AssertionError(msg)
@@ -598,8 +598,6 @@ def test_download_keeps_the_permissions_of_the_file_it_replaces(
 def test_a_new_download_gets_the_umask_permissions(
     server_url: str, tmp_path: Path
 ) -> None:
-    import os
-
     previous = os.umask(0o022)
     try:
         with Session(server_url, auth=AUTH, retry=False) as session:
@@ -656,12 +654,14 @@ def _dripping_file() -> "Callable[[Seen], Reply]":
 
 def test_a_raising_callback_stops_a_download_that_drips(tmp_path: Path) -> None:
     target = tmp_path / "out.bin"
-    with scripted_server(_dripping_file()) as (url, _rec):
-        with FileSystem(url, retry=False, timeout=2) as fs:
-            started = time.monotonic()
-            with pytest.raises(_TooSlowError):
-                fs.download_file("f", target, callback=_within(0.5))
-            assert time.monotonic() - started < 3
+    with (
+        scripted_server(_dripping_file()) as (url, _rec),
+        FileSystem(url, retry=False, timeout=2) as fs,
+    ):
+        started = time.monotonic()
+        with pytest.raises(_TooSlowError):
+            fs.download_file("f", target, callback=_within(0.5))
+        assert time.monotonic() - started < 3
     assert list(tmp_path.iterdir()) == []  # no target, no .part file
 
 
@@ -670,41 +670,49 @@ def test_a_stopped_download_leaves_the_file_it_would_have_replaced(
 ) -> None:
     target = tmp_path / "keep.bin"
     target.write_bytes(b"precious")
-    with scripted_server(_dripping_file()) as (url, _rec):
-        with FileSystem(url, retry=False, timeout=2) as fs:
-            with pytest.raises(_TooSlowError):
-                fs.download_file("f", target, overwrite=True, callback=_within(0.5))
+    with (
+        scripted_server(_dripping_file()) as (url, _rec),
+        FileSystem(url, retry=False, timeout=2) as fs,
+        pytest.raises(_TooSlowError),
+    ):
+        fs.download_file("f", target, overwrite=True, callback=_within(0.5))
     assert target.read_bytes() == b"precious"
     assert [p.name for p in tmp_path.iterdir()] == ["keep.bin"]
 
 
 def test_a_minimum_rate_callback_stops_a_download_that_drips(tmp_path: Path) -> None:
-    with scripted_server(_dripping_file()) as (url, _rec):
-        with FileSystem(url, retry=False, timeout=2) as fs:
-            with pytest.raises(_TooSlowError):
-                fs.download_file(
-                    "f", tmp_path / "out.bin", callback=_at_least(100, 0.5)
-                )
+    with (
+        scripted_server(_dripping_file()) as (url, _rec),
+        FileSystem(url, retry=False, timeout=2) as fs,
+        pytest.raises(_TooSlowError),
+    ):
+        fs.download_file("f", tmp_path / "out.bin", callback=_at_least(100, 0.5))
 
 
 def test_a_raising_callback_stops_download_fileobj() -> None:
-    with scripted_server(_dripping_file()) as (url, _rec):
-        with FileSystem(url, retry=False, timeout=2) as fs:
-            with pytest.raises(_TooSlowError):
-                fs.download_fileobj("f", io.BytesIO(), callback=_within(0.5))
+    with (
+        scripted_server(_dripping_file()) as (url, _rec),
+        FileSystem(url, retry=False, timeout=2) as fs,
+        pytest.raises(_TooSlowError),
+    ):
+        fs.download_fileobj("f", io.BytesIO(), callback=_within(0.5))
 
 
 def test_a_raising_callback_stops_the_short_form_download(tmp_path: Path) -> None:
-    with scripted_server(_dripping_file()) as (url, _rec):
-        with pytest.raises(_TooSlowError):
-            webdav.download_file(
-                f"{url}/f", tmp_path / "out.bin", callback=_within(0.5), retry=False
-            )
+    with (
+        scripted_server(_dripping_file()) as (url, _rec),
+        pytest.raises(_TooSlowError),
+    ):
+        webdav.download_file(
+            f"{url}/f", tmp_path / "out.bin", callback=_within(0.5), retry=False
+        )
 
 
 def test_the_session_is_usable_after_a_download_was_stopped(tmp_path: Path) -> None:
-    with scripted_server(_dripping_file()) as (url, _rec):
-        with FileSystem(url, retry=False, timeout=2) as fs:
-            with pytest.raises(_TooSlowError):
-                fs.download_file("f", tmp_path / "out.bin", callback=_within(0.5))
-            assert fs.isdir("f") is False
+    with (
+        scripted_server(_dripping_file()) as (url, _rec),
+        FileSystem(url, retry=False, timeout=2) as fs,
+    ):
+        with pytest.raises(_TooSlowError):
+            fs.download_file("f", tmp_path / "out.bin", callback=_within(0.5))
+        assert fs.isdir("f") is False

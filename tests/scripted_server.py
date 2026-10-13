@@ -53,7 +53,9 @@ def _make_handler(
     respond: Callable[[Seen], Reply], recorder: Recorder
 ) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, fmt: str, *args: object) -> None:
+        """Answers every request through the responder."""
+
+        def log_message(self, *_args: object) -> None:
             """Keep test output quiet."""
 
         def _dispatch(self) -> None:

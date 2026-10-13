@@ -13,6 +13,12 @@ installed, so the usual run stays small. Install them to run these, e.g.::
     pip install pandas pyarrow "dask[dataframe]" zarr xarray
 """
 
+import io
+import json
+import os
+import subprocess
+import sys
+import zipfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -208,9 +214,6 @@ def test_xarray_writes_and_reads_zarr_through_a_url(options: dict[str, Any]) -> 
 def test_a_zip_on_the_server_is_read_through_a_chained_url(
     filesystem: WebdavFileSystem, options: dict[str, Any]
 ) -> None:
-    import io  # noqa: PLC0415
-    import zipfile  # noqa: PLC0415
-
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w") as bundle:
         bundle.writestr("one.csv", "a\n1\n")
@@ -224,11 +227,6 @@ def test_the_configuration_of_fsspec_can_name_the_server(
     server_url: str, tmp_path: Path
 ) -> None:
     """``FSSPEC_WEBDAVS`` (JSON) is how a program is pointed at a server without touching its code."""
-    import json  # noqa: PLC0415
-    import os  # noqa: PLC0415
-    import subprocess  # noqa: PLC0415
-    import sys  # noqa: PLC0415
-
     WebdavFileSystem(server_url, auth=AUTH).pipe_file("/a.txt", b"hello")
     environment = {
         **os.environ,
@@ -236,7 +234,7 @@ def test_the_configuration_of_fsspec_can_name_the_server(
     }
     code = "import webdav.fsspec, fsspec; print(fsspec.open('webdavs:///a.txt').open().read().decode())"
     # our own interpreter and our own code
-    result = subprocess.run(  # noqa: S603
+    result = subprocess.run(  # noqa: S603 - our own interpreter and our own code
         [sys.executable, "-c", code],
         env=environment,
         capture_output=True,

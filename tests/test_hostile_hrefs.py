@@ -1,6 +1,8 @@
 """A server that lists a name outside the folder it was asked about writes nothing outside the destination."""
 
+import contextlib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -39,7 +41,7 @@ def _doc(href: str) -> bytes:
     ).encode()
 
 
-def _respond(href: str):  # noqa: ANN202
+def _respond(href: str) -> Any:
     def respond(seen: Seen) -> Reply:
         if seen.method == "PROPFIND":
             return 207, {"Content-Type": "application/xml"}, _doc(href)
@@ -52,9 +54,12 @@ def _respond(href: str):  # noqa: ANN202
 
 @pytest.mark.parametrize("href", [h for h in HOSTILE if h not in NOT_WRITTEN])
 def test_the_listing_of_a_folder_refuses_a_name_outside_it(href: str) -> None:
-    with scripted_server(_respond(href)) as (url, _), FileSystem(url) as fs:
-        with pytest.raises(MalformedResponseError):
-            fs.ls("/dir")
+    with (
+        scripted_server(_respond(href)) as (url, _),
+        FileSystem(url) as fs,
+        pytest.raises(MalformedResponseError),
+    ):
+        fs.ls("/dir")
 
 
 @pytest.mark.parametrize("href", HOSTILE)
@@ -62,11 +67,11 @@ def test_get_writes_nothing_outside_the_destination_and_asks_for_nothing_outside
     href: str, tmp_path: Path
 ) -> None:
     dst = tmp_path / "work" / "dst"
-    with scripted_server(_respond(href)) as (url, recorder):
-        try:
-            WebdavFileSystem(url).get("/dir", str(dst), recursive=True)
-        except (OSError, MalformedResponseError):
-            pass
+    with (
+        scripted_server(_respond(href)) as (url, recorder),
+        contextlib.suppress(OSError, MalformedResponseError),
+    ):
+        WebdavFileSystem(url).get("/dir", str(dst), recursive=True)
     written = [p for p in tmp_path.rglob("*") if p.is_file()]
     assert all(dst in p.parents for p in written), written
     assert all(
@@ -85,7 +90,9 @@ def test_a_plain_name_is_listed_and_written(tmp_path: Path) -> None:
 
 
 def test_a_name_with_a_control_character_is_not_written(tmp_path: Path) -> None:
-    with scripted_server(_respond("/dir/a%0Ab.txt")) as (url, _):
-        with pytest.raises(OSError, match="not usable"):
-            WebdavFileSystem(url).get("/dir", str(tmp_path / "dst"), recursive=True)
+    with (
+        scripted_server(_respond("/dir/a%0Ab.txt")) as (url, _),
+        pytest.raises(OSError, match="not usable"),
+    ):
+        WebdavFileSystem(url).get("/dir", str(tmp_path / "dst"), recursive=True)
     assert not [p for p in tmp_path.rglob("*") if p.is_file()]

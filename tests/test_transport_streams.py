@@ -1,7 +1,5 @@
 """Reading and writing response bodies: streams, content codings, ``Content-Range`` and resuming."""
 
-# ruff: noqa: SIM117, PLC0415, PTH208, S105, RUF001
-
 import contextlib
 import gzip
 import io
@@ -9,9 +7,10 @@ import socket
 import threading
 import tracemalloc
 import zlib
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import requests
@@ -24,20 +23,26 @@ from tests.scripted_server import (
     scripted_server,
 )
 from webdav import FileSystem, Session
+from webdav._fsspec_ranges import fetch_range
 from webdav.exceptions import ClientError, WebDAVError
 from webdav.fs.streams import IterStream
 from webdav.fsspec import WebdavFileSystem
 from webdav.transport.parse_utils import parse_content_range
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-@pytest.mark.parametrize("length", ["²", "9" * 5000, "-5", "1e3", "０"])
+
+@pytest.mark.parametrize("length", ["²", "9" * 5000, "-5", "1e3", "\uff10"])
 def test_a_hostile_content_length_never_raises_a_bare_valueerror(length: str) -> None:
     reply = (200, {"Content-Length": length, NO_CONTENT_LENGTH: "1"}, b"hello")
-    with scripted_server(always(reply)) as (url, _rec):
-        # Refusing the response is fine, and so is a network-level error;
-        # a bare ValueError (or anything else) escaping is what must not happen.
-        with contextlib.suppress(WebDAVError, requests.RequestException):
-            Session(retry=False).get(f"{url}/f")
+    # Refusing the response is fine, and so is a network-level error;
+    # a bare ValueError (or anything else) escaping is what must not happen.
+    with (
+        scripted_server(always(reply)) as (url, _rec),
+        contextlib.suppress(WebDAVError, requests.RequestException),
+    ):
+        Session(retry=False).get(f"{url}/f")
 
 
 def test_send_reads_a_no_length_body_normally() -> None:
@@ -55,14 +60,14 @@ def test_send_reads_a_no_length_body_normally() -> None:
 
 
 def test_stacked_content_codings_are_refused() -> None:
-    import gzip
-
     body = gzip.compress(gzip.compress(gzip.compress(b"0" * 1_000_000)))
-    with scripted_server(
-        always((207, {"Content-Encoding": "gzip, gzip, gzip"}, body))
-    ) as (url, _r):
-        with pytest.raises(ClientError, match="stacked"):
-            Session(retry=False).propfind(url, depth=0)
+    with (
+        scripted_server(
+            always((207, {"Content-Encoding": "gzip, gzip, gzip"}, body))
+        ) as (url, _r),
+        pytest.raises(ClientError, match="stacked"),
+    ):
+        Session(retry=False).propfind(url, depth=0)
 
 
 def test_a_head_reply_is_not_refused_for_the_length_of_the_body_it_does_not_carry() -> (
@@ -120,9 +125,11 @@ class Sink:
     """A file object that collects what is written."""
 
     def __init__(self) -> None:
+        """Start empty."""
         self.data = b""
 
     def write(self, chunk: bytes) -> int:
+        """Keep ``chunk``."""
         self.data += chunk
         return len(chunk)
 
@@ -198,10 +205,12 @@ def test_a_real_gzip_or_deflate_answer_is_inflated(coding: str) -> None:
 
 def test_an_answer_that_inflates_past_the_limit_is_refused() -> None:
     reply = (200, {"Content-Encoding": "gzip"}, gzip.compress(b"A" * 1_000_000))
-    with scripted_server(always(reply)) as (url, _rec):
-        with Session(url, retry=False, max_response_size=10_000) as s:
-            with pytest.raises(ClientError, match="exceeds"):
-                s.get("/x")
+    with (
+        scripted_server(always(reply)) as (url, _rec),
+        Session(url, retry=False, max_response_size=10_000) as s,
+        pytest.raises(ClientError, match="exceeds"),
+    ):
+        s.get("/x")
 
 
 def serves(data: bytes, **extra: str) -> "Callable[[Seen], Reply]":
@@ -244,7 +253,8 @@ class RawServer:
 
     def __init__(
         self, handler: "Callable[[RawServer, socket.socket, Seen], str | None]"
-    ):
+    ) -> None:
+        """Listen on a free port; ``handler`` answers each request."""
         self.handler = handler
         self.requests: list[Seen] = []
         self.connections = 0
@@ -292,6 +302,7 @@ class RawServer:
             conn.close()
 
     def close(self) -> None:
+        """Stop listening."""
         self._sock.close()
 
 
@@ -335,19 +346,23 @@ def _stream(url: str, session: Session) -> IterStream:
 
 
 def test_seeking_to_the_end_of_an_empty_file_is_position_zero() -> None:
-    with scripted_server(file_server(0, serves(b""))) as (url, _rec):
-        with _stream(url, Session(url)) as stream:
-            assert stream.seek(0, 2) == 0
-            assert stream.read() == b""
+    with (
+        scripted_server(file_server(0, serves(b""))) as (url, _rec),
+        _stream(url, Session(url)) as stream,
+    ):
+        assert stream.seek(0, 2) == 0
+        assert stream.read() == b""
 
 
 _BODY = bytes(range(256)) * 40  # 10 KiB
 
 
 def test_read_none_reads_everything() -> None:
-    with scripted_server(file_server(len(_BODY), serves(_BODY))) as (url, _rec):
-        with _stream(url, Session(url)) as stream:
-            assert stream.read(None) == _BODY  # type: ignore[arg-type]
+    with (
+        scripted_server(file_server(len(_BODY), serves(_BODY))) as (url, _rec),
+        _stream(url, Session(url)) as stream,
+    ):
+        assert stream.read(None) == _BODY  # type: ignore[arg-type]
 
 
 def test_reading_a_closed_stream_is_a_value_error() -> None:
@@ -373,26 +388,30 @@ def test_a_seek_on_a_closed_stream_does_not_open_it_again() -> None:
 
 
 def test_seeking_and_reading_an_open_stream_still_works() -> None:
-    with scripted_server(file_server(len(_BODY), serves(_BODY))) as (url, _rec):
-        with _stream(url, Session(url)) as stream:
-            assert stream.seek(10) == 10
-            assert stream.read(5) == _BODY[10:15]
-            assert stream.seek(5, 1) == 20
-            assert stream.read(5) == _BODY[20:25]
-            assert stream.seek(-10, 2) == len(_BODY) - 10
-            assert stream.read() == _BODY[-10:]
-            assert stream.seek(3) == 3
-            assert stream.read(2) == _BODY[3:5]
+    with (
+        scripted_server(file_server(len(_BODY), serves(_BODY))) as (url, _rec),
+        _stream(url, Session(url)) as stream,
+    ):
+        assert stream.seek(10) == 10
+        assert stream.read(5) == _BODY[10:15]
+        assert stream.seek(5, 1) == 20
+        assert stream.read(5) == _BODY[20:25]
+        assert stream.seek(-10, 2) == len(_BODY) - 10
+        assert stream.read() == _BODY[-10:]
+        assert stream.seek(3) == 3
+        assert stream.read(2) == _BODY[3:5]
 
 
 class Raw:
     """A raw stream: ``write`` takes at most ``limit`` bytes at a time and says how many."""
 
     def __init__(self, limit: int) -> None:
+        """Take at most ``limit`` bytes per ``write``."""
         self.limit = limit
         self.data = b""
 
     def write(self, chunk: bytes) -> int:
+        """Keep what fits and say how much that was."""
         taken = chunk[: self.limit]
         self.data += taken
         return len(taken)
@@ -409,9 +428,11 @@ class Silent:
     """A file object whose ``write`` returns nothing (many wrappers)."""
 
     def __init__(self) -> None:
+        """Start empty."""
         self.data = b""
 
     def write(self, chunk: bytes) -> None:
+        """Keep ``chunk`` and return nothing."""
         self.data += chunk
 
 
@@ -423,9 +444,11 @@ def test_a_write_that_returns_none_counts_as_complete() -> None:
 
 
 def test_a_file_object_that_takes_nothing_is_an_error_not_an_endless_loop() -> None:
-    with scripted_server(file_server(len(_BODY), serves(_BODY))) as (url, _rec):
-        with pytest.raises(OSError, match="accepted no more data"):
-            FileSystem(url).download_fileobj("/f", Raw(limit=0))  # type: ignore[arg-type]
+    with (
+        scripted_server(file_server(len(_BODY), serves(_BODY))) as (url, _rec),
+        pytest.raises(OSError, match="accepted no more data"),
+    ):
+        FileSystem(url).download_fileobj("/f", Raw(limit=0))  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -453,8 +476,6 @@ def test_a_file_object_that_takes_nothing_is_an_error_not_an_endless_loop() -> N
 def test_content_range_is_parsed_whole(
     value: "str | None", expected: "tuple[int, int, int | None] | None"
 ) -> None:
-    from webdav.transport.parse_utils import parse_content_range  # noqa: PLC0415
-
     assert parse_content_range(value) == expected
 
 
@@ -484,9 +505,11 @@ def test_a_resumed_response_with_a_wrong_content_range_is_refused(
     content_range: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("webdav.fs.streams.RESUME_BACKOFF_SECONDS", 0.01)
-    with scripted_server(_resumed_with(content_range)) as (url, _rec):
-        with pytest.raises(ClientError, match="Content-Range"):
-            FileSystem(url).download_fileobj("/f", io.BytesIO())
+    with (
+        scripted_server(_resumed_with(content_range)) as (url, _rec),
+        pytest.raises(ClientError, match="Content-Range"),
+    ):
+        FileSystem(url).download_fileobj("/f", io.BytesIO())
 
 
 @pytest.mark.parametrize("content_range", ["bytes 10-19/20", "bytes 10-19/*"])
@@ -505,17 +528,15 @@ def test_a_resumed_response_with_a_right_content_range_is_taken(
     ["bytes 0-9/5", "bytes 0-9/20", "bytes 0-4/x", "bytes 1-4/20", "0-4/20"],
 )
 def test_a_block_with_a_wrong_content_range_is_refused(content_range: str) -> None:
-    from webdav._fsspec_ranges import fetch_range  # noqa: PLC0415
-
     reply = (206, {"Content-Range": content_range}, b"abcde")
-    with scripted_server(file_server(20, lambda _s: reply)) as (url, _rec):
-        with pytest.raises(ClientError, match="Content-Range"):
-            fetch_range(Session(url, retry=False), "/f", 0, 5, total=20)
+    with (
+        scripted_server(file_server(20, lambda _s: reply)) as (url, _rec),
+        pytest.raises(ClientError, match="Content-Range"),
+    ):
+        fetch_range(Session(url, retry=False), "/f", 0, 5, total=20)
 
 
 def test_a_block_with_the_right_content_range_is_taken() -> None:
-    from webdav._fsspec_ranges import fetch_range  # noqa: PLC0415
-
     reply = (206, {"Content-Range": "bytes 0-4/20"}, b"abcde")
     with scripted_server(file_server(20, lambda _s: reply)) as (url, _rec):
         assert (

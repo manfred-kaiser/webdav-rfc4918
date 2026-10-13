@@ -5,13 +5,12 @@ Every test here pins a decision of the redirect handling in ``Session`` (see
 servers that answer exactly what a hostile or merely odd server might.
 """
 
-# ruff: noqa: SIM117, PLC0415, S301, PT031, EM101, S105, S108
-
 import tracemalloc
 from typing import Any
 
 import pytest
 import requests
+import urllib3.exceptions
 
 from tests.builders import make_response
 from tests.certificates import Certificates
@@ -108,7 +107,7 @@ def test_303_is_followed_for_a_get() -> None:
 
 
 def test_same_origin_redirect_keeps_method_and_body() -> None:
-    """requests would re-send this PROPFIND without its body, or as a GET."""
+    """``requests`` would re-send this PROPFIND without its body, or as a GET."""
     with scripted_server(
         lambda r: (
             redirect(301, "/dir/") if r.path == "/dir" else (207, {}, MULTISTATUS_EMPTY)
@@ -158,7 +157,10 @@ def test_a_308_preserves_method_and_body_same_as_307() -> None:
 
 
 def test_a_redirect_with_no_location_header_at_all_is_returned_as_is() -> None:
-    """Not a ``requests``-classified redirect at all (is_redirect needs a Location) - reaches the caller untouched."""
+    """Not a ``requests``-classified redirect at all (is_redirect needs a Location).
+
+    Reaches the caller untouched.
+    """
     with scripted_server(always((301, {}, b""))) as (url, rec):
         response = Session().get(f"{url}/f")
     assert response.status_code == 301
@@ -344,8 +346,7 @@ def test_https_to_http_downgrade_is_never_followed(policy: RedirectPolicy) -> No
 
 
 def test_https_to_http_downgrade_is_never_followed_even_whitelisted() -> None:
-    """Trusting an origin with credentials is a different question from accepting
-    that the same bytes cross the network in clear text - no policy allows it."""
+    """Trusting an origin with credentials is a different question from accepting that the same bytes cross the network in clear text - no policy allows it."""
     response = _redirect_response("https://dav.example/f", "http://gateway.example/f")
     hop = _plan(
         response,
@@ -551,21 +552,23 @@ def test_redact_url_survives_garbage() -> None:
 
 
 def test_per_call_custom_headers_do_not_follow_a_redirect_to_another_origin() -> None:
-    with scripted_server(always(OK)) as (storage_url, storage):
-        with scripted_server(lambda _r: redirect(307, f"{storage_url}/t")) as (
+    with (
+        scripted_server(always(OK)) as (storage_url, storage),
+        scripted_server(lambda _r: redirect(307, f"{storage_url}/t")) as (
             gateway_url,
             _g,
-        ):
-            session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
-            session.put(
-                f"{gateway_url}/f",
-                data=b"x",
-                headers={
-                    "Content-Type": "text/plain",
-                    "X-Api-Key": "SECRET",
-                    "X-Token": "T",
-                },
-            )
+        ),
+    ):
+        session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
+        session.put(
+            f"{gateway_url}/f",
+            data=b"x",
+            headers={
+                "Content-Type": "text/plain",
+                "X-Api-Key": "SECRET",
+                "X-Token": "T",
+            },
+        )
     (seen,) = storage.requests
     assert seen.headers["content-type"] == "text/plain"
     assert "x-api-key" not in seen.headers
@@ -573,22 +576,24 @@ def test_per_call_custom_headers_do_not_follow_a_redirect_to_another_origin() ->
 
 
 def test_extra_forwarded_headers_are_an_explicit_opt_in() -> None:
-    with scripted_server(always(OK)) as (storage_url, storage):
-        with scripted_server(lambda _r: redirect(307, f"{storage_url}/t")) as (
+    with (
+        scripted_server(always(OK)) as (storage_url, storage),
+        scripted_server(lambda _r: redirect(307, f"{storage_url}/t")) as (
             gateway_url,
             _g,
-        ):
-            session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
-            session.redirect_forward_headers = frozenset({"x-amz-meta-owner"})
-            session.put(
-                f"{gateway_url}/f",
-                data=b"x",
-                headers={
-                    "X-Amz-Meta-Owner": "me",
-                    "X-Api-Key": "SECRET",
-                    "Authorization": "B",
-                },
-            )
+        ),
+    ):
+        session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
+        session.redirect_forward_headers = frozenset({"x-amz-meta-owner"})
+        session.put(
+            f"{gateway_url}/f",
+            data=b"x",
+            headers={
+                "X-Amz-Meta-Owner": "me",
+                "X-Api-Key": "SECRET",
+                "Authorization": "B",
+            },
+        )
     (seen,) = storage.requests
     assert seen.headers["x-amz-meta-owner"] == "me"
     assert "x-api-key" not in seen.headers
@@ -621,14 +626,16 @@ def test_a_port_zero_is_never_an_origin() -> None:
 
 
 def test_send_does_not_follow_a_redirect_across_origins() -> None:
-    with scripted_server(always(OK)) as (b_url, b_rec):
-        with scripted_server(lambda _r: redirect(307, f"{b_url}/steal")) as (a_url, _a):
-            session = Session(retry=False)
-            session.headers["X-Api-Key"] = "SECRET"
-            prepared = session.prepare_request(
-                requests.Request("PUT", f"{a_url}/f", data=b"BODY")
-            )
-            response = session.send(prepared)
+    with (
+        scripted_server(always(OK)) as (b_url, b_rec),
+        scripted_server(lambda _r: redirect(307, f"{b_url}/steal")) as (a_url, _a),
+    ):
+        session = Session(retry=False)
+        session.headers["X-Api-Key"] = "SECRET"
+        prepared = session.prepare_request(
+            requests.Request("PUT", f"{a_url}/f", data=b"BODY")
+        )
+        response = session.send(prepared)
     assert response.status_code == 307
     assert b_rec.requests == []
     assert response.redirect_refusal
@@ -697,18 +704,20 @@ def test_a_location_with_invalid_utf8_is_a_refused_redirect_not_a_crash() -> Non
 
 
 def test_redirect_forward_headers_accepts_any_iterable_and_any_case() -> None:
-    with scripted_server(always(OK)) as (storage_url, storage):
-        with scripted_server(lambda _r: redirect(307, f"{storage_url}/t")) as (
+    with (
+        scripted_server(always(OK)) as (storage_url, storage),
+        scripted_server(lambda _r: redirect(307, f"{storage_url}/t")) as (
             gateway_url,
             _g,
-        ):
-            session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
-            session.redirect_forward_headers = ["X-Amz-Meta-Owner"]  # type: ignore[assignment]
-            session.put(
-                f"{gateway_url}/f",
-                data=b"x",
-                headers={"x-amz-meta-owner": "me", "X-Other": "no"},
-            )
+        ),
+    ):
+        session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
+        session.redirect_forward_headers = ["X-Amz-Meta-Owner"]
+        session.put(
+            f"{gateway_url}/f",
+            data=b"x",
+            headers={"x-amz-meta-owner": "me", "X-Other": "no"},
+        )
     (seen,) = storage.requests
     assert seen.headers["x-amz-meta-owner"] == "me"
     assert "x-other" not in seen.headers
@@ -716,25 +725,25 @@ def test_redirect_forward_headers_accepts_any_iterable_and_any_case() -> None:
 
 
 def test_a_chain_that_returns_to_the_start_origin_returns_without_credentials() -> None:
-    with scripted_server(
-        lambda r: redirect(307, f"{b_url}/gateway") if r.path == "/upload" else OK
-    ) as (a_url, a_rec):
-        with scripted_server(lambda _r: redirect(307, f"{a_url}/victim")) as (
+    with (
+        scripted_server(
+            lambda r: redirect(307, f"{b_url}/gateway") if r.path == "/upload" else OK
+        ) as (a_url, a_rec),
+        scripted_server(lambda _r: redirect(307, f"{a_url}/victim")) as (
             b_url,
             b_rec,
-        ):
-            session = Session(
-                a_url,
-                auth=("alice", "s3cret"),
-                headers={"X-Api-Key": "KEY"},
-                redirect_policy=RedirectPolicy.WHITELIST,
-                trusted_redirect_origins=[b_url],
-                retry=False,
-            )
-            session.cookies.set("sid", "S3CRET", domain="127.0.0.1")
-            response = session.put(
-                "/upload", data=b"payload", headers={"If-Match": '"e"'}
-            )
+        ),
+    ):
+        session = Session(
+            a_url,
+            auth=("alice", "s3cret"),
+            headers={"X-Api-Key": "KEY"},
+            redirect_policy=RedirectPolicy.WHITELIST,
+            trusted_redirect_origins=[b_url],
+            retry=False,
+        )
+        session.cookies.set("sid", "S3CRET", domain="127.0.0.1")
+        response = session.put("/upload", data=b"payload", headers={"If-Match": '"e"'})
     assert response.status_code == 204
     first = a_rec.to("/upload")[0]
     assert first.headers["authorization"].startswith("Basic ")
@@ -765,25 +774,29 @@ def certs(tmp_path_factory: pytest.TempPathFactory) -> Certificates:
 def test_a_chain_from_http_over_https_back_to_http_is_not_followed(
     certs: Certificates,
 ) -> None:
-    with scripted_server(
-        lambda r: redirect(307, f"{b_url}/mid") if r.path == "/start" else OK
-    ) as (a_url, a_rec):
-        with tls_server(certs, lambda _r: redirect(307, f"{a_url}/final")) as (
+    with (
+        scripted_server(
+            lambda r: redirect(307, f"{b_url}/mid") if r.path == "/start" else OK
+        ) as (a_url, a_rec),
+        tls_server(certs, lambda _r: redirect(307, f"{a_url}/final")) as (
             b_url,
             _b,
-        ):
-            session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
-            response = session.get(f"{a_url}/start", verify=str(certs.ca_cert))
+        ),
+    ):
+        session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
+        response = session.get(f"{a_url}/start", verify=str(certs.ca_cert))
     assert response.status_code == 307
     assert "downgrade" in (response.redirect_refusal or "")
     assert a_rec.to("/final") == []
 
 
 def test_http_to_https_with_all_still_follows(certs: Certificates) -> None:
-    with tls_server(certs, always(OK)) as (b_url, b_rec):
-        with scripted_server(lambda _r: redirect(307, f"{b_url}/t")) as (a_url, _a):
-            session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
-            response = session.get(f"{a_url}/start", verify=str(certs.ca_cert))
+    with (
+        tls_server(certs, always(OK)) as (b_url, b_rec),
+        scripted_server(lambda _r: redirect(307, f"{b_url}/t")) as (a_url, _a),
+    ):
+        session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
+        response = session.get(f"{a_url}/start", verify=str(certs.ca_cert))
     assert response.status_code == 204
     assert len(b_rec.requests) == 1
 
@@ -792,8 +805,6 @@ _SIGNATURE = "SECRETSIG-0123"
 
 
 def test_the_cause_chain_is_cleaned_in_place_not_cut() -> None:
-    import urllib3.exceptions
-
     url = f"http://127.0.0.1:{closed_port()}/dl?sig={_SIGNATURE}"
     with pytest.raises(requests.exceptions.ConnectionError) as caught:
         Session(retry=False).get(url)

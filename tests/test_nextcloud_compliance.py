@@ -69,7 +69,10 @@ class _Nextcloud:
     """Where the instance this test session uses lives - set once, by ``_nextcloud_session`` below."""
 
     url: "str | None" = None
-    auth: "tuple[str, str]" = (nextcloud_instance.TEST_USER, nextcloud_instance.TEST_PASSWORD)
+    auth: "tuple[str, str]" = (
+        nextcloud_instance.TEST_USER,
+        nextcloud_instance.TEST_PASSWORD,
+    )
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -330,7 +333,7 @@ def test_nextcloud_allprop_with_include(nc_client: FileSystem) -> None:
 
 
 def test_nextcloud_structured_lock_owner_round_trips(nc_client: FileSystem) -> None:
-    """owner's content model is ANY - a structured <D:href> owner."""
+    """``owner``'s content model is ANY - a structured <D:href> owner."""
     nc_client.upload_fileobj(io.BytesIO(b"x"), "compliance/owner.txt")
     owner_el = Element("{DAV:}href")
     owner_el.text = "mailto:test@example.org"
@@ -354,10 +357,12 @@ def test_nextcloud_a_shared_lock_blocks_a_second_clients_exclusive_lock(
     assert _Nextcloud.url is not None  # set by _nextcloud_session above
     other = FileSystem(_Nextcloud.url, auth=_Nextcloud.auth)
     try:
-        with nc_client.locked("compliance/scope1.txt", scope=SHARED):
-            with pytest.raises(ResourceLockedError):
-                with other.locked("compliance/scope1.txt", scope=EXCLUSIVE):
-                    pass
+        with (
+            nc_client.locked("compliance/scope1.txt", scope=SHARED),
+            pytest.raises(ResourceLockedError),
+            other.locked("compliance/scope1.txt", scope=EXCLUSIVE),
+        ):
+            pass
     finally:
         other.close()
 
@@ -369,10 +374,12 @@ def test_nextcloud_an_exclusive_lock_blocks_a_second_clients_shared_lock(
     assert _Nextcloud.url is not None  # set by _nextcloud_session above
     other = FileSystem(_Nextcloud.url, auth=_Nextcloud.auth)
     try:
-        with nc_client.locked("compliance/scope2.txt", scope=EXCLUSIVE):
-            with pytest.raises(ResourceLockedError):
-                with other.locked("compliance/scope2.txt", scope=SHARED):
-                    pass
+        with (
+            nc_client.locked("compliance/scope2.txt", scope=EXCLUSIVE),
+            pytest.raises(ResourceLockedError),
+            other.locked("compliance/scope2.txt", scope=SHARED),
+        ):
+            pass
     finally:
         other.close()
 
@@ -476,7 +483,10 @@ def test_nextcloud_mkcol_with_a_missing_ancestor_is_a_conflict(
 def test_nextcloud_a_race_to_create_a_collection_has_one_winner(
     nc_client: FileSystem,
 ) -> None:
-    """RFC 4918 sec. 9.3.1: exactly one concurrent MKCOL wins; nothing else about the losers is assumed here."""
+    """RFC 4918 sec. 9.3.1: exactly one concurrent MKCOL wins.
+
+    Nothing else about the losers is assumed here.
+    """
     statuses: list[int] = []
     barrier = threading.Barrier(12)
     path = f"compliance/race-{uuid.uuid4().hex}"
@@ -542,7 +552,9 @@ def test_nextcloud_copy_onto_an_existing_destination_is_resourcealreadyexists(
     nc_client.upload_fileobj(io.BytesIO(b"src"), "compliance/ow_src.txt")
     nc_client.upload_fileobj(io.BytesIO(b"dst"), "compliance/ow_dst.txt")
     with pytest.raises(ResourceAlreadyExistsError):
-        nc_client.copy("compliance/ow_src.txt", "compliance/ow_dst.txt", overwrite=False)
+        nc_client.copy(
+            "compliance/ow_src.txt", "compliance/ow_dst.txt", overwrite=False
+        )
 
 
 def test_nextcloud_move_onto_an_existing_destination_is_resourcealreadyexists(
@@ -551,7 +563,9 @@ def test_nextcloud_move_onto_an_existing_destination_is_resourcealreadyexists(
     nc_client.upload_fileobj(io.BytesIO(b"src"), "compliance/owm_src.txt")
     nc_client.upload_fileobj(io.BytesIO(b"dst"), "compliance/owm_dst.txt")
     with pytest.raises(ResourceAlreadyExistsError):
-        nc_client.move("compliance/owm_src.txt", "compliance/owm_dst.txt", overwrite=False)
+        nc_client.move(
+            "compliance/owm_src.txt", "compliance/owm_dst.txt", overwrite=False
+        )
 
 
 def test_nextcloud_get_on_a_collection_does_not_crash(nc_client: FileSystem) -> None:
@@ -622,18 +636,16 @@ def test_nextcloud_if_match_with_a_stale_etag_is_refused(nc_client: FileSystem) 
 
 
 def test_nextcloud_extended_mkcol_is_refused_with_400(nc_client: FileSystem) -> None:
-    """A server that doesn't support RFC 5689 refuses it - confirmed as a plain 400 here, not Apache's 415.
+    r"""A server that doesn't support RFC 5689 refuses it - confirmed as a plain 400 here, not Apache's 415.
 
     SabreDAV's own error names this directly
-    (``Sabre\\DAV\\Exception\\BadRequest``: "the mkcol request must include
+    (``Sabre\DAV\Exception\BadRequest``: "the mkcol request must include
     a {DAV:}resourcetype property") - a different, equally valid way for a
     server to say "I don't understand this extended body", not something
     this library's own `415` expectation (pinned for Apache) generalizes to.
     """
     with pytest.raises(HTTPStatusError) as exc_info:
-        nc_client.mkdir(
-            "compliance/special", set_props={"displayname": "Special Dir"}
-        )
+        nc_client.mkdir("compliance/special", set_props={"displayname": "Special Dir"})
     assert exc_info.value.status_code == 400
 
 
@@ -657,7 +669,9 @@ def test_nextcloud_default_getetag_is_strong(nc_client: FileSystem) -> None:
 def test_nextcloud_423_response_has_a_structured_error_body(
     nc_client: FileSystem,
 ) -> None:
-    """Unlike Apache's plain-HTML 423, confirmed against a real instance: Nextcloud's carries a real precondition code.
+    """Unlike Apache's plain-HTML 423, confirmed against a real instance.
+
+    Nextcloud's carries a real precondition code.
 
     `error_codes` surfaces SabreDAV's own ``lock-token-submitted`` here -
     this library's `error_codes` parsing degrading gracefully for Apache's
@@ -693,7 +707,10 @@ def test_nextcloud_a_clean_delete_of_a_nested_collection_is_204(
 def test_nextcloud_proppatch_of_a_protected_property_fails_with_a_real_error_body(
     nc_client: FileSystem,
 ) -> None:
-    """getcontentlength is server-maintained (§15.4) - confirmed here that Nextcloud actually refuses to let a client set it."""
+    """``getcontentlength`` is server-maintained (§15.4).
+
+    Confirmed here that Nextcloud actually refuses to let a client set it.
+    """
     nc_client.upload_fileobj(io.BytesIO(b"x"), "compliance/protected_prop.txt")
     with pytest.raises(MultiStatusError) as exc_info:
         nc_client.set_props(

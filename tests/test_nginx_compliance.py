@@ -81,9 +81,7 @@ def _nginx_session() -> Iterator[None]:
         _Nginx.url = _ENV_URL
         _Nginx.auth = (
             os.environ.get("WEBDAV_TEST_NGINX_USER", nginx_instance.TEST_USER),
-            os.environ.get(
-                "WEBDAV_TEST_NGINX_PASSWORD", nginx_instance.TEST_PASSWORD
-            ),
+            os.environ.get("WEBDAV_TEST_NGINX_PASSWORD", nginx_instance.TEST_PASSWORD),
         )
         yield
         return
@@ -148,7 +146,7 @@ def test_nginx_move_and_copy_roundtrip(nginx_client: FileSystem) -> None:
 
 
 def test_nginx_does_not_honor_overwrite_protection(nginx_client: FileSystem) -> None:
-    """nginx's plain ``ngx_http_dav_module`` never evaluates ``If-None-Match`` on PUT.
+    """``nginx``'s plain ``ngx_http_dav_module`` never evaluates ``If-None-Match`` on PUT.
 
     Confirmed against a real instance: ``overwrite=False`` sends
     ``If-None-Match: *``, same as against Apache/wsgidav/Nextcloud, but
@@ -259,7 +257,10 @@ def test_nginx_mkcol_with_a_missing_ancestor_is_a_conflict(
 def test_nginx_a_race_to_create_a_collection_has_one_winner(
     nginx_client: FileSystem,
 ) -> None:
-    """RFC 4918 sec. 9.3.1: exactly one concurrent MKCOL wins; nothing else about the losers is assumed here."""
+    """RFC 4918 sec. 9.3.1: exactly one concurrent MKCOL wins.
+
+    Nothing else about the losers is assumed here.
+    """
     statuses: list[int] = []
     barrier = threading.Barrier(12)
     path = f"compliance/race-{uuid.uuid4().hex}"
@@ -287,7 +288,7 @@ def test_nginx_a_race_to_create_a_collection_has_one_winner(
 def test_nginx_copy_of_a_nested_collection_duplicates_the_whole_subtree(
     nginx_client: FileSystem,
 ) -> None:
-    """nginx's dav_module requires a trailing slash on *both* URIs to COPY/MOVE a collection.
+    """``nginx``'s dav_module requires a trailing slash on *both* URIs to COPY/MOVE a collection.
 
     Confirmed against a real instance: the identical request without a
     trailing slash on the source and ``Destination`` gets a plain ``400
@@ -342,7 +343,9 @@ def test_nginx_copy_onto_an_existing_destination_is_resourcealreadyexists(
     nginx_client.upload_fileobj(io.BytesIO(b"src"), "compliance/ow_src.txt")
     nginx_client.upload_fileobj(io.BytesIO(b"dst"), "compliance/ow_dst.txt")
     with pytest.raises(ResourceAlreadyExistsError):
-        nginx_client.copy("compliance/ow_src.txt", "compliance/ow_dst.txt", overwrite=False)
+        nginx_client.copy(
+            "compliance/ow_src.txt", "compliance/ow_dst.txt", overwrite=False
+        )
 
 
 def test_nginx_move_onto_an_existing_destination_is_resourcealreadyexists(
@@ -351,7 +354,9 @@ def test_nginx_move_onto_an_existing_destination_is_resourcealreadyexists(
     nginx_client.upload_fileobj(io.BytesIO(b"src"), "compliance/owm_src.txt")
     nginx_client.upload_fileobj(io.BytesIO(b"dst"), "compliance/owm_dst.txt")
     with pytest.raises(ResourceAlreadyExistsError):
-        nginx_client.move("compliance/owm_src.txt", "compliance/owm_dst.txt", overwrite=False)
+        nginx_client.move(
+            "compliance/owm_src.txt", "compliance/owm_dst.txt", overwrite=False
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -426,7 +431,7 @@ def test_nginx_extended_mkcol_is_refused_with_415(nginx_client: FileSystem) -> N
 def test_nginx_423_response_is_never_crashed_on_even_without_a_structured_error_body(
     nginx_client: FileSystem,
 ) -> None:
-    """nginx's 423 has no body at all, not even HTML - error_codes must degrade to empty, not raise."""
+    """``nginx``'s 423 has no body at all, not even HTML - error_codes must degrade to empty, not raise."""
     nginx_client.upload_fileobj(io.BytesIO(b"x"), "compliance/errbody.txt")
     assert _Nginx.url is not None  # set by _nginx_session above
     other = FileSystem(_Nginx.url, auth=_Nginx.auth)
@@ -447,7 +452,10 @@ def test_nginx_423_response_is_never_crashed_on_even_without_a_structured_error_
 def test_nginx_a_clean_delete_of_a_nested_collection_is_204(
     nginx_client: FileSystem,
 ) -> None:
-    """Same trailing-slash requirement as COPY/MOVE (see the usage note in the docs) - also applies to DELETE."""
+    """Same trailing-slash requirement as COPY/MOVE (see the usage note in the docs).
+
+    Also applies to DELETE.
+    """
     nginx_client.mkdir("compliance/cleandel")
     nginx_client.mkdir("compliance/cleandel/sub")
     nginx_client.remove("compliance/cleandel/")
@@ -460,12 +468,13 @@ def test_nginx_a_clean_delete_of_a_nested_collection_is_204(
 
 
 def test_nginx_does_not_support_proppatch_at_all(nginx_client: FileSystem) -> None:
-    """Confirmed against a real instance, two ways: PROPPATCH is not even
-    a legal value for nginx-dav-ext's own ``dav_ext_methods`` directive
-    (``nginx -t`` refuses it outright), and the method gets a plain
-    ``405`` from nginx's core regardless. Unlike the other nginx
-    limitations here, there is no partial support to speak of - PROPPATCH
-    is entirely absent.
+    """Confirmed against a real instance, two ways.
+
+    PROPPATCH is not even a legal value for nginx-dav-ext's own ``dav_ext_methods`` directive
+    (``nginx -t`` refuses it outright), and the method gets a plain ``405`` from nginx's core
+    regardless.
+
+    Unlike the other nginx limitations here, there is no partial support to speak of - PROPPATCH is entirely absent.
     """
     nginx_client.upload_fileobj(io.BytesIO(b"x"), "compliance/noproppatch.txt")
     with pytest.raises(HTTPStatusError) as exc_info:

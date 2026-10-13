@@ -1,3 +1,4 @@
+# pylint: disable=no-value-for-parameter  # _strip_protocol is a class method through server_aware, which pylint cannot see
 """End-to-end tests for the fsspec filesystem, against a real WebDAV server."""
 
 import pickle
@@ -167,8 +168,6 @@ def test_a_session_that_has_a_base_url_is_enough() -> None:
 def test_fsspec_opens_a_url_without_a_host_against_the_given_base_url(
     server_url: str,
 ) -> None:
-    import fsspec  # noqa: PLC0415
-
     fsspec.filesystem("webdavs", base_url=server_url, auth=AUTH).pipe_file(
         "/top.txt", b"T"
     )
@@ -251,7 +250,7 @@ def test_without_a_base_url_the_host_of_the_url_is_the_server_over_tls() -> None
         filesystem = WebdavFileSystem(host=host, port=port)
         assert filesystem.filesystem.session.base_url == expected
         filesystem.filesystem.close()
-    filesystem, path = fsspec.core.url_to_fs("webdavs://dav.example:8443/d/f")
+    filesystem, _path = fsspec.core.url_to_fs("webdavs://dav.example:8443/d/f")
     assert filesystem.filesystem.session.base_url == "https://dav.example:8443"
 
 
@@ -362,7 +361,7 @@ def test_a_filesystem_made_from_a_url_survives_serialisation(server_url: str) ->
     filesystem.pipe_file("/d/a.txt", b"A")
     for restored in (
         # our own bytes
-        pickle.loads(pickle.dumps(filesystem)),  # noqa: S301
+        pickle.loads(pickle.dumps(filesystem)),
         fsspec.AbstractFileSystem.from_json(filesystem.to_json()),
     ):
         assert restored.cat_file("/d/a.txt") == b"A"

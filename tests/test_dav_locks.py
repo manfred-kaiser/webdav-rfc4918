@@ -1,7 +1,5 @@
 """Locks: the registry, the ``If`` header they end up in, lock discovery, and what a server may do to them."""
 
-# ruff: noqa: SIM117, S105, PLC0415, S108, PTH208, RUF001
-
 import logging
 import re
 from typing import Any
@@ -68,7 +66,7 @@ def test_a_hostile_lock_timeout_header_does_not_break_locking(timeout: str) -> N
         scripted_server(respond) as (url, _rec),
         FileSystem(retry=False).locked(f"{url}/f") as lock,
     ):
-        assert lock.token == "opaquelocktoken:ok"
+        assert lock.token == "opaquelocktoken:ok"  # noqa: S105 - a made-up lock token
 
 
 @pytest.mark.parametrize(
@@ -81,12 +79,15 @@ def test_a_lock_token_that_could_change_the_if_header_is_refused(token: str) -> 
         f"<d:depth>infinity</d:depth><d:locktoken><d:href>{token}</d:href></d:locktoken>"
         "</d:activelock></d:lockdiscovery></d:prop>"
     ).encode()
-    with scripted_server(always((200, {}, body))) as (url, _rec):
-        with pytest.raises(WebDAVError), FileSystem(retry=False).locked(f"{url}/f"):
-            pass
+    with (
+        scripted_server(always((200, {}, body))) as (url, _rec),
+        pytest.raises(WebDAVError),
+        FileSystem(retry=False).locked(f"{url}/f"),
+    ):
+        pass
 
 
-TOKEN = "opaquelocktoken:abc"  # noqa: S105
+TOKEN = "opaquelocktoken:abc"  # noqa: S105 - a made-up lock token
 
 
 LOCK_BODY = f"""<?xml version="1.0"?>
@@ -182,6 +183,7 @@ def test_send_hands_back_a_webdav_response_even_from_an_adapter_the_caller_mount
             requests.Request("PUT", f"{url}/f", data=b"x")
         )
         response = session.send(prepared)
+    # pylint: disable-next=unidiomatic-typecheck
     assert type(response) is Response
     assert response.redirect_refusal is None
 
@@ -191,10 +193,12 @@ def test_a_lock_the_server_would_not_release_is_reported_not_swallowed(
     caplog: pytest.LogCaptureFixture, status: int
 ) -> None:
     # RFC 4918 sec. 9.11.1: 403 - the principal may not remove the lock.
-    with scripted_server(_lock_responder(unlock_status=status)) as (url, rec):
-        with caplog.at_level("WARNING", logger="webdav"):
-            with FileSystem(retry=False).locked(f"{url}/f"):
-                pass
+    with (
+        scripted_server(_lock_responder(unlock_status=status)) as (url, rec),
+        caplog.at_level("WARNING", logger="webdav"),
+        FileSystem(retry=False).locked(f"{url}/f"),
+    ):
+        pass
     assert [r.method for r in rec.requests] == ["LOCK", "UNLOCK"]
     assert (
         f"could not release the lock on {url}/f: the server answered {status}"
@@ -206,20 +210,24 @@ def test_a_lock_the_server_would_not_release_is_reported_not_swallowed(
 def test_a_lock_that_was_already_gone_is_reported_as_that(
     caplog: pytest.LogCaptureFixture, status: int
 ) -> None:
-    with scripted_server(_lock_responder(unlock_status=status)) as (url, _rec):
-        with caplog.at_level("WARNING", logger="webdav"):
-            with FileSystem(retry=False).locked(f"{url}/f"):
-                pass
+    with (
+        scripted_server(_lock_responder(unlock_status=status)) as (url, _rec),
+        caplog.at_level("WARNING", logger="webdav"),
+        FileSystem(retry=False).locked(f"{url}/f"),
+    ):
+        pass
     assert "was already gone when it was released" in caplog.text
     assert f"answered {status}" in caplog.text
     assert "may have timed out" in caplog.text
 
 
 def test_a_released_lock_is_not_reported(caplog: pytest.LogCaptureFixture) -> None:
-    with scripted_server(_lock_responder()) as (url, rec):
-        with caplog.at_level("WARNING", logger="webdav"):
-            with FileSystem(retry=False).locked(f"{url}/f"):
-                pass
+    with (
+        scripted_server(_lock_responder()) as (url, rec),
+        caplog.at_level("WARNING", logger="webdav"),
+        FileSystem(retry=False).locked(f"{url}/f"),
+    ):
+        pass
     assert rec.requests[1].headers["lock-token"] == f"<{TOKEN}>"
     assert "if" not in rec.requests[1].headers  # sec. 9.11: no If header is needed
     assert caplog.text == ""
@@ -244,9 +252,11 @@ def test_a_lock_that_could_not_cover_every_member_is_an_error_naming_the_member(
     # Sec. 9.10.6/7.4: a 207 for a Depth: infinity LOCK is a failure, not a lock.
     with scripted_server(lambda _s: (207, {}, _MEMBER_LOCKED)) as (url, rec):
         fs = FileSystem(retry=False)
-        with pytest.raises(MultiStatusError, match="member"):
-            with fs.locked(f"{url}/dir/"):
-                pytest.fail("no lock was granted")
+        with (
+            pytest.raises(MultiStatusError, match="member"),
+            fs.locked(f"{url}/dir/"),
+        ):
+            pytest.fail("no lock was granted")
         with pytest.raises(MultiStatusError, match="member"):
             fs.refresh_lock(f"{url}/dir/", TOKEN)
     assert [r.method for r in rec.requests] == ["LOCK", "LOCK"]  # nothing to unlock
@@ -370,11 +380,13 @@ def test_a_granted_lock_that_cannot_be_read_is_released_again_and_raised() -> No
 def test_a_lock_with_no_usable_token_anywhere_raises_and_has_nothing_to_release() -> (
     None
 ):
-    with scripted_server(
-        lambda _s: (200, {"Lock-Token": "<bad token>"}, b"<not-a-lock/>")
-    ) as (url, rec):
-        with pytest.raises(MalformedResponseError):
-            Session(retry=False).lock(f"{url}/f")
+    with (
+        scripted_server(
+            lambda _s: (200, {"Lock-Token": "<bad token>"}, b"<not-a-lock/>")
+        ) as (url, rec),
+        pytest.raises(MalformedResponseError),
+    ):
+        Session(retry=False).lock(f"{url}/f")
     assert [r.method for r in rec.requests] == ["LOCK"]
 
 
@@ -451,7 +463,7 @@ def _answers(body: bytes) -> "Reply":
     return 207, {"Content-Type": "application/xml"}, body
 
 
-_LOCK_TOKEN = "opaquelocktoken:abc"
+_LOCK_TOKEN = "opaquelocktoken:abc"  # noqa: S105 - a made-up lock token
 
 
 def _lock_discovery(body_of_lockdiscovery: "str | None") -> bytes:
@@ -511,7 +523,7 @@ LOCK_ANSWER = (
 )
 
 
-def _lock_server(token_text: str, header: str = "<opaquelocktoken:abc>"):  # type: ignore[no-untyped-def]
+def _lock_server(token_text: str, header: str = "<opaquelocktoken:abc>") -> Any:
     def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
         if seen.method == "LOCK":
             return (
@@ -525,16 +537,20 @@ def _lock_server(token_text: str, header: str = "<opaquelocktoken:abc>"):  # typ
 
 
 def test_a_pretty_printed_token_is_accepted() -> None:
-    with scripted_server(_lock_server("\n   opaquelocktoken:abc\n  ")) as (url, _rec):
-        with FileSystem(retry=False).locked(f"{url}/f") as lock:
-            assert lock.token == "opaquelocktoken:abc"
+    with (
+        scripted_server(_lock_server("\n   opaquelocktoken:abc\n  ")) as (url, _rec),
+        FileSystem(retry=False).locked(f"{url}/f") as lock,
+    ):
+        assert lock.token == "opaquelocktoken:abc"  # noqa: S105 - a made-up lock token
 
 
 def test_a_lock_the_client_cannot_use_is_released_anyway() -> None:
-    with scripted_server(_lock_server("bad token with spaces")) as (url, rec):
-        with pytest.raises(MalformedResponseError):
-            with FileSystem(retry=False).locked(f"{url}/f"):
-                pass
+    with (
+        scripted_server(_lock_server("bad token with spaces")) as (url, rec),
+        pytest.raises(MalformedResponseError),
+        FileSystem(retry=False).locked(f"{url}/f"),
+    ):
+        pass
     assert [r.method for r in rec.requests] == ["LOCK", "UNLOCK"]
     assert rec.requests[1].headers["lock-token"] == "<opaquelocktoken:abc>"
 
@@ -542,10 +558,12 @@ def test_a_lock_the_client_cannot_use_is_released_anyway() -> None:
 def test_a_lock_already_gone_on_release_is_logged_without_the_token(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """``base_url`` is immutable (see test_session_settings.py), so a held lock's
-    UNLOCK on cleanup always goes to the resource it was acquired on - the server
-    answering that it is already gone (timed out, or removed) is the one other
-    way ``_unlock_quietly`` warns instead of silently succeeding."""
+    """``base_url`` is immutable (see test_session_settings.py).
+
+    A held lock's UNLOCK on cleanup always goes to the resource it was acquired on - the server
+    answering that it is already gone (timed out, or removed) is the one other way
+    ``_unlock_quietly`` warns instead of silently succeeding.
+    """
 
     def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
         if seen.method == "UNLOCK":
@@ -555,10 +573,12 @@ def test_a_lock_already_gone_on_release_is_logged_without_the_token(
         )
         return result
 
-    with scripted_server(respond) as (url, rec):
-        with caplog.at_level("WARNING", logger="webdav"):
-            with FileSystem(retry=False).locked(f"{url}/f"):
-                pass
+    with (
+        scripted_server(respond) as (url, rec),
+        caplog.at_level("WARNING", logger="webdav"),
+        FileSystem(retry=False).locked(f"{url}/f"),
+    ):
+        pass
     assert [r.method for r in rec.requests] == ["LOCK", "UNLOCK"]
     assert "was already gone" in caplog.text
     assert "may have timed out" in caplog.text
@@ -642,7 +662,7 @@ def test_lock_arguments_are_validated_before_anything_is_sent() -> None:
     bad_timeouts: list[Any] = [True, -1, 2**40, "5", []]
     for bad in bad_timeouts:
         with pytest.raises(ValueError, match=r"timeout|empty"):
-            session.lock("http://unused.invalid/a", lock_timeout=bad)  # type: ignore[arg-type]
+            session.lock("http://unused.invalid/a", lock_timeout=bad)
 
 
 def test_unlock_strips_angle_brackets_and_validates() -> None:
@@ -692,7 +712,10 @@ def test_a_shared_lock_response_selects_the_lock_that_was_asked_about() -> None:
     with scripted_server(respond) as (url, _rec):
         with FileSystem(retry=False).locked(f"{url}/f", scope="shared") as lock:
             assert lock.owner == "me"
-            assert lock.token == "opaquelocktoken:mine"
+            assert (
+                lock.token
+                == "opaquelocktoken:mine"  # noqa: S105 - a made-up lock token
+            )
         refreshed = FileSystem(retry=False).refresh_lock(
             f"{url}/f", "opaquelocktoken:mine"
         )
@@ -717,8 +740,6 @@ def test_copy_and_move_into_a_depth_zero_locked_collection(server_url: str) -> N
 
 
 def test_a_transfer_presents_every_lock_it_touches_as_one_tagged_list() -> None:
-    from webdav.dav.locks import LockRegistry
-
     registry = LockRegistry()
     registry.add("https://dav.example/src", "tokI", "infinity")
     registry.add("https://dav.example/dst", "tokD", "0")
@@ -733,8 +754,6 @@ def test_a_transfer_presents_every_lock_it_touches_as_one_tagged_list() -> None:
 
 
 def test_a_transfer_of_a_locked_source_alone_is_still_tagged() -> None:
-    from webdav.dav.locks import LockRegistry
-
     registry = LockRegistry()
     registry.add("https://dav.example/a.txt", "tok", "0")
     assert registry.if_header(
@@ -758,16 +777,18 @@ def test_a_failed_unlock_never_replaces_the_callers_own_exception() -> None:
         raise ConnectionResetError
 
     class BoomError(Exception):
-        pass
+        """An error that nothing in the library knows."""
 
-    with scripted_server(respond) as (url, _rec):
-        with pytest.raises(BoomError):
-            with FileSystem(retry=False).locked(f"{url}/f"):
-                raise BoomError
+    with (
+        scripted_server(respond) as (url, _rec),
+        pytest.raises(BoomError),
+        FileSystem(retry=False).locked(f"{url}/f"),
+    ):
+        raise BoomError
     assert unlocks["n"] >= 1
 
 
-DISCOVERED_TOKEN = "opaquelocktoken:1234-abcd"
+DISCOVERED_TOKEN = "opaquelocktoken:1234-abcd"  # noqa: S105 - a made-up lock token
 
 
 ACTIVE = (
@@ -801,11 +822,13 @@ class Server:
         propfind_status: int = 207,
         put_412_with_live_lock: bool = False,
     ) -> None:
+        """Say whether the lock is alive and how ``PROPFIND`` and the ``PUT`` answer."""
         self.alive = alive
         self.propfind_status = propfind_status
         self.put_412_with_live_lock = put_412_with_live_lock
 
     def __call__(self, seen: Seen) -> Reply:
+        """Answer ``seen`` the way the lock and the flags say."""
         if seen.method == "LOCK":
             return (
                 200,
@@ -833,16 +856,18 @@ def _puts(recorder: "list[Seen]") -> "list[Seen]":
 
 def test_a_token_the_server_no_longer_has_is_forgotten_after_the_412() -> None:
     server = Server(alive=False)
-    with scripted_server(server) as (url, recorder):
-        with Session(url, retry=False) as session:
-            session.lock("/f.txt")
-            assert session.locks
-            first = session.put("/f.txt", data=b"one")
-            assert (
-                first.status_code == 412
-            )  # not repeated: without the lock it may be someone else's turn
-            assert not session.locks
-            second = session.put("/f.txt", data=b"two")
+    with (
+        scripted_server(server) as (url, recorder),
+        Session(url, retry=False) as session,
+    ):
+        session.lock("/f.txt")
+        assert session.locks
+        first = session.put("/f.txt", data=b"one")
+        assert (
+            first.status_code == 412
+        )  # not repeated: without the lock it may be someone else's turn
+        assert not session.locks
+        second = session.put("/f.txt", data=b"two")
     assert second.status_code == 204
     puts = _puts(recorder.requests)
     assert DISCOVERED_TOKEN in puts[0].headers["if"]
@@ -852,12 +877,14 @@ def test_a_token_the_server_no_longer_has_is_forgotten_after_the_412() -> None:
 
 def test_a_token_the_server_still_has_is_kept_after_a_412_for_another_reason() -> None:
     server = Server(alive=True, put_412_with_live_lock=True)
-    with scripted_server(server) as (url, recorder):
-        with Session(url, retry=False) as session:
-            session.lock("/f.txt")
-            assert session.put("/f.txt", data=b"x").status_code == 412
-            assert session.locks
-            session.put("/f.txt", data=b"y")
+    with (
+        scripted_server(server) as (url, recorder),
+        Session(url, retry=False) as session,
+    ):
+        session.lock("/f.txt")
+        assert session.put("/f.txt", data=b"x").status_code == 412
+        assert session.locks
+        session.put("/f.txt", data=b"y")
     assert all(
         DISCOVERED_TOKEN in put.headers["if"] for put in _puts(recorder.requests)
     )
@@ -866,35 +893,39 @@ def test_a_token_the_server_still_has_is_kept_after_a_412_for_another_reason() -
 @pytest.mark.parametrize("status", [401, 403, 500, 405])
 def test_a_token_is_kept_when_the_server_cannot_say(status: int) -> None:
     server = Server(alive=False, propfind_status=status)
-    with scripted_server(server) as (url, _):
-        with Session(url, retry=False) as session:
-            session.lock("/f.txt")
-            assert session.put("/f.txt", data=b"x").status_code == 412
-            assert session.locks
+    with (
+        scripted_server(server) as (url, _),
+        Session(url, retry=False) as session,
+    ):
+        session.lock("/f.txt")
+        assert session.put("/f.txt", data=b"x").status_code == 412
+        assert session.locks
 
 
 def test_a_412_for_a_write_without_a_token_asks_nothing() -> None:
     def respond(seen: Seen) -> Reply:
         return (412, {}, b"") if seen.method == "PUT" else (404, {}, b"")
 
-    with scripted_server(respond) as (url, recorder):
-        with Session(url, retry=False) as session:
-            assert (
-                session.put(
-                    "/g.txt", data=b"x", headers={"If-Match": '"e"'}
-                ).status_code
-                == 412
-            )
+    with (
+        scripted_server(respond) as (url, recorder),
+        Session(url, retry=False) as session,
+    ):
+        assert (
+            session.put("/g.txt", data=b"x", headers={"If-Match": '"e"'}).status_code
+            == 412
+        )
     assert [seen.method for seen in recorder.requests] == ["PUT"]
 
 
 def test_only_the_tokens_the_request_carried_are_asked_about() -> None:
     server = Server(alive=False)
-    with scripted_server(server) as (url, recorder):
-        with Session(url, retry=False) as session:
-            session.lock("/f.txt")
-            session.put("/other.txt", data=b"x")  # no token for this path: 204
-            assert session.locks
+    with (
+        scripted_server(server) as (url, recorder),
+        Session(url, retry=False) as session,
+    ):
+        session.lock("/f.txt")
+        session.put("/other.txt", data=b"x")  # no token for this path: 204
+        assert session.locks
     assert not [seen for seen in recorder.requests if seen.method == "PROPFIND"]
 
 
@@ -953,7 +984,10 @@ def test_proto02_an_unreadable_timeout_is_never_an_error() -> None:
     body = f"""<d:activelock {DAV}><d:locktoken><d:href>urn:a</d:href></d:locktoken>
     <d:timeout>garbage</d:timeout></d:activelock>"""
 
-    assert ActiveLock.from_element(fromstring(body)).token == "urn:a"
+    assert (
+        ActiveLock.from_element(fromstring(body)).token
+        == "urn:a"  # noqa: S105 - a made-up lock token
+    )
 
 
 def test_proto06_two_locks_on_one_resource_both_go_into_the_if_header() -> None:

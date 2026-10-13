@@ -6,17 +6,24 @@ the client sees the connection end in the middle of the body. The proxy records 
 the requests it forwarded, so a test can tell that the client came back with a ``Range``.
 """
 
+import contextlib
 import re
 import socket
 import threading
 import time
-from types import TracebackType
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing import Self
 
 _METHODS = (b"GET ", b"HEAD ", b"PROPFIND ", b"PUT ", b"DELETE ", b"MKCOL ", b"LOCK ")
 
 
 class CutProxy:
-    """Forward to ``target`` (host, port); cut the first response over ``cut`` bytes after ``pause`` seconds."""
+    """Forward to ``target`` (host, port).
+
+    Cut the first response over ``cut`` bytes after ``pause`` seconds.
+    """
 
     def __init__(self, target: "tuple[str, int]", *, cut: int, pause: float) -> None:
         """Listen on a free port of 127.0.0.1; use it as a context manager."""
@@ -29,7 +36,7 @@ class CutProxy:
         #: The request heads (request line and headers) that went through, in order.
         self.heads: list[str] = []
         #: The ETag of the first 200 answer, as the client got it.
-        self.first_etag: "str | None" = None
+        self.first_etag: str | None = None
         #: Whether a response has been cut.
         self.cut_happened = False
         self._lock = threading.Lock()
@@ -40,16 +47,13 @@ class CutProxy:
         """The base URL of the proxy."""
         return f"http://127.0.0.1:{self._listener.getsockname()[1]}"
 
-    def __enter__(self) -> "CutProxy":
+    def __enter__(self) -> "Self":
+        """Start accepting connections."""
         self._acceptor.start()
         return self
 
-    def __exit__(
-        self,
-        exc_type: "type[BaseException] | None",
-        exc: "BaseException | None",
-        traceback: "TracebackType | None",
-    ) -> None:
+    def __exit__(self, *exc_info: object) -> None:
+        """Stop accepting connections."""
         self._stop.set()
         self._acceptor.join(2)
         self._listener.close()
@@ -75,6 +79,19 @@ class CutProxy:
         except OSError:
             pass
 
+    def _note_etag(self, data: bytes) -> None:
+        if self.first_etag is None and data.startswith(b"HTTP/1.1 200"):
+            match = re.search(rb"\r\nETag: ([^\r]*)", data)
+            if match:
+                self.first_etag = match.group(1).decode("latin-1")
+
+    def _is_time_to_cut(self, sent: int) -> bool:
+        with self._lock:
+            cut_now = sent > self._cut and not self.cut_happened
+            if cut_now:
+                self.cut_happened = True
+        return cut_now
+
     def _handle(self, client: socket.socket) -> None:
         upstream = socket.create_connection(self._target)
         threading.Thread(
@@ -83,29 +100,18 @@ class CutProxy:
         sent = 0
         try:
             while data := upstream.recv(65536):
-                if self.first_etag is None and data.startswith(b"HTTP/1.1 200"):
-                    match = re.search(rb"\r\nETag: ([^\r]*)", data)
-                    if match:
-                        self.first_etag = match.group(1).decode("latin-1")
+                self._note_etag(data)
                 sent += len(data)
-                with self._lock:
-                    cut_now = sent > self._cut and not self.cut_happened
-                    if cut_now:
-                        self.cut_happened = True
-                if cut_now:
+                if self._is_time_to_cut(sent):
                     time.sleep(self._pause)
                     for sock in (client, upstream):
-                        try:
+                        with contextlib.suppress(OSError):
                             sock.shutdown(socket.SHUT_RDWR)
-                        except OSError:
-                            pass
                     return
                 client.sendall(data)
         except OSError:
             pass
         finally:
             for sock in (client, upstream):
-                try:
+                with contextlib.suppress(OSError):
                     sock.close()
-                except OSError:
-                    pass

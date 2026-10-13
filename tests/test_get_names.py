@@ -1,17 +1,18 @@
 """What ``get`` writes from the names a server lists: Windows names and names that are one file."""
 
-# ruff: noqa: SIM117, PLC0415
-
 import errno
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from tests.builders import multistatus_ls
 from tests.scripted_server import Reply, Seen, always, scripted_server
-from webdav import FileSystem, _fsspec_guards
+from webdav import FileSystem, Resource, _fsspec_guards
+from webdav._fsspec_guards import GetTree
 from webdav.fsspec import WebdavFileSystem
+from webdav.resource import safe_local_name
 
 
 def _listing(*names: str) -> bytes:
@@ -28,7 +29,7 @@ def _listing(*names: str) -> bytes:
     ).encode()
 
 
-def _listing_server(*names: str):  # noqa: ANN202
+def _listing_server(*names: str) -> Any:
     def respond(seen: Seen) -> Reply:
         if seen.method == "PROPFIND":
             return 207, {"Content-Type": "application/xml"}, _listing(*names)
@@ -44,9 +45,11 @@ def test_windows_refuses_what_is_not_a_windows_file_name(
     name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(_fsspec_guards, "_on_windows", lambda: True)
-    with _listing_server(name) as (url, _):
-        with pytest.raises(OSError, match="Windows") as caught:
-            WebdavFileSystem(url).get("/dir", str(tmp_path / "dst"), recursive=True)
+    with (
+        _listing_server(name) as (url, _),
+        pytest.raises(OSError, match="Windows") as caught,
+    ):
+        WebdavFileSystem(url).get("/dir", str(tmp_path / "dst"), recursive=True)
     assert caught.value.errno == errno.EINVAL
     assert (
         not list((tmp_path / "dst").rglob("*")) if (tmp_path / "dst").exists() else True
@@ -89,9 +92,7 @@ def test_two_names_that_are_one_file_are_not_written_over_each_other(
     tree.check(str(dst / "other.txt"))
 
 
-def test_FS03_safe_local_name_on_posix() -> None:
-    from webdav.resource import safe_local_name
-
+def test_fs03_safe_local_name_on_posix() -> None:
     assert safe_local_name("dir/sub/file.txt") == "file.txt"
     assert safe_local_name("dir/sub/") == "sub"
     # a backslash, a colon and a leading dash are ordinary POSIX names
@@ -102,9 +103,7 @@ def test_FS03_safe_local_name_on_posix() -> None:
 @pytest.mark.parametrize(
     "name", ["", "/", ".", "..", "a\x00b", "x\ny", "\x1b[31mred", "a\x7fb"]
 )
-def test_FS03_safe_local_name_refuses_what_no_platform_can_use(name: str) -> None:
-    from webdav.resource import safe_local_name
-
+def test_fs03_safe_local_name_refuses_what_no_platform_can_use(name: str) -> None:
     with pytest.raises(ValueError, match="not usable"):
         safe_local_name(name)
 
@@ -126,57 +125,43 @@ def test_FS03_safe_local_name_refuses_what_no_platform_can_use(name: str) -> Non
         "a?b",
     ],
 )
-def test_FS03_safe_local_name_on_windows(name: str) -> None:
-    from webdav.resource import safe_local_name
-
+def test_fs03_safe_local_name_on_windows(name: str) -> None:
     with pytest.raises(ValueError, match="not usable on Windows"):
         safe_local_name(name, windows=True)
 
 
-def test_FS03_guard_ordinary_names_on_windows() -> None:
-    from webdav.resource import safe_local_name
-
+def test_fs03_guard_ordinary_names_on_windows() -> None:
     for name in ("report.txt", "Straße.txt", "console.txt", "日本語.md", "a b.txt"):
         assert safe_local_name(name, windows=True) == name
 
 
-def test_FS03_the_message_escapes_the_server_name() -> None:
-    from webdav.resource import safe_local_name
-
-    with pytest.raises(ValueError) as caught:
+def test_fs03_the_message_escapes_the_server_name() -> None:
+    with pytest.raises(ValueError, match="not usable") as caught:
         safe_local_name("\x1b[2Jfake\x00", windows=False)
     assert "\x1b" not in str(caught.value)
 
 
-def test_FS03_resource_basename() -> None:
-    from webdav import Resource
-
+def test_fs03_resource_basename() -> None:
     r = Resource("dir/sub/a\\b.txt", href="/dir/sub/a%5Cb.txt", is_dir=False)
     assert r.basename == "a\\b.txt"
     assert Resource("dir/sub", href="/dir/sub/", is_dir=True).basename == "sub"
 
 
-def test_FS03_windows_rules_are_not_on_by_themselves() -> None:
-    from webdav.resource import safe_local_name
-
+def test_fs03_windows_rules_are_not_on_by_themselves() -> None:
     assert (
         safe_local_name("CON") == "CON"
     )  # only windows=True refuses it, whatever os.name is
     assert safe_local_name("trail.") == "trail."
 
 
-def test_FS03_prepared_windows_name_check(tmp_path: Path) -> None:
-    from webdav._fsspec_guards import GetTree
-
+def test_fs03_prepared_windows_name_check(tmp_path: Path) -> None:
     tree = GetTree(str(tmp_path), contained=True)
     tree.check_windows_names(str(tmp_path / "ok" / "a.txt"))
     with pytest.raises(OSError, match="not usable on Windows"):
         tree.check_windows_names(str(tmp_path / "d" / "CON"))
 
 
-def test_FS03_prepared_collision_check(tmp_path: Path) -> None:
-    from webdav._fsspec_guards import GetTree
-
+def test_fs03_prepared_collision_check(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_bytes(b"x")
     os.link(
         tmp_path / "a.txt", tmp_path / "A.TXT"
@@ -190,7 +175,7 @@ def test_FS03_prepared_collision_check(tmp_path: Path) -> None:
     )  # the same name again is not a collision
 
 
-def test_FS03_get_does_not_enforce_platform_name_rules(
+def test_fs03_get_does_not_enforce_platform_name_rules(
     ffs: WebdavFileSystem, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     ffs.pipe_file("/d/CON", b"x")
@@ -201,7 +186,7 @@ def test_FS03_get_does_not_enforce_platform_name_rules(
     assert sorted(p.name for p in dst.iterdir()) == ["CON", "Case.TXT", "case.txt"]
 
 
-def test_FS03_guard_posix_names_download_as_they_are(
+def test_fs03_guard_posix_names_download_as_they_are(
     ffs: WebdavFileSystem, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     ffs.pipe_file("/d/a\\b.txt", b"1")
@@ -217,8 +202,6 @@ def test_FS03_guard_posix_names_download_as_they_are(
 
 
 def test_a_backslash_in_a_name_is_an_ordinary_character_on_posix() -> None:
-    import os
-
     if os.name == "nt":
         pytest.skip("a backslash separates paths on Windows")
     body = multistatus_ls("/d/", "/d/a%5Cb.txt", "/d/c\\d.txt")

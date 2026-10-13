@@ -149,6 +149,8 @@ def _raise_not_found() -> None:
 
 
 def test_exc02_an_error_crosses_a_process_pool() -> None:
-    with ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) as pool:
-        with pytest.raises(ResourceNotFoundError, match="/worker"):
-            pool.submit(_raise_not_found).result(timeout=60)
+    with (
+        ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) as pool,
+        pytest.raises(ResourceNotFoundError, match="/worker"),
+    ):
+        pool.submit(_raise_not_found).result(timeout=60)

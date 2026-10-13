@@ -1,7 +1,5 @@
 """Multistatus answers: statuses, hrefs and the shapes a server may answer in, also hostile ones."""
 
-# ruff: noqa: SIM117, PLC0415, PTH208, S105, RUF001
-
 import unicodedata
 from typing import Any
 
@@ -16,8 +14,9 @@ from tests.builders import (
     multistatus_of_hrefs,
     status_entry,
 )
-from tests.scripted_server import Reply, Seen, always, scripted_server
+from tests.scripted_server import Seen, always, scripted_server
 from webdav import FileSystem, exceptions
+from webdav.dav import multistatus
 from webdav.dav.multistatus import MultiStatusResponse, parse_multistatus_response
 from webdav.exceptions import (
     MalformedResponseError,
@@ -29,9 +28,11 @@ from webdav.exceptions import (
 
 def test_ls_refuses_entries_outside_the_listed_directory() -> None:
     body = multistatus_of_hrefs("/a/b/", "/a/", "/", "/secret/", "/a/b/ok.txt")
-    with scripted_server(always((207, {}, body))) as (url, _rec):
-        with pytest.raises(MalformedResponseError, match="outside"):
-            FileSystem(retry=False).ls(f"{url}/a/b")
+    with (
+        scripted_server(always((207, {}, body))) as (url, _rec),
+        pytest.raises(MalformedResponseError, match="outside"),
+    ):
+        FileSystem(retry=False).ls(f"{url}/a/b")
 
 
 def test_an_encoded_slash_in_an_href_is_refused_not_turned_into_a_path_separator() -> (
@@ -46,9 +47,11 @@ def test_an_encoded_slash_in_an_href_is_refused_not_turned_into_a_path_separator
 
 
 def test_a_control_character_in_an_href_is_refused() -> None:
-    """``\\x7f`` (and most other control characters) survive well-formed XML
-    untouched - unlike a redirect Location, nothing upstream already refuses
-    them for an href, so _check_href must."""
+    r"""``\x7f`` (and most other control characters) survive well-formed XML untouched.
+
+    Unlike a redirect Location, nothing upstream already refuses them for an href, so _check_href
+    must.
+    """
     body = multistatus_of_hrefs("/a/", "/a/x\x7fy.txt")
     with (
         scripted_server(always((207, {}, body))) as (url, _rec),
@@ -58,10 +61,11 @@ def test_a_control_character_in_an_href_is_refused() -> None:
 
 
 def test_a_backslash_in_an_href_is_still_an_ordinary_character() -> None:
-    """Unlike the control-character check above, a backslash is deliberately
-    still accepted here - an ordinary POSIX file-name character, not part of
-    an authority a parser could misread (see test_get_names.py's
-    test_a_backslash_in_a_name_is_an_ordinary_character_on_posix)."""
+    """Unlike the control-character check above, a backslash is deliberately still accepted here.
+
+    An ordinary POSIX file-name character, not part of an authority a parser could misread (see
+    test_get_names.py's test_a_backslash_in_a_name_is_an_ordinary_character_on_posix).
+    """
     body = multistatus_of_hrefs("/a/", "/a/x\\y.txt")
     with scripted_server(always((207, {}, body))) as (url, _rec):
         assert FileSystem(retry=False).ls(f"{url}/a") == ["a/x\\y.txt"]
@@ -69,14 +73,15 @@ def test_a_backslash_in_an_href_is_still_an_ordinary_character() -> None:
 
 def test_a_multistatus_with_absurdly_many_responses_is_refused() -> None:
     body = multistatus_of_hrefs(*[f"/d/{i}" for i in range(300)])
-    from webdav.dav import multistatus
 
     old = multistatus.MAX_RESPONSES
     multistatus.MAX_RESPONSES = 100
     try:
-        with scripted_server(always((207, {}, body))) as (url, _rec):
-            with pytest.raises(MalformedResponseError, match="too many"):
-                FileSystem(retry=False).ls(f"{url}/d")
+        with (
+            scripted_server(always((207, {}, body))) as (url, _rec),
+            pytest.raises(MalformedResponseError, match="too many"),
+        ):
+            FileSystem(retry=False).ls(f"{url}/d")
     finally:
         multistatus.MAX_RESPONSES = old
 
@@ -95,7 +100,7 @@ def test_a_failed_propstat_without_a_property_still_fails(prop: str) -> None:
     assert excinfo.value.statuses == {"/a": "Forbidden"}
 
 
-def _answers(body: bytes) -> "Reply":
+def _answers(body: bytes) -> "tuple[int, dict[str, str], bytes]":
     return 207, {"Content-Type": "application/xml"}, body
 
 
@@ -177,9 +182,11 @@ def test_ls_keeps_a_member_the_account_may_not_read_and_drops_one_that_is_gone()
 
 def test_ls_of_a_collection_the_body_calls_missing_raises() -> None:
     body = multistatus_doc(_status_only("/d/", "404 Not Found"))
-    with scripted_server(always(_answers(body))) as (url, _rec):
-        with pytest.raises(exceptions.ResourceNotFoundError):
-            FileSystem(url, retry=False).ls("d")
+    with (
+        scripted_server(always(_answers(body))) as (url, _rec),
+        pytest.raises(exceptions.ResourceNotFoundError),
+    ):
+        FileSystem(url, retry=False).ls("d")
 
 
 def test_a_resource_has_a_status_field_in_its_dict() -> None:
@@ -206,30 +213,36 @@ def test_a_failure_is_not_hidden_by_a_later_entry_for_the_same_href() -> None:
         status_entry("/d/x", "HTTP/1.1 423 Locked"),
         status_entry("/d/x", "HTTP/1.1 204 No Content"),
     )
-    with scripted_server(always(reply)) as (url, _rec):
-        with pytest.raises(exceptions.MultiStatusError):
-            FileSystem(retry=False).remove(f"{url}/d")
+    with (
+        scripted_server(always(reply)) as (url, _rec),
+        pytest.raises(exceptions.MultiStatusError),
+    ):
+        FileSystem(retry=False).remove(f"{url}/d")
 
 
 @pytest.mark.parametrize(
     "status", ["HTTP/1.1 302 Found", "HTTP/1.1 999 Odd", "HTTP/1.1 100 Continue"]
 )
 def test_any_member_status_outside_2xx_is_a_failure(status: str) -> None:
-    with scripted_server(always(_delete_reply(status_entry("/d/x", status)))) as (
-        url,
-        _rec,
+    with (
+        scripted_server(always(_delete_reply(status_entry("/d/x", status)))) as (
+            url,
+            _rec,
+        ),
+        pytest.raises(exceptions.MultiStatusError),
     ):
-        with pytest.raises(exceptions.MultiStatusError):
-            FileSystem(retry=False).remove(f"{url}/d")
+        FileSystem(retry=False).remove(f"{url}/d")
 
 
 def test_an_unparseable_member_status_is_an_error_not_a_success() -> None:
-    with scripted_server(always(_delete_reply(status_entry("/d/x", "garbage")))) as (
-        url,
-        _rec,
+    with (
+        scripted_server(always(_delete_reply(status_entry("/d/x", "garbage")))) as (
+            url,
+            _rec,
+        ),
+        pytest.raises(MalformedResponseError),
     ):
-        with pytest.raises(MalformedResponseError):
-            FileSystem(retry=False).remove(f"{url}/d")
+        FileSystem(retry=False).remove(f"{url}/d")
 
 
 def test_a_2xx_member_status_is_fine() -> None:
@@ -242,7 +255,6 @@ def test_a_2xx_member_status_is_fine() -> None:
 
 
 def test_nfc_and_nfd_twins_are_both_listed() -> None:
-
     nfc = unicodedata.normalize("NFC", "é")
     nfd = unicodedata.normalize("NFD", "é")
     body = multistatus_ls("/d/", f"/d/{nfc}", f"/d/{nfd}", "/d/x")
@@ -322,9 +334,11 @@ def test_exc01_a_207_with_such_a_body_is_a_malformed_response() -> None:
 
 
 def test_exc01_info_through_the_file_system_stays_in_the_hierarchy() -> None:
-    with scripted_server(lambda _s: (207, {}, BAD_SECOND_HREF)) as (url, _rec):
-        with pytest.raises(WebDAVError):
-            FileSystem(url, retry=False).info("/d")
+    with (
+        scripted_server(lambda _s: (207, {}, BAD_SECOND_HREF)) as (url, _rec),
+        pytest.raises(WebDAVError),
+    ):
+        FileSystem(url, retry=False).info("/d")
 
 
 def test_exc01_several_valid_hrefs_of_one_response_still_work() -> None:

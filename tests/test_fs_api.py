@@ -1,9 +1,9 @@
-"""``FileSystem`` on the server's tree: listing, walking, ``mkdir``, ``copy``, ``move``, ``info`` and ``exists``."""
+"""``FileSystem`` on the server's tree.
 
-# ruff: noqa: SIM117, PLC0415, PTH208, S105, RUF001
+Listing, walking, ``mkdir``, ``copy``, ``move``, ``info`` and ``exists``.
+"""
 
 import io
-import os
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -49,7 +49,7 @@ def test_awkward_names_are_written_where_they_were_asked_for(
     with Session(server_url, auth=AUTH, retry=False) as session:
         fs = FileSystem.from_session(session)
         assert session.put(name, b"data").status_code == 201
-        assert name in os.listdir(storage_dir)
+        assert name in [p.name for p in storage_dir.iterdir()]
         assert session.get(name).content == b"data"
         assert fs.exists(name)
         assert fs.ls("/") == [name]
@@ -57,7 +57,7 @@ def test_awkward_names_are_written_where_they_were_asked_for(
         with fs.open(name, "rb") as fobj:
             assert fobj.read() == b"data"
         session.delete(name).raise_for_status()
-        assert os.listdir(storage_dir) == []
+        assert list(storage_dir.iterdir()) == []
 
 
 def test_walk_finds_awkward_directories(server_url: str, storage_dir: Path) -> None:
@@ -68,7 +68,7 @@ def test_walk_finds_awkward_directories(server_url: str, storage_dir: Path) -> N
         session.put("a%20b/f#1.txt", b"x")
         walked = {p: sorted(f) for p, _d, f in fs.walk("/")}
         assert walked == {"/": [], "a%20b": ["a%20b/f#1.txt"], "q?x": []}
-        assert sorted(os.listdir(storage_dir)) == ["a%20b", "q?x"]
+        assert sorted(p.name for p in storage_dir.iterdir()) == ["a%20b", "q?x"]
 
 
 def test_full_urls_are_used_as_given(server_url: str, storage_dir: Path) -> None:
@@ -128,38 +128,42 @@ def test_walk_stops_a_server_that_invents_a_new_directory_at_every_level() -> No
         path = seen.path.rstrip("/")
         return 207, {}, multistatus_of_hrefs(f"{path}/", f"{path}/d/")
 
-    with scripted_server(respond) as (url, rec):
-        with pytest.raises(webdav.ClientError, match="walk"):
-            for _ in FileSystem(retry=False).walk(url):
-                pass
+    with (
+        scripted_server(respond) as (url, rec),
+        pytest.raises(webdav.ClientError, match="walk"),
+    ):
+        for _ in FileSystem(retry=False).walk(url):
+            pass
     assert len(rec.requests) < 1000
 
 
 @pytest.mark.parametrize("status", [202, 204])
-def test_BUG10_mkdir_accepts_any_success_status(status: int) -> None:
+def test_bug10_mkdir_accepts_any_success_status(status: int) -> None:
     with scripted_server(always((status, {}, b""))) as (url, _):
         FileSystem(retry=False).mkdir(url + "/d")
 
 
-def test_BUG10_mkdir_405_is_only_exists_if_the_resource_is_there() -> None:
+def test_bug10_mkdir_405_is_only_exists_if_the_resource_is_there() -> None:
     def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
         if seen.method == "PROPFIND":
             return 404, {}, b""
         return 405, {"Allow": "GET, PUT"}, b""
 
-    with scripted_server(respond) as (url, _):
-        with pytest.raises(WebDAVError) as caught:
-            FileSystem(retry=False).mkdir(url + "/d")
+    with (
+        scripted_server(respond) as (url, _),
+        pytest.raises(WebDAVError) as caught,
+    ):
+        FileSystem(retry=False).mkdir(url + "/d")
     assert not isinstance(caught.value, ResourceAlreadyExistsError)
 
 
-def test_BUG10_guard_mkdir_on_something_that_exists(fs: FileSystem) -> None:
+def test_bug10_guard_mkdir_on_something_that_exists(fs: FileSystem) -> None:
     fs.mkdir("/d")
     with pytest.raises(ResourceAlreadyExistsError):
         fs.mkdir("/d")
 
 
-def test_BUG10_copy_412_from_the_if_header_is_not_exists() -> None:
+def test_bug10_copy_412_from_the_if_header_is_not_exists() -> None:
     def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
         return (404, {}, b"") if seen.method == "PROPFIND" else (412, {}, b"")
 
@@ -172,7 +176,7 @@ def test_BUG10_copy_412_from_the_if_header_is_not_exists() -> None:
     assert not isinstance(caught_move.value, ResourceAlreadyExistsError)
 
 
-def test_BUG10_guard_copy_and_move_onto_an_existing_destination(fs: FileSystem) -> None:
+def test_bug10_guard_copy_and_move_onto_an_existing_destination(fs: FileSystem) -> None:
     fs.upload_fileobj(io.BytesIO(b"1"), "/a")
     fs.upload_fileobj(io.BytesIO(b"2"), "/b")
     with pytest.raises(ResourceAlreadyExistsError):
@@ -210,13 +214,15 @@ def _tree_server(forbidden: "set[str]") -> Any:
     return respond
 
 
-def test_BUG12_walk_raises_on_the_first_unlistable_directory_by_default() -> None:
-    with scripted_server(_tree_server({"/a"})) as (url, _):
-        with pytest.raises(ForbiddenError):
-            list(FileSystem(retry=False).walk(url))
+def test_bug12_walk_raises_on_the_first_unlistable_directory_by_default() -> None:
+    with (
+        scripted_server(_tree_server({"/a"})) as (url, _),
+        pytest.raises(ForbiddenError),
+    ):
+        list(FileSystem(retry=False).walk(url))
 
 
-def test_BUG12_walk_onerror_reports_and_skips() -> None:
+def test_bug12_walk_onerror_reports_and_skips() -> None:
     errors: list[WebDAVError] = []
     with scripted_server(_tree_server({"/a"})) as (url, _):
         seen = [
@@ -229,9 +235,7 @@ def test_BUG12_walk_onerror_reports_and_skips() -> None:
     assert not any(p.endswith("/a") for p in seen)
 
 
-def test_BUG12_module_function_takes_onerror() -> None:
-    import webdav
-
+def test_bug12_module_function_takes_onerror() -> None:
     errors: list[WebDAVError] = []
     with scripted_server(_tree_server({"/b"})) as (url, _):
         paths = [
@@ -259,7 +263,7 @@ def _endless_server(counter: list[int]) -> Any:
 
 
 @pytest.mark.parametrize("call", ["find", "walk", "du", "glob", "expand_path"])
-def test_DOS04_an_endless_tree_is_a_client_error_not_a_recursion_error(
+def test_dos04_an_endless_tree_is_a_client_error_not_a_recursion_error(
     call: str,
 ) -> None:
     counter = [0]
@@ -321,9 +325,11 @@ def test_walk_counts_queued_collections(monkeypatch: pytest.MonkeyPatch) -> None
             multistatus_ls(f"{base}/", *[f"{base}/sub{i}/" for i in range(200)]),
         )
 
-    with scripted_server(respond) as (url, rec):
-        with pytest.raises(ClientError, match="walk gave up"):
-            list(FileSystem(retry=False).walk(url))
+    with (
+        scripted_server(respond) as (url, rec),
+        pytest.raises(ClientError, match="walk gave up"),
+    ):
+        list(FileSystem(retry=False).walk(url))
     assert len(rec.requests) == 1
 
 
@@ -334,7 +340,7 @@ _MULTISTATUS = (
 )
 
 
-def _mkcol_405(propfind: Reply):  # noqa: ANN202
+def _mkcol_405(propfind: Reply) -> Any:
     def respond(seen: Seen) -> Reply:
         if seen.method == "MKCOL":
             return 405, {}, b""
@@ -348,30 +354,33 @@ def test_mkcol_405_is_already_exists_when_the_resource_is_there() -> None:
     with (
         scripted_server(_mkcol_405(reply)) as (url, _),
         FileSystem(url, retry=False) as fs,
+        pytest.raises(ResourceAlreadyExistsError),
     ):
-        with pytest.raises(ResourceAlreadyExistsError):
-            fs.mkdir("/d")
+        fs.mkdir("/d")
 
 
 @pytest.mark.parametrize("status", [401, 403, 500])
 def test_mkcol_405_stays_already_exists_when_the_server_will_not_say(
     status: int,
 ) -> None:
-    """A server that answers MKCOL 405 (it is mapped) and refuses PROPFIND: ``exist_ok`` must still work."""
-    with scripted_server(_mkcol_405((status, {}, b""))) as (url, _):
-        with (
-            FileSystem(url, retry=False) as fs,
-            pytest.raises(ResourceAlreadyExistsError),
-        ):
-            fs.mkdir("/d")
+    """A server that answers MKCOL 405 (it is mapped) and refuses PROPFIND.
+
+    ``exist_ok`` must still work.
+    """
+    with (
+        scripted_server(_mkcol_405((status, {}, b""))) as (url, _),
+        FileSystem(url, retry=False) as fs,
+        pytest.raises(ResourceAlreadyExistsError),
+    ):
+        fs.mkdir("/d")
 
 
 def test_mkcol_405_is_not_already_exists_when_the_resource_is_missing() -> None:
     """A read-only server answers 405 for everything."""
-    with scripted_server(_mkcol_405((404, {}, b""))) as (url, _):
-        with (
-            FileSystem(url, retry=False) as fs,
-            pytest.raises(HTTPStatusError) as caught,
-        ):
-            fs.mkdir("/d")
+    with (
+        scripted_server(_mkcol_405((404, {}, b""))) as (url, _),
+        FileSystem(url, retry=False) as fs,
+        pytest.raises(HTTPStatusError) as caught,
+    ):
+        fs.mkdir("/d")
     assert caught.value.status_code == 405

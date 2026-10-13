@@ -1,6 +1,7 @@
 """Basic authentication sends non-ASCII credentials as UTF-8 (RFC 7617), the way curl and browsers do."""
 
 import base64
+from typing import Any
 
 import pytest
 from requests.auth import HTTPBasicAuth, HTTPProxyAuth, _basic_auth_str
@@ -72,13 +73,16 @@ def test_as_basic_converts_a_pair_and_a_plain_http_basic_auth() -> None:
 
 def test_as_basic_leaves_everything_else_alone() -> None:
     proxy = HTTPProxyAuth("u", "p")
-    token = lambda request: request  # noqa: E731
+
+    def token(request: Any) -> Any:
+        return request
+
     mine = BasicAuth("u", "p", encoding="latin-1")
     for other in (proxy, token, mine, ("a", "b", "c"), None, False, ("a", 1)):
         assert as_basic(other) is other
 
 
-def _record(authorizations: "list[str | None]"):  # noqa: ANN202
+def _record(authorizations: "list[str | None]") -> Any:
     def respond(seen: Seen) -> Reply:
         authorizations.append(seen.headers.get("authorization"))
         return 404, {}, b""
@@ -87,42 +91,48 @@ def _record(authorizations: "list[str | None]"):  # noqa: ANN202
 
 
 def test_a_session_sends_its_pair_as_utf8() -> None:
-    seen: list["str | None"] = []
-    with scripted_server(_record(seen)) as (url, _):
-        with Session(auth=("üser", "päss"), retry=False) as session:
-            assert session.get(f"{url}/x").status_code == 404
-            assert session.auth == (
-                "üser",
-                "päss",
-            )  # what was given is what is read back
+    seen: list[str | None] = []
+    with (
+        scripted_server(_record(seen)) as (url, _),
+        Session(auth=("üser", "päss"), retry=False) as session,
+    ):
+        assert session.get(f"{url}/x").status_code == 404
+        assert session.auth == (
+            "üser",
+            "päss",
+        )  # what was given is what is read back
     assert _decoded(seen[0] or "") == "üser:päss".encode()
 
 
 def test_a_call_sends_its_pair_as_utf8_and_a_cjk_name_does_not_raise() -> None:
-    seen: list["str | None"] = []
+    seen: list[str | None] = []
     with scripted_server(_record(seen)) as (url, _), Session(retry=False) as session:
         session.get(f"{url}/x", auth=("名前", "пароль"))
     assert _decoded(seen[0] or "") == "名前:пароль".encode()
 
 
 def test_a_call_with_auth_false_still_beats_the_sessions() -> None:
-    seen: list["str | None"] = []
-    with scripted_server(_record(seen)) as (url, _):
-        with Session(auth=("üser", "päss"), retry=False) as session:
-            session.get(f"{url}/x", auth=False)  # type: ignore[arg-type]
+    seen: list[str | None] = []
+    with (
+        scripted_server(_record(seen)) as (url, _),
+        Session(auth=("üser", "päss"), retry=False) as session,
+    ):
+        session.get(f"{url}/x", auth=False)
     assert seen == [None]
 
 
 def test_latin1_is_used_when_basic_auth_says_so() -> None:
-    seen: list["str | None"] = []
-    with scripted_server(_record(seen)) as (url, _):
-        with Session(auth=BasicAuth("üser", "päss", "latin-1"), retry=False) as session:
-            session.get(f"{url}/x")
+    seen: list[str | None] = []
+    with (
+        scripted_server(_record(seen)) as (url, _),
+        Session(auth=BasicAuth("üser", "päss", "latin-1"), retry=False) as session,
+    ):
+        session.get(f"{url}/x")
     assert _decoded(seen[0] or "") == "üser:päss".encode("latin-1")
 
 
 def test_the_file_system_and_fsspec_send_utf8() -> None:
-    seen: list["str | None"] = []
+    seen: list[str | None] = []
     with scripted_server(_record(seen)) as (url, _):
         with FileSystem(url, auth=("üser", "päss"), retry=False) as fs:
             assert not fs.exists("/x")

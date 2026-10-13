@@ -1,12 +1,13 @@
-"""The XML the library builds and reads: property names, bodies, dates, error bodies, and entities it refuses."""
+"""The XML the library builds and reads.
 
-# ruff: noqa: SIM117, S105, PLC0415, S108, PTH208, RUF001
+Property names, bodies, dates, error bodies, and entities it refuses.
+"""
 
 import logging
 import pyexpat
 import time
 from datetime import UTC, datetime, timedelta
-from xml.etree.ElementTree import fromstring
+from xml.etree.ElementTree import Element, fromstring
 
 import pytest
 import requests
@@ -44,8 +45,8 @@ def test_a_bogus_xml_encoding_declaration_is_a_webdav_error(encoding: str) -> No
 def _consumed(body: bytes) -> requests.Response:
     response = requests.Response()
     response.status_code = 423
-    response._content = body  # noqa: SLF001
-    response._content_consumed = True  # type: ignore[attr-defined]  # noqa: SLF001
+    response._content = body
+    response._content_consumed = True  # type: ignore[attr-defined]
     return response
 
 
@@ -75,7 +76,7 @@ def test_an_old_expat_is_logged_once(
 ) -> None:
     monkeypatch.setattr(pyexpat, "version_info", (2, 6, 0))
     monkeypatch.setattr(pyexpat, "EXPAT_VERSION", "expat_2.6.0")
-    _xml_guard._warned.clear()  # noqa: SLF001
+    _xml_guard._warned.clear()
     try:
         with caplog.at_level(logging.WARNING, logger="webdav"):
             _xml_guard.check_xml(b"<a/>")
@@ -83,22 +84,20 @@ def test_an_old_expat_is_logged_once(
         assert caplog.text.count("expat_2.6.0") == 1
         assert "2.7.2" in caplog.text
     finally:
-        _xml_guard._warned.clear()  # noqa: SLF001
+        _xml_guard._warned.clear()
 
 
 def test_a_current_expat_is_not_logged(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr(pyexpat, "version_info", (2, 7, 2))
-    _xml_guard._warned.clear()  # noqa: SLF001
+    _xml_guard._warned.clear()
     with caplog.at_level(logging.WARNING, logger="webdav"):
         _xml_guard.check_xml(b"<a/>")
     assert "expat" not in caplog.text
 
 
 def test_a_proppatch_value_can_be_a_list_of_elements() -> None:
-    from xml.etree.ElementTree import Element  # noqa: PLC0415
-
     body = build_proppatch_body(
         {("urn:x", "kinds"): [Element("{urn:x}a"), Element("{urn:x}b")]}
     )
@@ -161,9 +160,9 @@ def test_an_empty_namespace_means_no_namespace_and_never_an_undeclaration() -> N
 
 def test_a_single_string_is_not_a_list_of_characters() -> None:
     with pytest.raises(TypeError, match="not a single"):
-        build_propfind_body("etag")  # type: ignore[arg-type]
+        build_propfind_body("etag")
     with pytest.raises(TypeError, match="not a single"):
-        FileSystem("http://unused.invalid").get_props("/a", props="etag")  # type: ignore[arg-type]
+        FileSystem("http://unused.invalid").get_props("/a", props="etag")
 
 
 def test_ordinary_names_still_work() -> None:

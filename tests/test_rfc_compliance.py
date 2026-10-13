@@ -1,3 +1,4 @@
+# pylint: disable=too-many-lines  # one file per server or per topic: the length is the number of checks
 """Regression tests for the RFC 4918/5689 conformance fixes in RFC_COMPLIANCE.md.
 
 Each test locks in one specific gap/bug found during a dedicated RFC audit
@@ -7,7 +8,7 @@ tests/test_security_edge_cases.py's adversarial-server coverage).
 
 import io
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from xml.etree.ElementTree import Element
 
 import pytest
@@ -54,6 +55,7 @@ from webdav.exceptions import (
     ResourceLockedError,
     UnsupportedMediaTypeError,
 )
+from webdav.methods import Method
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -132,7 +134,7 @@ def test_allprop_body_can_include_named_properties() -> None:
 
 
 def test_build_lock_body_accepts_a_structured_owner() -> None:
-    """owner's content model is ANY - RFC 4918's own example uses <D:href>."""
+    """``owner``'s content model is ANY - RFC 4918's own example uses <D:href>."""
     owner_el = Element("{DAV:}href")
     owner_el.text = "mailto:test@example.org"
     body = build_lock_body(owner=owner_el)
@@ -271,7 +273,7 @@ def test_get_props_sends_depth_zero(fs: FileSystem) -> None:
 
 
 def test_lockdiscovery_is_parsed_into_activelocks(fs: FileSystem) -> None:
-    """lockdiscovery's <activelock> children should reuse ActiveLock, not stay raw XML."""
+    """``lockdiscovery``'s <activelock> children should reuse ActiveLock, not stay raw XML."""
     fs.upload_fileobj(io.BytesIO(b"x"), "lockdisco.txt")
     with fs.locked("lockdisco.txt", scope=EXCLUSIVE) as active_lock:
         props = fs.get_props("lockdisco.txt")
@@ -281,7 +283,7 @@ def test_lockdiscovery_is_parsed_into_activelocks(fs: FileSystem) -> None:
 
 
 def test_supportedlock_is_parsed_into_lockentries(fs: FileSystem) -> None:
-    """supportedlock's <lockentry> children should reuse LockEntry, not stay raw XML."""
+    """``supportedlock``'s <lockentry> children should reuse LockEntry, not stay raw XML."""
     fs.upload_fileobj(io.BytesIO(b"x"), "supportedlock.txt")
     props = fs.get_props("supportedlock.txt")
     assert all(isinstance(entry, LockEntry) for entry in props.supported_locks)
@@ -394,23 +396,28 @@ def test_http_status_error_finds_a_precondition_code_in_a_plain_error_body() -> 
         b"<D:lock-token-submitted><D:href>/workspace/webdav/</D:href>"
         b"</D:lock-token-submitted></D:error>"
     )
-    with scripted_server(always((423, {}, body))) as (url, _rec):
-        with pytest.raises(HTTPStatusError) as exc_info, FileSystem(retry=False).locked(
-            f"{url}/a"
-        ):
-            pass
+    with (
+        scripted_server(always((423, {}, body))) as (url, _rec),
+        pytest.raises(HTTPStatusError) as exc_info,
+        FileSystem(retry=False).locked(f"{url}/a"),
+    ):
+        pass
     assert exc_info.value.error_codes == frozenset({"lock-token-submitted"})
 
 
-def test_http_status_error_finds_a_precondition_code_nested_under_something_else() -> None:
+def test_http_status_error_finds_a_precondition_code_nested_under_something_else() -> (
+    None
+):
     """The other shape _parse_error_codes must handle: <error> not the document root itself."""
     body = (
         b'<?xml version="1.0"?><D:something xmlns:D="DAV:"><D:error>'
         b"<D:preserved-live-properties/></D:error></D:something>"
     )
-    with scripted_server(always((409, {}, body))) as (url, _rec):
-        with pytest.raises(HTTPStatusError) as exc_info:
-            FileSystem(retry=False).move(f"{url}/a", f"{url}/b")
+    with (
+        scripted_server(always((409, {}, body))) as (url, _rec),
+        pytest.raises(HTTPStatusError) as exc_info,
+    ):
+        FileSystem(retry=False).move(f"{url}/a", f"{url}/b")
     assert exc_info.value.error_codes == frozenset({"preserved-live-properties"})
 
 
@@ -459,14 +466,20 @@ def test_getcontenttype_is_wired_through_davproperties() -> None:
 
 
 def test_a_present_but_empty_lockdiscovery_means_no_locks_held_not_unknown() -> None:
-    """§15.8: "If there are no locks, but the server supports locks, the property will be present but empty."."""
+    """§15.8: "If there are no locks.
+
+    The server supports locks, the property will be present but empty.".
+    """
     props = DAVProperties({"{DAV:}lockdiscovery": Element("{DAV:}lockdiscovery")})
     assert props.lock_discovery is not None
     assert props.active_locks == []
 
 
 def test_a_malformed_activelock_in_lockdiscovery_is_skipped_not_fatal() -> None:
-    """One bad <activelock> must not hide a sibling good one - same rationale as multistatus per-response handling."""
+    """One bad <activelock> must not hide a sibling good one.
+
+    Same rationale as multistatus per-response handling.
+    """
     lockdiscovery_el = Element("{DAV:}lockdiscovery")
     bad = Element("{DAV:}activelock")  # missing every required child
     lockdiscovery_el.append(bad)
@@ -488,7 +501,10 @@ def test_a_malformed_activelock_in_lockdiscovery_is_skipped_not_fatal() -> None:
     lockdiscovery_el.append(good)
     props = DAVProperties({"{DAV:}lockdiscovery": lockdiscovery_el})
     assert len(props.active_locks) == 1
-    assert props.active_locks[0].token == "opaquelocktoken:abc"
+    assert (
+        props.active_locks[0].token
+        == "opaquelocktoken:abc"  # noqa: S105 - a made-up lock token
+    )
 
 
 def test_resourcetype_collection_plus_a_custom_type_are_both_recognized() -> None:
@@ -519,7 +535,7 @@ def test_a_lockentry_with_no_recognized_child_defaults_to_exclusive_write() -> N
 
 
 def test_propfind_ignores_include_without_allprop() -> None:
-    """include is documented as ignored outside all_prop=True - pin that it stays silently dropped."""
+    """``include`` is documented as ignored outside all_prop=True - pin that it stays silently dropped."""
     body = build_propfind_body(prop_name=True, include=["etag"])
     tree = parse_xml(body)
     assert tree.find("{DAV:}propname") is not None
@@ -537,7 +553,7 @@ def test_proppatch_can_set_and_remove_in_one_call() -> None:
 
 
 def test_proppatch_can_set_a_complex_element_value() -> None:
-    """prop's content model is ANY (§14.26) - a property value can be a whole sub-tree, not just text.
+    """``prop``'s content model is ANY (§14.26) - a property value can be a whole sub-tree, not just text.
 
     The value's own element becomes a child of the property's wrapper
     (the same shape build_lock_body uses for a structured owner, see
@@ -545,7 +561,10 @@ def test_proppatch_can_set_a_complex_element_value() -> None:
     """
     body = build_proppatch_body(set_props={"resourcetype": Element("{DAV:}collection")})
     tree = parse_xml(body)
-    assert tree.find("{DAV:}set/{DAV:}prop/{DAV:}resourcetype/{DAV:}collection") is not None
+    assert (
+        tree.find("{DAV:}set/{DAV:}prop/{DAV:}resourcetype/{DAV:}collection")
+        is not None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -597,7 +616,10 @@ def test_parse_timeout_takes_the_first_of_a_preference_list() -> None:
 def test_the_timeout_literals_are_case_insensitive(
     text: str, seconds: "int | None"
 ) -> None:
-    """§10.7 spells "Second-" and "Infinite" as ABNF strings, which RFC 5234 §2.3 makes case-insensitive."""
+    """§10.7 spells "Second-" and "Infinite" as ABNF strings.
+
+    RFC 5234 §2.3 makes case-insensitive.
+    """
     assert parse_timeout(text) == seconds
 
 
@@ -720,12 +742,18 @@ def test_an_rfc850_two_digit_year_more_than_50_years_out_falls_back_a_century() 
 
 
 def test_a_leap_second_cannot_be_represented_but_does_not_raise() -> None:
-    """time-of-day allows :60 (a leap second) in all three HTTP-date forms - unrepresentable, not a crash."""
+    """time-of-day allows :60 (a leap second) in all three HTTP-date forms.
+
+    Unrepresentable, not a crash.
+    """
     assert from_rfc1123("Tue, 30 Jun 2015 23:59:60 GMT") is None
 
 
 def test_an_asctime_or_rfc850_retry_after_is_read_as_utc() -> None:
-    """asctime values carry no zone and are UTC (§5.6.7) - as an aware value, so they compare with every other date."""
+    """``asctime`` values carry no zone and are UTC (§5.6.7).
+
+    As an aware value, so they compare with every other date.
+    """
     asctime = from_rfc1123("Sun Nov  6 08:49:37 1994")
     assert asctime is not None
     assert asctime.utcoffset() == timedelta(0)
@@ -735,14 +763,20 @@ def test_an_asctime_or_rfc850_retry_after_is_read_as_utc() -> None:
 
 
 def test_gmt_literal_leniency_still_parses() -> None:
-    """Recipients are encouraged to be robust (§5.6.7) - accepted beyond the strict grammar, deliberately."""
+    """Recipients are encouraged to be robust (§5.6.7).
+
+    Accepted beyond the strict grammar, deliberately.
+    """
     assert from_rfc1123("wed, 21 oct 2015 07:28:00 gmt") is not None
     assert from_rfc1123("Wed, 21 Oct 2015 07:28:00 UTC") is not None
     assert from_rfc1123("Wed, 21 Oct 2015 07:28:00 +0000") is not None
 
 
 def test_asctime_single_space_day_still_parses() -> None:
-    """date3 = month SP (2DIGIT / (SP 1DIGIT)) - a single-digit day needs two spaces; one is still accepted."""
+    """date3 = month SP (2DIGIT / (SP 1DIGIT)).
+
+    A single-digit day needs two spaces; one is still accepted.
+    """
     assert from_rfc1123("Sun Nov 6 08:49:37 1994") is not None
 
 
@@ -760,7 +794,10 @@ def test_an_rfc1123_date_overflowing_near_the_year_boundary_is_none_not_an_excep
 
 @pytest.mark.parametrize("char", list("!$&'()*+,;=:@?#"))
 def test_a_reserved_character_in_a_path_is_percent_encoded(char: str) -> None:
-    """sub-delims/gen-delims are legal unencoded in a path segment (§2.2) - this library over-encodes anyway."""
+    """sub-delims/gen-delims are legal unencoded in a path segment (§2.2).
+
+    This library over-encodes anyway.
+    """
     rendered = str(URL("http://x").copy_with(path=f"/a{char}b"))
     assert char not in rendered.rpartition("/")[2]
 
@@ -807,8 +844,13 @@ def test_normalize_path_of_an_empty_string_is_unchanged() -> None:
     assert normalize_path("") == ""
 
 
-def test_join_url_path_treats_an_already_encoded_dot_segment_as_a_literal_name() -> None:
-    """A caller-supplied path is already decoded (module convention) - %2e%2e names a real segment, not '..'."""
+def test_join_url_path_treats_an_already_encoded_dot_segment_as_a_literal_name() -> (
+    None
+):
+    """A caller-supplied path is already decoded (module convention).
+
+    %2e%2e names a real segment, not '..'.
+    """
     assert join_url_path("/dav", "%2e%2e/x") == "/dav/%2e%2e/x"
     with pytest.raises(ValueError, match="climbs out"):
         join_url_path("/dav", "../x")
@@ -841,18 +883,20 @@ def test_dav_header_edge_cases() -> None:
 
 
 @pytest.mark.parametrize("status", [400, 501, 505, 599])
-def test_an_unregistered_status_is_the_base_exception_and_not_retried(status: int) -> None:
+def test_an_unregistered_status_is_the_base_exception_and_not_retried(
+    status: int,
+) -> None:
     """A status this library gives no special meaning to must not silently be treated as transient."""
-    with scripted_server(always((status, {}, b""))) as (url, rec):
-        with pytest.raises(HTTPStatusError) as exc_info:
-            FileSystem(retry=True).ls(f"{url}/x")
-    assert type(exc_info.value) is HTTPStatusError
+    with (
+        scripted_server(always((status, {}, b""))) as (url, rec),
+        pytest.raises(HTTPStatusError) as exc_info,
+    ):
+        FileSystem(retry=True).ls(f"{url}/x")
+    assert exc_info.type is HTTPStatusError
     assert len(rec.requests) == 1  # never retried
 
 
-@pytest.mark.parametrize(
-    "status", [403, 404, 409, 412, 415, 422, 423, 424, 428, 507]
-)
+@pytest.mark.parametrize("status", [403, 404, 409, 412, 415, 422, 423, 424, 428, 507])
 def test_every_registered_client_error_is_not_retryable(status: int) -> None:
     assert STATUS_CODE_EXCEPTIONS[status].retryable is False
 
@@ -863,16 +907,20 @@ def test_every_registered_transient_status_is_retryable(status: int) -> None:
 
 
 def test_a_502_from_copy_or_move_is_a_bad_gateway_error() -> None:
-    with scripted_server(always((502, {}, b""))) as (url, _rec):
-        with pytest.raises(STATUS_CODE_EXCEPTIONS[502]):
-            FileSystem(retry=False).move(f"{url}/a", f"{url}/b")
+    with (
+        scripted_server(always((502, {}, b""))) as (url, _rec),
+        pytest.raises(STATUS_CODE_EXCEPTIONS[502]),
+    ):
+        FileSystem(retry=False).move(f"{url}/a", f"{url}/b")
 
 
 @pytest.mark.parametrize("status", [422, 507])
 def test_mkcol_delete_errors_are_registered_round_trip(status: int) -> None:
-    with scripted_server(always((status, {}, b""))) as (url, _rec):
-        with pytest.raises(STATUS_CODE_EXCEPTIONS[status]):
-            FileSystem(retry=False).mkdir(f"{url}/d")
+    with (
+        scripted_server(always((status, {}, b""))) as (url, _rec),
+        pytest.raises(STATUS_CODE_EXCEPTIONS[status]),
+    ):
+        FileSystem(retry=False).mkdir(f"{url}/d")
 
 
 # ---------------------------------------------------------------------------
@@ -904,7 +952,10 @@ def test_build_mkcol_body_matches_the_rfcs_own_shape() -> None:
 
 def test_build_mkcol_body_takes_a_single_element_as_the_one_resource_type() -> None:
     body = build_mkcol_body({"resourcetype": Element("{DAV:}collection")})
-    assert parse_xml(body).find("{DAV:}set/{DAV:}prop/{DAV:}resourcetype/{DAV:}collection") is not None
+    assert (
+        parse_xml(body).find("{DAV:}set/{DAV:}prop/{DAV:}resourcetype/{DAV:}collection")
+        is not None
+    )
 
 
 @pytest.mark.parametrize(
@@ -951,7 +1002,10 @@ def test_parse_mkcol_response_matches_the_rfcs_own_failure_example() -> None:
     assert [p.status_code for p in propstats] == [403, 424]
     assert "{DAV:}resourcetype" in propstats[0].properties
     assert propstats[0].error is not None
-    assert propstats[0].response_description == "Resource type is not supported by this server"
+    assert (
+        propstats[0].response_description
+        == "Resource type is not supported by this server"
+    )
     assert "{DAV:}displayname" in propstats[1].properties
     assert propstats[1].error is None
 
@@ -971,7 +1025,9 @@ def test_parse_mkcol_response_is_empty_for_a_body_that_is_not_one() -> None:
     assert parse_mkcol_response(_EmptyResponse()) == []  # type: ignore[arg-type]
 
 
-def test_http_status_error_finds_the_precondition_code_inside_an_mkcol_response() -> None:
+def test_http_status_error_finds_the_precondition_code_inside_an_mkcol_response() -> (
+    None
+):
     """RFC 5689 sec. 3's <error> sits inside the failed property's own <propstat>, not at the document root."""
     body = (
         b'<?xml version="1.0" encoding="utf-8" ?>'
@@ -981,16 +1037,20 @@ def test_http_status_error_finds_the_precondition_code_inside_an_mkcol_response(
         b"<D:error><D:valid-resourcetype /></D:error></D:propstat>"
         b"</D:mkcol-response>"
     )
-    with scripted_server(always((403, {}, body))) as (url, _rec):
-        with pytest.raises(HTTPStatusError) as exc_info:
-            FileSystem(retry=False).mkdir(f"{url}/special")
+    with (
+        scripted_server(always((403, {}, body))) as (url, _rec),
+        pytest.raises(HTTPStatusError) as exc_info,
+    ):
+        FileSystem(retry=False).mkdir(f"{url}/special")
     assert exc_info.value.error_codes == frozenset({"valid-resourcetype"})
 
 
 def test_an_extended_mkcol_body_is_sent_as_xml(fs: FileSystem) -> None:
-    """set_props builds and sends a real Extended MKCOL request - most test servers don't support the
-    extension itself (confirmed: wsgidav answers 415), but the *request* this library sends must still
-    be exactly what RFC 5689 sec. 3 specifies."""
+    """set_props builds and sends a real Extended MKCOL request.
+
+    Most test servers don't support the extension itself (confirmed: wsgidav answers 415), but the
+    *request* this library sends must still be exactly what RFC 5689 sec. 3 specifies.
+    """
     with pytest.raises(UnsupportedMediaTypeError):
         fs.mkdir("special", set_props={"displayname": "Special Dir"})
 
@@ -1005,7 +1065,10 @@ def test_mkdir_refuses_both_data_and_set_props() -> None:
 def test_mkcol_on_an_existing_plain_resource_is_also_resourcealreadyexists(
     fs: FileSystem,
 ) -> None:
-    """§9.3: "If the Request-URI is already mapped to a resource then MKCOL MUST fail" - a file too, not just a collection."""
+    """§9.3: "If the Request-URI is already mapped to a resource then MKCOL MUST fail".
+
+    A file too, not just a collection.
+    """
     fs.upload_fileobj(io.BytesIO(b"x"), "plain.txt")
     with pytest.raises(ResourceAlreadyExistsError):
         fs.mkdir("plain.txt")
@@ -1034,14 +1097,18 @@ def _mkcol_says_400(propfind: Reply) -> "Callable[[Seen], Reply]":
 def test_mkcol_on_an_existing_plain_resource_is_still_recognized_when_the_server_says_400() -> (
     None
 ):
-    """A real server (Apache's mod_dav 2.4, confirmed live) answers 400, not 405, for this same conflict -
-    the trailing slash mkdir() always adds (§5.2) lands on an existing plain resource, and Apache's
+    """A real server (Apache's mod_dav 2.4, confirmed live) answers 400, not 405, for this same conflict.
+
+    The trailing slash mkdir() always adds (§5.2) lands on an existing plain resource, and Apache's
     own path resolution rejects that before it would even get to say "method not allowed".
+
     The 400 only counts as "exists" because the resource is there: see the tests below.
     """
-    with scripted_server(_mkcol_says_400(_PLAIN_RESOURCE_PROPFIND)) as (url, rec):
-        with pytest.raises(ResourceAlreadyExistsError):
-            FileSystem(retry=False).mkdir(f"{url}/plain.txt")
+    with (
+        scripted_server(_mkcol_says_400(_PLAIN_RESOURCE_PROPFIND)) as (url, rec),
+        pytest.raises(ResourceAlreadyExistsError),
+    ):
+        FileSystem(retry=False).mkdir(f"{url}/plain.txt")
     assert [(r.method, r.path) for r in rec.requests] == [
         ("MKCOL", "/plain.txt/"),
         ("PROPFIND", "/plain.txt"),
@@ -1052,20 +1119,28 @@ def test_mkcol_on_an_existing_plain_resource_is_still_recognized_when_the_server
 def test_a_400_from_mkcol_is_checked_against_the_resource_without_the_trailing_slash() -> (
     None
 ):
-    """The slash the caller gave is dropped for the existence check: Apache answers a PROPFIND
-    on ``plain.txt/`` with the same 400, which would prove nothing."""
-    with scripted_server(_mkcol_says_400(_PLAIN_RESOURCE_PROPFIND)) as (url, rec):
-        with pytest.raises(ResourceAlreadyExistsError):
-            FileSystem(retry=False).mkdir(f"{url}/plain.txt/")
+    """The slash the caller gave is dropped for the existence check.
+
+    Apache answers a PROPFIND on ``plain.txt/`` with the same 400, which would prove nothing.
+    """
+    with (
+        scripted_server(_mkcol_says_400(_PLAIN_RESOURCE_PROPFIND)) as (url, rec),
+        pytest.raises(ResourceAlreadyExistsError),
+    ):
+        FileSystem(retry=False).mkdir(f"{url}/plain.txt/")
     assert rec.requests[-1].path == "/plain.txt"
 
 
 def test_a_400_from_mkcol_is_not_taken_for_exists_when_nothing_is_there() -> None:
-    """Apache answers the same 400 for a path *below* a plain resource, which does not exist -
-    reporting "already exists" for it would be wrong, so the 400 stays what it is."""
-    with scripted_server(_mkcol_says_400((404, {}, b""))) as (url, _rec):
-        with pytest.raises(HTTPStatusError) as exc_info:
-            FileSystem(retry=False).mkdir(f"{url}/plain.txt/child")
+    """Apache answers the same 400 for a path *below* a plain resource.
+
+    Does not exist - reporting "already exists" for it would be wrong, so the 400 stays what it is.
+    """
+    with (
+        scripted_server(_mkcol_says_400((404, {}, b""))) as (url, _rec),
+        pytest.raises(HTTPStatusError) as exc_info,
+    ):
+        FileSystem(retry=False).mkdir(f"{url}/plain.txt/child")
     assert exc_info.value.status_code == 400
     assert not isinstance(exc_info.value, ResourceAlreadyExistsError)
 
@@ -1074,23 +1149,29 @@ def test_a_400_from_mkcol_is_not_taken_for_exists_when_nothing_is_there() -> Non
 def test_a_400_from_mkcol_stays_a_400_when_the_existence_check_fails_too(
     status: int,
 ) -> None:
-    """The check is only a way to explain the 400: if it cannot be answered (the server
-    refuses it as well), the 400 the caller asked about is what it gets - not the check's error.
+    """The check is only a way to explain the 400.
+
+    If it cannot be answered (the server refuses it as well), the 400 the caller asked about is what
+    it gets - not the check's error.
     """
-    with scripted_server(_mkcol_says_400((status, {}, b""))) as (url, _rec):
-        with pytest.raises(HTTPStatusError) as exc_info:
-            FileSystem(retry=False).mkdir(f"{url}/plain.txt")
+    with (
+        scripted_server(_mkcol_says_400((status, {}, b""))) as (url, _rec),
+        pytest.raises(HTTPStatusError) as exc_info,
+    ):
+        FileSystem(retry=False).mkdir(f"{url}/plain.txt")
     assert exc_info.value.status_code == 400
 
 
 def test_a_400_from_mkcol_with_a_body_is_not_assumed_to_mean_already_exists() -> None:
-    """The 400-means-exists leniency above is scoped to a bodyless MKCOL only -
-    a 400 while a body was sent is more likely a genuinely malformed one."""
-    with scripted_server(always((400, {}, b""))) as (url, _rec):
-        with pytest.raises(HTTPStatusError) as exc_info:
-            FileSystem(retry=False).mkdir(
-                f"{url}/special", set_props={"displayname": "x"}
-            )
+    """The 400-means-exists leniency above is scoped to a bodyless MKCOL only.
+
+    A 400 while a body was sent is more likely a genuinely malformed one.
+    """
+    with (
+        scripted_server(always((400, {}, b""))) as (url, _rec),
+        pytest.raises(HTTPStatusError) as exc_info,
+    ):
+        FileSystem(retry=False).mkdir(f"{url}/special", set_props={"displayname": "x"})
     assert not isinstance(exc_info.value, ResourceAlreadyExistsError)
 
 
@@ -1117,10 +1198,12 @@ def test_a_new_lock_inside_an_already_locked_collection_is_refused(
     supported way to get a second, independent token for it.
     """
     fs.mkdir("lockedparent")
-    with fs.locked("lockedparent", depth="infinity"):
-        with pytest.raises(ResourceLockedError):
-            with fs.locked("lockedparent/child.txt"):
-                pass
+    with (
+        fs.locked("lockedparent", depth="infinity"),
+        pytest.raises(ResourceLockedError),
+        fs.locked("lockedparent/child.txt"),
+    ):
+        pass
 
 
 def test_locking_an_unmapped_url_creates_an_empty_resource(fs: FileSystem) -> None:
@@ -1162,11 +1245,15 @@ def test_moving_a_member_out_of_a_locked_collection_without_the_token_fails(
 ) -> None:
     fs.mkdir("lockedsrc2")
     fs.upload_fileobj(io.BytesIO(b"x"), "lockedsrc2/child.txt")
-    other = FileSystem.from_session(Session(fs._session.base_url, auth=fs._session.auth))
+    other = FileSystem.from_session(
+        Session(fs._session.base_url, auth=fs._session.auth)
+    )
     try:
-        with fs.locked("lockedsrc2", depth="0"):
-            with pytest.raises(ResourceLockedError):
-                other.move("lockedsrc2/child.txt", "elsewhere.txt")
+        with (
+            fs.locked("lockedsrc2", depth="0"),
+            pytest.raises(ResourceLockedError),
+        ):
+            other.move("lockedsrc2/child.txt", "elsewhere.txt")
     finally:
         other._session.close()
 
@@ -1191,16 +1278,20 @@ def test_move_never_sends_a_depth_header() -> None:
 
 
 def test_copy_without_an_explicit_depth_sends_no_depth_header() -> None:
-    """§9.8.3: without a Depth header, a server MUST act as if infinity - the default here is to omit it."""
+    """§9.8.3: without a Depth header, a server MUST act as if infinity.
+
+    The default here is to omit it.
+    """
     with scripted_server(always((201, {}, b""))) as (url, rec):
         Session(retry=False).copy(f"{url}/a", destination=f"{url}/b").raise_for_status()
     assert "depth" not in rec.requests[0].headers
 
 
 def test_depth_header_refuses_move_with_an_explicit_depth() -> None:
-    """MOVE takes a Depth header (§9.9.2 is why Session.move() never offers to set one) - but the value is still 0/infinity only."""
-    from webdav.methods import Method
+    """MOVE takes a Depth header (§9.9.2 is why Session.move() never offers to set one).
 
+    But the value is still 0/infinity only.
+    """
     with pytest.raises(ValueError, match="Depth"):
         depth_header("1", Method.MOVE)
 
@@ -1212,14 +1303,16 @@ def test_a_207_from_copy_raises_multistatuserror() -> None:
         b"<d:href>/dir/locked.txt</d:href><d:status>HTTP/1.1 423 Locked</d:status>"
         b"</d:response></d:multistatus>"
     )
-    with scripted_server(always((207, {"Content-Type": "application/xml"}, body))) as (
-        url,
-        _rec,
+    with (
+        scripted_server(always((207, {"Content-Type": "application/xml"}, body))) as (
+            url,
+            _rec,
+        ),
+        pytest.raises(MultiStatusError),
     ):
-        with pytest.raises(MultiStatusError):
-            Session(retry=False).copy(
-                f"{url}/dir/", destination=f"{url}/dir2/"
-            ).raise_for_status()
+        Session(retry=False).copy(
+            f"{url}/dir/", destination=f"{url}/dir2/"
+        ).raise_for_status()
 
 
 def test_a_207_from_move_raises_multistatuserror() -> None:
@@ -1228,44 +1321,56 @@ def test_a_207_from_move_raises_multistatuserror() -> None:
         b"<d:href>/dir/locked.txt</d:href><d:status>HTTP/1.1 423 Locked</d:status>"
         b"</d:response></d:multistatus>"
     )
-    with scripted_server(always((207, {"Content-Type": "application/xml"}, body))) as (
-        url,
-        _rec,
+    with (
+        scripted_server(always((207, {"Content-Type": "application/xml"}, body))) as (
+            url,
+            _rec,
+        ),
+        pytest.raises(MultiStatusError),
     ):
-        with pytest.raises(MultiStatusError):
-            Session(retry=False).move(
-                f"{url}/dir/", destination=f"{url}/dir2/"
-            ).raise_for_status()
+        Session(retry=False).move(
+            f"{url}/dir/", destination=f"{url}/dir2/"
+        ).raise_for_status()
 
 
 def test_a_multistatus_body_under_a_non_207_status_still_raises_multistatuserror() -> (
     None
 ):
-    """A real server (Apache's mod_dav, confirmed live) answers 424 Failed Dependency, not 207,
-    for a DELETE blocked by one locked member - but still with a full multistatus body naming it.
-    That detail must not be lost behind a generic FailedDependencyError."""
+    """A real server (Apache's mod_dav, confirmed live) answers 424 Failed Dependency, not 207, for a DELETE blocked by one locked member - but still with a full multistatus body naming it.
+
+    That detail must not be lost behind a generic FailedDependencyError.
+    """
     body = (
         b'<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response>'
         b"<d:href>/dir/locked.txt</d:href><d:status>HTTP/1.1 423 Locked</d:status>"
         b"</d:response></d:multistatus>"
     )
-    with scripted_server(always((424, {"Content-Type": "application/xml"}, body))) as (
-        url,
-        _rec,
+    with (
+        scripted_server(always((424, {"Content-Type": "application/xml"}, body))) as (
+            url,
+            _rec,
+        ),
+        pytest.raises(MultiStatusError) as exc_info,
     ):
-        with pytest.raises(MultiStatusError) as exc_info:
-            Session(retry=False).delete(f"{url}/dir/").raise_for_status()
+        Session(retry=False).delete(f"{url}/dir/").raise_for_status()
     assert list(exc_info.value.statuses) == ["/dir/locked.txt"]
 
 
 def test_a_non_multistatus_body_under_an_error_status_is_unaffected() -> None:
-    """The new detection must never misfire on an ordinary error body - the common case stays exactly as before."""
-    with scripted_server(always((424, {}, b""))) as (url, _rec):
-        with pytest.raises(STATUS_CODE_EXCEPTIONS[424]):
-            Session(retry=False).delete(f"{url}/dir/").raise_for_status()
-    with scripted_server(always((423, {}, b"<html>Locked</html>"))) as (url, _rec):
-        with pytest.raises(ResourceLockedError):
-            Session(retry=False).delete(f"{url}/dir/").raise_for_status()
+    """The new detection must never misfire on an ordinary error body.
+
+    The common case stays exactly as before.
+    """
+    with (
+        scripted_server(always((424, {}, b""))) as (url, _rec),
+        pytest.raises(STATUS_CODE_EXCEPTIONS[424]),
+    ):
+        Session(retry=False).delete(f"{url}/dir/").raise_for_status()
+    with (
+        scripted_server(always((423, {}, b"<html>Locked</html>"))) as (url, _rec),
+        pytest.raises(ResourceLockedError),
+    ):
+        Session(retry=False).delete(f"{url}/dir/").raise_for_status()
 
 
 def test_a_multistatus_body_reporting_no_failure_falls_back_to_the_status_based_error() -> (
@@ -1273,16 +1378,23 @@ def test_a_multistatus_body_reporting_no_failure_falls_back_to_the_status_based_
 ):
     """An (unlikely, but possible) multistatus body with no actual failing entry must not swallow the error status."""
     body = '<d:multistatus xmlns:d="DAV:"/>'
-    with scripted_server(always((424, {"Content-Type": "application/xml"}, body.encode()))) as (
-        url,
-        _rec,
+    with (
+        scripted_server(
+            always((424, {"Content-Type": "application/xml"}, body.encode()))
+        ) as (
+            url,
+            _rec,
+        ),
+        pytest.raises(STATUS_CODE_EXCEPTIONS[424]),
     ):
-        with pytest.raises(STATUS_CODE_EXCEPTIONS[424]):
-            Session(retry=False).delete(f"{url}/dir/").raise_for_status()
+        Session(retry=False).delete(f"{url}/dir/").raise_for_status()
 
 
 def test_open_on_a_collection_is_refused_not_misinterpreted(fs: FileSystem) -> None:
-    """§9.4: GET on a collection is server-defined - this library's own policy choice must be explicit, not silent."""
+    """§9.4: GET on a collection is server-defined.
+
+    This library's own policy choice must be explicit, not silent.
+    """
     fs.mkdir("adir")
     with pytest.raises(IsACollectionError), fs.open("adir", "rb"):
         pass
@@ -1295,7 +1407,10 @@ def test_ls_on_a_plain_resource_is_refused_not_misinterpreted(fs: FileSystem) ->
 
 
 def test_get_and_head_on_a_collection_do_not_raise(fs: FileSystem) -> None:
-    """§9.4: the semantics of GET/HEAD on a collection are server-defined - Session itself must not editorialize."""
+    """§9.4: the semantics of GET/HEAD on a collection are server-defined.
+
+    Session itself must not editorialize.
+    """
     fs.mkdir("plaincoll")
     session = fs._session
     get_response = session.get("plaincoll/")
@@ -1328,7 +1443,7 @@ def test_move_onto_an_existing_destination_is_resourcealreadyexists(
 # ---------------------------------------------------------------------------
 
 
-def _unlock_server(parent_needed: bool, *, repeat_status: int = 204):
+def _unlock_server(parent_needed: bool, *, repeat_status: int = 204) -> Any:
     def respond(seen: Seen) -> Reply:
         if seen.method != "UNLOCK":
             return 200, {}, b""
@@ -1340,7 +1455,10 @@ def _unlock_server(parent_needed: bool, *, repeat_status: int = 204):
 
 
 def test_an_unlock_refused_for_want_of_a_parent_lock_is_repeated() -> None:
-    """Appendix D: a lock-null resource goes when its lock does, which removes a member of the locked parent."""
+    """Appendix D: a lock-null resource goes when its lock does.
+
+    Removes a member of the locked parent.
+    """
     server = _unlock_server(parent_needed=True)
     with server as (url, rec):
         session = Session()

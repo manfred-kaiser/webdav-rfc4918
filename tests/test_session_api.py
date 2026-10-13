@@ -217,9 +217,11 @@ def test_a_mixed_207_names_only_the_member_that_actually_failed() -> None:
     def respond(_r: Seen) -> tuple[int, dict[str, str], bytes]:
         return 207, {"Content-Type": "application/xml"}, body
 
-    with scripted_server(respond) as (url, _rec):
-        with pytest.raises(MultiStatusError) as exc_info:
-            Session().delete(f"{url}/dir/").raise_for_status()
+    with (
+        scripted_server(respond) as (url, _rec),
+        pytest.raises(MultiStatusError) as exc_info,
+    ):
+        Session().delete(f"{url}/dir/").raise_for_status()
     assert list(exc_info.value.statuses) == ["/dir/locked.txt"]
 
 
@@ -494,7 +496,7 @@ def test_a_session_survives_pickling_and_copying() -> None:
     session.locks.add("https://dav.example/root/f", "opaquelocktoken:t", "0")
 
     for clone in (
-        pickle.loads(pickle.dumps(session)),  # noqa: S301
+        pickle.loads(pickle.dumps(session)),
         copy.copy(session),
     ):
         assert clone.base_url == "https://dav.example/root"
@@ -511,7 +513,7 @@ def test_a_session_survives_pickling_and_copying() -> None:
 
 
 def test_a_pickled_session_still_works(server_url: str) -> None:
-    clone = pickle.loads(pickle.dumps(Session(server_url, auth=AUTH)))  # noqa: S301
+    clone = pickle.loads(pickle.dumps(Session(server_url, auth=AUTH)))
     assert clone.put("/a.txt", b"x").status_code == 201
     assert FileSystem.from_session(clone).ls("/") == ["a.txt"]
 
@@ -559,7 +561,9 @@ def test_walk_members_are_what_ls_returns(server_url: str) -> None:
         assert [r.as_dict() for r in walked] == [
             r.as_dict() for r in sorted(listed, key=str)
         ]
+        # pylint: disable-next=not-an-iterable
         assert [str(d) for d in dirs] == ["a/b"]
+        # pylint: disable-next=not-an-iterable
         assert [str(f) for f in files] == ["a/one.txt"]
 
 
@@ -676,6 +680,7 @@ def test_response_errors_carry_the_path() -> None:
 
 def test_propfind_makes_you_say_which_depth() -> None:
     with pytest.raises(TypeError, match="depth"):
+        # pylint: disable-next=missing-kwoa
         Session().propfind("http://unused.invalid/")  # type: ignore[call-arg]
 
 
@@ -730,24 +735,31 @@ def test_secondary_parameters_must_be_named() -> None:
     """A bare ``True``/``False`` (or a number) in a call says nothing: name it."""
     fs = FileSystem("http://unused.invalid")
     with pytest.raises(TypeError):
+        # pylint: disable-next=too-many-function-args
         fs.ls("/", False)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
+        # pylint: disable-next=too-many-function-args
         fs.upload_file("a", "b", True)  # type: ignore[misc]
     with pytest.raises(TypeError):
+        # pylint: disable-next=too-many-function-args
         fs.upload_fileobj(None, "b", True)  # type: ignore[arg-type,misc]
     with pytest.raises(TypeError):
+        # pylint: disable-next=too-many-function-args
         fs.locked("/a", "shared")  # type: ignore[misc]
     with pytest.raises(TypeError):
+        # pylint: disable-next=too-many-function-args
         fs.refresh_lock("/a", "tok", 30)  # type: ignore[misc]
     with pytest.raises(TypeError):
+        # pylint: disable-next=too-many-function-args
         list(fs.walk("/", 1))  # type: ignore[misc]
     with pytest.raises(TypeError):
+        # pylint: disable-next=too-many-function-args
         fs.get_props("/a", None, True)  # type: ignore[misc]
 
 
 def test_disabling_certificate_verification_in_the_constructor_warns_loudly() -> None:
     with pytest.warns(exceptions.TLSHardeningDisabledWarning, match="verify=False"):
-        assert Session(verify=False).verify is False  # type: ignore[arg-type]
+        assert Session(verify=False).verify is False
     assert Session(verify=True).verify is True
     assert Session(verify="/etc/ssl/ca.pem").verify == "/etc/ssl/ca.pem"
 

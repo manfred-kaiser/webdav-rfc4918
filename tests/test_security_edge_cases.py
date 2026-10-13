@@ -72,6 +72,8 @@ def test_string_bodied_write_does_not_leak_across_hosts_on_redirect() -> None:
     attacker_hits: list[bytes] = []
 
     class Attacker(http.server.BaseHTTPRequestHandler):
+        """Records the bodies it is sent."""
+
         def log_message(self, *_a: object) -> None:
             pass
 
@@ -85,12 +87,15 @@ def test_string_bodied_write_does_not_leak_across_hosts_on_redirect() -> None:
     with _raw_http_server(Attacker) as attacker_url:
 
         class Victim(http.server.BaseHTTPRequestHandler):
+            """Redirects every ``PROPPATCH`` to the attacker."""
+
             def log_message(self, *_a: object) -> None:
                 pass
 
             def do_PROPPATCH(self) -> None:
                 length = int(self.headers.get("Content-Length", 0) or 0)
-                self.rfile.read(length) if length else b""
+                if length:
+                    self.rfile.read(length)
                 self.send_response(307)
                 self.send_header("Location", f"{attacker_url}/exfil")
                 self.send_header("Content-Length", "0")
@@ -139,6 +144,8 @@ def test_xxe_http_entity_causes_no_outbound_request() -> None:
     hits: list[str] = []
 
     class Canary(http.server.BaseHTTPRequestHandler):
+        """Records every path it is asked for."""
+
         def log_message(self, *_a: object) -> None:
             pass
 
@@ -278,12 +285,15 @@ def test_spoofed_lockroot_does_not_redirect_lock_bookkeeping() -> None:
     )
 
     class Handler(http.server.BaseHTTPRequestHandler):
+        """Answers a ``LOCK`` with a lock discovery that names another resource."""
+
         def log_message(self, *_a: object) -> None:
             pass
 
         def do_LOCK(self) -> None:
             length = int(self.headers.get("Content-Length", 0) or 0)
-            self.rfile.read(length) if length else b""
+            if length:
+                self.rfile.read(length)
             self.send_response(200)
             self.send_header("Content-Type", "application/xml")
             self.send_header("Lock-Token", "<opaquelocktoken:spoofed>")
@@ -335,12 +345,15 @@ def test_missing_trailing_slash_same_origin_redirect_is_followed() -> None:
     """
 
     class Handler(http.server.BaseHTTPRequestHandler):
+        """Answers a ``PROPFIND`` as the test describes."""
+
         def log_message(self, *_a: object) -> None:
             pass
 
         def do_PROPFIND(self) -> None:
             length = int(self.headers.get("Content-Length", 0) or 0)
-            self.rfile.read(length) if length else b""
+            if length:
+                self.rfile.read(length)
             if not self.path.endswith("/"):
                 self.send_response(301)
                 self.send_header("Location", self.path + "/")
@@ -375,12 +388,15 @@ def test_cross_origin_redirect_is_refused_even_with_a_plausible_pretext() -> Non
     """
 
     class Handler(http.server.BaseHTTPRequestHandler):
+        """Answers a ``PROPFIND`` as the test describes."""
+
         def log_message(self, *_a: object) -> None:
             pass
 
         def do_PROPFIND(self) -> None:
             length = int(self.headers.get("Content-Length", 0) or 0)
-            self.rfile.read(length) if length else b""
+            if length:
+                self.rfile.read(length)
             self.send_response(301)
             self.send_header("Location", "http://attacker.invalid/pwned")
             self.send_header("Content-Length", "0")
@@ -408,6 +424,8 @@ def test_trusted_cross_origin_redirect_does_not_forward_credentials() -> None:
     received: dict[str, object] = {}
 
     class Storage(http.server.BaseHTTPRequestHandler):
+        """Takes the body of a ``PROPPATCH`` and answers 207."""
+
         def log_message(self, *_a: object) -> None:
             pass
 
@@ -427,12 +445,15 @@ def test_trusted_cross_origin_redirect_does_not_forward_credentials() -> None:
     with _raw_http_server(Storage) as storage_url:
 
         class Gateway(http.server.BaseHTTPRequestHandler):
+            """Redirects a ``PROPPATCH`` to the storage server."""
+
             def log_message(self, *_a: object) -> None:
                 pass
 
             def do_PROPPATCH(self) -> None:
                 length = int(self.headers.get("Content-Length", 0) or 0)
-                self.rfile.read(length) if length else b""
+                if length:
+                    self.rfile.read(length)
                 self.send_response(307)
                 self.send_header("Location", f"{storage_url}/upload-target")
                 self.send_header("Content-Length", "0")

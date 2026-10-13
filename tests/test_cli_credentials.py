@@ -11,12 +11,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests.scripted_server import Recorder, Reply, always, scripted_server
 from webdav import cli
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-from .scripted_server import Recorder, Reply, always, scripted_server
 
 _CREATED: Reply = (201, {}, b"")
 

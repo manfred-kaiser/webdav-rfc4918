@@ -1,11 +1,8 @@
 """The checks a request passes before it leaves: what URL, where to, with which headers."""
 
-# ruff: noqa: SIM117, PLC0415, S301, PT031, EM101, S105, S108, PTH208, RUF001
-
 import contextlib
 import copy
 import io
-import os
 import warnings
 from pathlib import Path
 from typing import Any
@@ -92,7 +89,7 @@ def test_a_text_body_is_sent_as_utf8_whatever_the_method() -> None:
 
 def test_a_single_string_is_one_forwarded_header_name() -> None:
     session = Session()
-    session.redirect_forward_headers = "X-Amz-Meta-Owner"  # type: ignore[assignment]
+    session.redirect_forward_headers = "X-Amz-Meta-Owner"
     assert session.redirect_forward_headers == frozenset({"x-amz-meta-owner"})
 
 
@@ -105,29 +102,31 @@ def test_a_header_that_is_never_forwarded_stays_home_even_when_whitelisted() -> 
         "lock-token",
         "destination",
     }
-    with scripted_server(always(OK)) as (storage_url, storage):
-        with scripted_server(lambda _r: redirect(307, f"{storage_url}/t")) as (
+    with (
+        scripted_server(always(OK)) as (storage_url, storage),
+        scripted_server(lambda _r: redirect(307, f"{storage_url}/t")) as (
             gateway_url,
             _g,
-        ):
-            session = Session(
-                redirect_policy=RedirectPolicy.ALL,
-                auth=("user", "secret"),
-                retry=False,
-            )
-            session.redirect_forward_headers = frozenset(never)
-            session.put(
-                f"{gateway_url}/f",
-                data=b"x",
-                headers={
-                    "Authorization": "B",
-                    "Proxy-Authorization": "P",
-                    "Cookie": "c=1",
-                    "If": "(<opaquelocktoken:x>)",
-                    "Lock-Token": "<opaquelocktoken:x>",
-                    "Destination": "http://elsewhere.example/y",
-                },
-            )
+        ),
+    ):
+        session = Session(
+            redirect_policy=RedirectPolicy.ALL,
+            auth=("user", "secret"),
+            retry=False,
+        )
+        session.redirect_forward_headers = frozenset(never)
+        session.put(
+            f"{gateway_url}/f",
+            data=b"x",
+            headers={
+                "Authorization": "B",
+                "Proxy-Authorization": "P",
+                "Cookie": "c=1",
+                "If": "(<opaquelocktoken:x>)",
+                "Lock-Token": "<opaquelocktoken:x>",
+                "Destination": "http://elsewhere.example/y",
+            },
+        )
     (seen,) = storage.requests
     assert never.isdisjoint(seen.headers)
 
@@ -158,20 +157,29 @@ def test_a_relative_destination_needs_a_base_url() -> None:
 
 
 def test_a_cross_origin_destination_is_refused() -> None:
-    """RFC 6454: two origins are the same iff scheme, host and port all match - a COPY/MOVE across them is refused."""
+    """RFC 6454: two origins are the same iff scheme, host and port all match.
+
+    A COPY/MOVE across them is refused.
+    """
     with pytest.raises(ClientError, match="not on this session's base_url"):
         Session("http://dav.example", retry=False).move("/a", "http://evil.example/b")
 
 
 def test_an_explicit_default_http_port_is_the_same_origin_as_none() -> None:
-    """RFC 6454 §4 step 6: fill in the scheme's default port before comparing - http's is 80, not just https' 443."""
+    """RFC 6454 §4 step 6: fill in the scheme's default port before comparing.
+
+    Http's is 80, not just https' 443.
+    """
     assert effective_origin("http://dav.example:80/x") == effective_origin(
         "http://dav.example/x"
     )
 
 
 def test_a_scheme_relative_destination_is_refused() -> None:
-    """A "//host/path" Destination resolves relative to the request's own scheme - the same confusion RFC 6454 origin comparison exists to close."""
+    """A "//host/path" Destination resolves relative to the request's own scheme.
+
+    The same confusion RFC 6454 origin comparison exists to close.
+    """
     with pytest.raises(ClientError, match="scheme-relative"):
         Session("http://dav.example", retry=False).move("/a", "//dav.example/b")
 
@@ -195,13 +203,15 @@ def _is_this_file(warning: warnings.WarningMessage) -> bool:
 
 
 def test_the_warnings_of_a_disabled_certificate_check_point_at_the_caller() -> None:
-    with scripted_server(always(OK)) as (url, _rec):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            session = Session(verify=False, retry=False)
-            session.get(f"{url}/a")
-            session.put(f"{url}/b", data=b"x")
-            FileSystem.from_session(session).remove(f"{url}/c")
+    with (
+        scripted_server(always(OK)) as (url, _rec),
+        warnings.catch_warnings(record=True) as caught,
+    ):
+        warnings.simplefilter("always")
+        session = Session(verify=False, retry=False)
+        session.get(f"{url}/a")
+        session.put(f"{url}/b", data=b"x")
+        FileSystem.from_session(session).remove(f"{url}/c")
     ours = [w for w in caught if issubclass(w.category, TLSHardeningDisabledWarning)]
     assert len(ours) >= 4  # one for the session, and every request repeats it
     assert all(_is_this_file(w) for w in ours)
@@ -290,23 +300,23 @@ def test_an_unknown_keyword_argument_is_refused_and_nothing_is_sent(
 
 
 def test_a_name_that_resembles_nothing_is_refused_without_a_suggestion() -> None:
-    with pytest.raises(TypeError, match="unexpected keyword argument 'zzz'$"):
+    with pytest.raises(TypeError, match=r"unexpected keyword argument 'zzz'$"):
         Session("http://dav.example").get("/x", zzz=1)
 
 
 def test_allow_redirects_false_means_never_and_true_or_absent_means_the_policy() -> (
     None
 ):
-    with scripted_server(always(OK)) as (b_url, b_rec):
-        with scripted_server(lambda _r: redirect(307, f"{b_url}/x")) as (a_url, _a):
-            session = Session(retry=False, redirect_policy=RedirectPolicy.ALL)
-            assert session.get(f"{a_url}/x", allow_redirects=False).status_code == 307
-            assert b_rec.requests == []
-            for given in (True, None):
-                assert (
-                    session.get(f"{a_url}/x", allow_redirects=given).status_code == 204
-                )
-            assert len(b_rec.requests) == 2
+    with (
+        scripted_server(always(OK)) as (b_url, b_rec),
+        scripted_server(lambda _r: redirect(307, f"{b_url}/x")) as (a_url, _a),
+    ):
+        session = Session(retry=False, redirect_policy=RedirectPolicy.ALL)
+        assert session.get(f"{a_url}/x", allow_redirects=False).status_code == 307
+        assert b_rec.requests == []
+        for given in (True, None):
+            assert session.get(f"{a_url}/x", allow_redirects=given).status_code == 204
+        assert len(b_rec.requests) == 2
 
 
 @pytest.mark.parametrize("value", [0, 1, "", "no", "False", [], object()])
@@ -315,9 +325,11 @@ def test_a_flag_that_is_not_a_bool_is_refused_and_nothing_is_sent(
     option: str, value: object
 ) -> None:
     options: dict[str, Any] = {option: value}
-    with scripted_server(always(OK)) as (url, rec):
-        with pytest.raises(TypeError, match=f"{option} must be True or False"):
-            Session(retry=False).get(f"{url}/x", **options)
+    with (
+        scripted_server(always(OK)) as (url, rec),
+        pytest.raises(TypeError, match=f"{option} must be True or False"),
+    ):
+        Session(retry=False).get(f"{url}/x", **options)
     assert rec.requests == []
 
 
@@ -366,7 +378,7 @@ def test_propfind_sends_the_kind_of_request_that_was_asked_for(
     ],
 )
 def test_propfind_refuses_to_mix_request_kinds(options: "dict[str, Any]") -> None:
-    with pytest.raises(ValueError, match="only one|either data"):
+    with pytest.raises(ValueError, match=r"only one|either data"):
         Session("http://dav.example").propfind("/x", depth=0, **options)
 
 
@@ -376,12 +388,12 @@ def test_propfind_refuses_to_mix_request_kinds(options: "dict[str, Any]") -> Non
 def test_move_and_copy_destinations_are_encoded_like_paths(
     server_url: str, storage_dir: Path, name: str
 ) -> None:
-    """(Names with ``?``/``;`` are left out only because wsgidav re-splits a decoded Destination.)"""
+    """Names with ``?`` or ``;`` are left out only because wsgidav re-splits a decoded Destination."""
     with Session(server_url, auth=AUTH, retry=False) as session:
         session.put(name, b"data")
         assert session.copy(name, destination="copy-" + name).status_code == 201
         assert session.move(name, destination="moved-" + name).status_code == 201
-        assert sorted(os.listdir(storage_dir)) == sorted(
+        assert sorted(p.name for p in storage_dir.iterdir()) == sorted(
             ["copy-" + name, "moved-" + name]
         )
 
@@ -397,7 +409,7 @@ def test_move_and_copy_destinations_are_encoded_like_paths(
         "/dir/100%25.txt",
     ],
 )
-def test_BUG03_full_url_is_sent_as_written_without_base_url(given: str) -> None:
+def test_bug03_full_url_is_sent_as_written_without_base_url(given: str) -> None:
     with record_server() as (url, rec):
         FileSystem(retry=False).remove(url + given)
     # ``requests`` itself spells the hex digits of an escape in capitals: the same bytes
@@ -405,19 +417,19 @@ def test_BUG03_full_url_is_sent_as_written_without_base_url(given: str) -> None:
 
 
 @pytest.mark.parametrize("given", ["/dir/a%2Fb.txt", "/dir/caf%E9.txt"])
-def test_BUG03_guard_full_url_with_base_url_is_sent_as_written(given: str) -> None:
+def test_bug03_guard_full_url_with_base_url_is_sent_as_written(given: str) -> None:
     with record_server() as (url, rec):
         FileSystem(url, retry=False).remove(url + given)
     assert rec.requests[0].path == given
 
 
-def test_BUG03_guard_unencoded_space_and_unicode_are_encoded() -> None:
+def test_bug03_guard_unencoded_space_and_unicode_are_encoded() -> None:
     with record_server() as (url, rec):
         FileSystem(retry=False).remove(url + "/a b/café.txt")
     assert rec.requests[0].path == "/a%20b/caf%C3%A9.txt"
 
 
-def test_BUG03_guard_mkdir_adds_the_slash_to_the_raw_path() -> None:
+def test_bug03_guard_mkdir_adds_the_slash_to_the_raw_path() -> None:
     with scripted_server(always((201, {}, b""))) as (url, rec):
         FileSystem(retry=False).mkdir(url + "/d%2Fx")
     assert rec.requests[0].path == "/d%2Fx/"
@@ -524,7 +536,6 @@ _MS = '<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">{}</d:multistatus>'
 
 
 def test_a_weak_etag_is_not_a_validator_for_resuming_a_download() -> None:
-
     calls = {"n": 0}
 
     def respond(seen: Seen) -> tuple[int, dict[str, str], bytes]:
@@ -556,25 +567,25 @@ def test_a_weak_etag_is_not_a_validator_for_resuming_a_download() -> None:
         )
 
     out = io.BytesIO()
-    with scripted_server(respond) as (url, _rec):
-        with pytest.raises((WebDAVError, requests.RequestException)):
-            FileSystem(retry=False).download_fileobj(f"{url}/f", out)
+    with (
+        scripted_server(respond) as (url, _rec),
+        pytest.raises((WebDAVError, requests.RequestException)),
+    ):
+        FileSystem(retry=False).download_fileobj(f"{url}/f", out)
 
 
 def test_send_refuses_another_origin_than_the_base_url() -> None:
-    with scripted_server(always(OK)) as (other, other_rec):
-        with scripted_server(always(OK)) as (url, rec):
-            session = Session(
-                url, auth=("u", "p"), headers={"X-Api-Key": "K"}, retry=False
-            )
-            prepared = session.prepare_request(requests.Request("GET", f"{other}/x"))
-            assert prepared.headers[
-                "Authorization"
-            ]  # prepare_request prepares as asked
-            with pytest.raises(ClientError, match="base_url"):
-                session.send(prepared)
-            ok = session.prepare_request(requests.Request("GET", f"{url}/y"))
-            assert session.send(ok).status_code == 204
+    with (
+        scripted_server(always(OK)) as (other, other_rec),
+        scripted_server(always(OK)) as (url, rec),
+    ):
+        session = Session(url, auth=("u", "p"), headers={"X-Api-Key": "K"}, retry=False)
+        prepared = session.prepare_request(requests.Request("GET", f"{other}/x"))
+        assert prepared.headers["Authorization"]  # prepare_request prepares as asked
+        with pytest.raises(ClientError, match="base_url"):
+            session.send(prepared)
+        ok = session.prepare_request(requests.Request("GET", f"{url}/y"))
+        assert session.send(ok).status_code == 204
     assert other_rec.requests == []
     assert len(rec.requests) == 1
 

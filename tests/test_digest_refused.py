@@ -24,10 +24,12 @@ def test_the_attribute_refuses_digest() -> None:
 
 
 def test_a_call_refuses_digest_and_sends_nothing() -> None:
-    with scripted_server(always((200, {}, b""))) as (url, recorder):
-        with Session(retry=False) as session:
-            with pytest.raises(ClientError, match="not supported"):
-                session.get(f"{url}/x", auth=DIGEST)
+    with (
+        scripted_server(always((200, {}, b""))) as (url, recorder),
+        Session(retry=False) as session,
+        pytest.raises(ClientError, match="not supported"),
+    ):
+        session.get(f"{url}/x", auth=DIGEST)
     assert recorder.requests == []
 
 

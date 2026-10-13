@@ -1,7 +1,5 @@
 """Secrets and control characters never reach a message, a log line or a traceback."""
 
-# ruff: noqa: SIM117, PLC0415, S105, S108, S301, PT031, EM101
-
 import logging
 import traceback
 
@@ -150,12 +148,14 @@ def test_cred05_a_prepared_request_can_be_sent_again_after_the_failure() -> None
         seen.append(request.headers.get("authorization", ""))
         return 500, {}, b""
 
-    with scripted_server(respond) as (url, _rec):
-        with Session(auth=("user", "pw"), retry=False) as session:
-            prepared = session.prepare_request(requests.Request("GET", f"{url}/x"))
-            with pytest.raises(HTTPStatusError):
-                session.send(prepared).raise_for_status()
-            session.send(prepared)
+    with (
+        scripted_server(respond) as (url, _rec),
+        Session(auth=("user", "pw"), retry=False) as session,
+    ):
+        prepared = session.prepare_request(requests.Request("GET", f"{url}/x"))
+        with pytest.raises(HTTPStatusError):
+            session.send(prepared).raise_for_status()
+        session.send(prepared)
     assert seen[0] == seen[1] != "[redacted]"
     assert seen[1].startswith("Basic ")
 
@@ -167,7 +167,7 @@ def test_cred05_the_history_is_redacted_too() -> None:
     final = make_response(500, request_headers={"Authorization": "Basic c2VjcmV0"})
     final.history = [hop]
     original_hop_request = hop.request
-    HTTPStatusError(final)
+    _ = HTTPStatusError(final)
     assert hop.request.headers["Authorization"] == "[redacted]"
     assert hop.request.headers["Cookie"] == "[redacted]"
     assert original_hop_request.headers["Authorization"] == "Basic c2VjcmV0"
@@ -176,12 +176,12 @@ def test_cred05_the_history_is_redacted_too() -> None:
 def test_cred05_a_request_without_secrets_is_left_alone() -> None:
     response = make_response(500, request_headers={"Accept": "*/*"})
     request = response.request
-    HTTPStatusError(response)
+    _ = HTTPStatusError(response)
     assert response.request is request
 
 
 def test_cred05_redacting_twice_is_stable() -> None:
     response = make_response(500, request_headers={"Authorization": "Basic c2VjcmV0"})
-    HTTPStatusError(response)
-    HTTPStatusError(response)
+    _ = HTTPStatusError(response)
+    _ = HTTPStatusError(response)
     assert response.request.headers["Authorization"] == "[redacted]"

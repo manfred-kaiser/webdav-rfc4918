@@ -1,19 +1,16 @@
 """What the ``dav`` command prints and how it treats its input."""
 
-# ruff: noqa: SIM117, PLC0415
-
 import os
 
 import pytest
 
-from webdav import Session
+from webdav import Session, cli
+from webdav.cli import _split_url
 
 
 def test_a_closed_pipe_ends_the_cli_quietly(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from webdav import cli
-
     def broken(_args: object) -> None:
         raise BrokenPipeError
 
@@ -24,8 +21,6 @@ def test_a_closed_pipe_ends_the_cli_quietly(
 
 
 def test_cli_urls_are_percent_decoded_and_ipv6_hosts_keep_their_brackets() -> None:
-    from webdav.cli import _split_url
-
     assert (
         _split_url("webdav://h.example/Photos/a%20b.txt", user=None, password=None)[1]
         == "/Photos/a b.txt"
@@ -43,8 +38,6 @@ def test_cli_urls_are_percent_decoded_and_ipv6_hosts_keep_their_brackets() -> No
 def test_cli_error_output_is_escaped(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from webdav import cli
-
     def hostile(_args: object) -> None:
         msg = "received 500 (\x1b]0;PWNED\x07\x1b[2J)\nforged: line"
         raise cli.CLIError(msg)

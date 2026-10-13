@@ -1,3 +1,4 @@
+# pylint: disable=too-many-lines  # one file per server or per topic: the length is the number of checks
 """Compliance check against a real Apache + mod_dav server - an ordinary, reproducible pytest suite.
 
 Runs as its own GitHub Actions workflow (.github/workflows/apache-compliance.yml,
@@ -62,8 +63,11 @@ from webdav.exceptions import (
     ResourceConflictError,
     UnsupportedMediaTypeError,
 )
+from webdav.fsspec import WebdavFileSystem
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from webdav import Session
 
 _ENV_URL = os.environ.get("WEBDAV_TEST_APACHE_URL")
@@ -166,11 +170,13 @@ def test_apache_overwrite_protection(apache_client: FileSystem) -> None:
 def test_apache_lock_and_write_with_held_token(apache_client: FileSystem) -> None:
     apache_client.upload_fileobj(io.BytesIO(b"v1"), "compliance/locked.txt")
 
-    with _requests_seen() as seen:
-        with apache_client.locked("compliance/locked.txt", scope=EXCLUSIVE) as held:
-            apache_client.upload_fileobj(
-                io.BytesIO(b"v2"), "compliance/locked.txt", overwrite=True
-            )
+    with (
+        _requests_seen() as seen,
+        apache_client.locked("compliance/locked.txt", scope=EXCLUSIVE) as held,
+    ):
+        apache_client.upload_fileobj(
+            io.BytesIO(b"v2"), "compliance/locked.txt", overwrite=True
+        )
     # one LOCK, the write with the token of that lock, one UNLOCK - nothing else
     assert [(call.method, call.status) for call in seen] == [
         ("LOCK", 200),
@@ -345,7 +351,7 @@ def test_apache_allprop_with_include(apache_client: FileSystem) -> None:
 
 
 def test_apache_structured_lock_owner_round_trips(apache_client: FileSystem) -> None:
-    """owner's content model is ANY (RFC_COMPLIANCE.md finding 13) - a structured <D:href> owner."""
+    """``owner``'s content model is ANY (RFC_COMPLIANCE.md finding 13) - a structured <D:href> owner."""
     apache_client.upload_fileobj(io.BytesIO(b"x"), "compliance/owner.txt")
     owner_el = Element("{DAV:}href")
     owner_el.text = "mailto:test@example.org"
@@ -406,7 +412,10 @@ def test_apache_extended_mkcol_is_refused_with_415(apache_client: FileSystem) ->
 def test_apache_423_response_is_never_crashed_on_even_without_a_structured_error_body(
     apache_client: FileSystem,
 ) -> None:
-    """Apache's 423 is a plain HTML page, not an RFC 4918 §16 <d:error> body - error_codes must degrade to empty, not raise."""
+    """Apache's 423 is a plain HTML page, not an RFC 4918 §16 <d:error> body.
+
+    Error_codes must degrade to empty, not raise.
+    """
     apache_client.upload_fileobj(io.BytesIO(b"x"), "compliance/errbody.txt")
     assert _Apache.url is not None  # set by _apache_session above
     other = FileSystem(_Apache.url, auth=_Apache.auth)
@@ -435,11 +444,13 @@ def test_apache_deleting_a_collection_with_a_locked_member_is_a_multistatuserror
     apache_client.mkdir("compliance/delcoll")
     apache_client.upload_fileobj(io.BytesIO(b"x"), "compliance/delcoll/ok.txt")
     apache_client.upload_fileobj(io.BytesIO(b"x"), "compliance/delcoll/locked.txt")
-    other = FileSystem(_Apache.url, auth=_Apache.auth)  # type: ignore[arg-type]
+    other = FileSystem(_Apache.url, auth=_Apache.auth)
     try:
-        with other.locked("compliance/delcoll/locked.txt", scope=EXCLUSIVE):
-            with pytest.raises(MultiStatusError):
-                session.delete("compliance/delcoll/").raise_for_status()
+        with (
+            other.locked("compliance/delcoll/locked.txt", scope=EXCLUSIVE),
+            pytest.raises(MultiStatusError),
+        ):
+            session.delete("compliance/delcoll/").raise_for_status()
         # the lock is gone now - a retry succeeds and actually removes it.
         apache_client.remove("compliance/delcoll")
         assert not apache_client.exists("compliance/delcoll")
@@ -483,7 +494,10 @@ def test_apache_if_match_with_a_stale_etag_is_refused(
 def test_apache_if_none_match_star_atomic_create_is_really_atomic(
     apache_client: FileSystem,
 ) -> None:
-    """§13.1.2: already covered generically against wsgidav (test_session_api.py) - re-verified here independently."""
+    """§13.1.2: already covered generically against wsgidav (test_session_api.py).
+
+    Re-verified here independently.
+    """
     apache_client.upload_fileobj(
         io.BytesIO(b"first"), "compliance/atomic.txt", overwrite=False
     )
@@ -531,11 +545,13 @@ def test_apache_a_race_to_create_a_collection_has_one_winner(
 
 def test_apache_supports_range_reads(apache_client: FileSystem) -> None:
     apache_client.upload_fileobj(io.BytesIO(b"0123456789"), "compliance/range.txt")
-    with _requests_seen() as seen:
-        with apache_client.open("compliance/range.txt", "rb") as reader:
-            assert reader.read(4) == b"0123"
-            reader.seek(7)
-            assert reader.read() == b"789"
+    with (
+        _requests_seen() as seen,
+        apache_client.open("compliance/range.txt", "rb") as reader,
+    ):
+        assert reader.read(4) == b"0123"
+        reader.seek(7)
+        assert reader.read() == b"789"
     # the seek is a request for the rest of the file, not a download of all of it again
     assert [(call.method, call.status, call.header("range")) for call in seen] == [
         ("PROPFIND", 207, "-"),
@@ -548,11 +564,13 @@ def test_apache_download_fileobj_resumes_after_a_seek(
     apache_client: FileSystem,
 ) -> None:
     apache_client.upload_fileobj(io.BytesIO(b"abcdefghij"), "compliance/range2.txt")
-    with _requests_seen() as seen:
-        with apache_client.open("compliance/range2.txt", "rb") as reader:
-            first_half = reader.read(5)
-            reader.seek(0)
-            full = reader.read()
+    with (
+        _requests_seen() as seen,
+        apache_client.open("compliance/range2.txt", "rb") as reader,
+    ):
+        first_half = reader.read(5)
+        reader.seek(0)
+        full = reader.read()
     assert first_half == b"abcde"
     assert full == b"abcdefghij"
     # back to the start is a new request for the whole file (no range to ask for)
@@ -571,7 +589,10 @@ def test_apache_download_fileobj_resumes_after_a_seek(
 def test_apache_proppatch_of_a_protected_property_fails_with_a_real_error_body(
     apache_client: FileSystem,
 ) -> None:
-    """getcontentlength is server-maintained (§15.4) - confirmed here that Apache actually refuses to let a client set it."""
+    """``getcontentlength`` is server-maintained (§15.4).
+
+    Confirmed here that Apache actually refuses to let a client set it.
+    """
     apache_client.upload_fileobj(io.BytesIO(b"x"), "compliance/protected_prop.txt")
     with pytest.raises(MultiStatusError) as exc_info:
         apache_client.set_props(
@@ -594,12 +615,14 @@ def test_apache_a_shared_lock_blocks_a_second_clients_exclusive_lock(
     apache_client: FileSystem,
 ) -> None:
     apache_client.upload_fileobj(io.BytesIO(b"x"), "compliance/scope1.txt")
-    other = FileSystem(_Apache.url, auth=_Apache.auth)  # type: ignore[arg-type]
+    other = FileSystem(_Apache.url, auth=_Apache.auth)
     try:
-        with apache_client.locked("compliance/scope1.txt", scope=SHARED):
-            with pytest.raises(ResourceLockedError):
-                with other.locked("compliance/scope1.txt", scope=EXCLUSIVE):
-                    pass
+        with (
+            apache_client.locked("compliance/scope1.txt", scope=SHARED),
+            pytest.raises(ResourceLockedError),
+            other.locked("compliance/scope1.txt", scope=EXCLUSIVE),
+        ):
+            pass
     finally:
         other.close()
 
@@ -608,12 +631,14 @@ def test_apache_an_exclusive_lock_blocks_a_second_clients_shared_lock(
     apache_client: FileSystem,
 ) -> None:
     apache_client.upload_fileobj(io.BytesIO(b"x"), "compliance/scope2.txt")
-    other = FileSystem(_Apache.url, auth=_Apache.auth)  # type: ignore[arg-type]
+    other = FileSystem(_Apache.url, auth=_Apache.auth)
     try:
-        with apache_client.locked("compliance/scope2.txt", scope=EXCLUSIVE):
-            with pytest.raises(ResourceLockedError):
-                with other.locked("compliance/scope2.txt", scope=SHARED):
-                    pass
+        with (
+            apache_client.locked("compliance/scope2.txt", scope=EXCLUSIVE),
+            pytest.raises(ResourceLockedError),
+            other.locked("compliance/scope2.txt", scope=SHARED),
+        ):
+            pass
     finally:
         other.close()
 
@@ -630,7 +655,7 @@ def test_apache_unlock_by_a_different_client_without_the_token_fails(
     session.put("compliance/wrongclient.txt", b"x").raise_for_status()
     response = session.lock("compliance/wrongclient.txt", scope=EXCLUSIVE)
     token = response.active_lock.token
-    other = FileSystem(_Apache.url, auth=_Apache.auth)  # type: ignore[arg-type]
+    other = FileSystem(_Apache.url, auth=_Apache.auth)
     try:
         other_session: Session = other._session
         unlock_response = other_session.unlock(
@@ -650,11 +675,13 @@ def test_apache_delete_of_a_locked_resource_without_the_token_fails(
     apache_client: FileSystem,
 ) -> None:
     apache_client.upload_fileobj(io.BytesIO(b"x"), "compliance/delwrong.txt")
-    other = FileSystem(_Apache.url, auth=_Apache.auth)  # type: ignore[arg-type]
+    other = FileSystem(_Apache.url, auth=_Apache.auth)
     try:
-        with apache_client.locked("compliance/delwrong.txt", scope=EXCLUSIVE):
-            with pytest.raises(ResourceLockedError):
-                other.remove("compliance/delwrong.txt")
+        with (
+            apache_client.locked("compliance/delwrong.txt", scope=EXCLUSIVE),
+            pytest.raises(ResourceLockedError),
+        ):
+            other.remove("compliance/delwrong.txt")
     finally:
         other.close()
     assert apache_client.exists("compliance/delwrong.txt")
@@ -981,19 +1008,25 @@ def _variant_fs(tmp_path: Path, name: str, **options: Any) -> Iterator[FileSyste
 
 
 def _weak_etag_after_a_write(directory: str, *, base: "str | None" = None) -> str:
-    """The ETag of a file just written - a few tries, as a run that stalls for a second cannot see it weak."""
+    """The ETag of a file just written.
+
+    A few tries, as a run that stalls for a second cannot see it weak.
+    """
     for attempt in range(5):
         path = f"{directory}/fresh-{attempt}.txt"
         _http("PUT", path, base=base, data=b"v1").raise_for_status()
         etag = _etag(path, base=base)
         if etag.startswith("W/"):
             return etag
-    pytest.fail("the ETag of a file written a moment ago was never weak")
+    msg = "the ETag of a file written a moment ago was never weak"
+    raise AssertionError(msg)
 
 
 def test_apache_etag_is_weak_right_after_a_write(scratch: str) -> None:
-    """Weak (``W/``) if the file changed less than one second before the request - the rule is
-    ``request_time - mtime < 1s``, in the core, not a setting."""
+    """Weak (``W/``) if the file changed less than one second before the request.
+
+    The rule is ``request_time - mtime < 1s``, in the core, not a setting.
+    """
     assert _weak_etag_after_a_write(scratch).startswith('W/"')
 
 
@@ -1016,9 +1049,10 @@ def test_apache_put_response_carries_no_etag_header(scratch: str) -> None:
 def test_apache_a_weak_etag_taken_right_after_a_write_is_refused_client_side(
     apache_client: FileSystem, scratch: str
 ) -> None:
-    """Not a library bug: a weak ETag can never be used for ``If-Match`` (RFC 9110 sec. 13.1.1), and
-    Apache's own ETag is weak for the first second - so passing it straight on fails client-side.
-    Wait a second (next test), or ask again later."""
+    """Not a library bug: a weak ETag can never be used for ``If-Match`` (RFC 9110 sec. 13.1.1), and Apache's own ETag is weak for the first second - so passing it straight on fails client-side.
+
+    Wait a second (next test), or ask again later.
+    """
     session: Session = apache_client._session
     etag = _weak_etag_after_a_write(scratch)
     with pytest.raises(ValueError, match="weak"):
@@ -1045,7 +1079,10 @@ def test_apache_if_match_with_the_strong_etag_of_an_aged_file_replaces_it(
 
 
 def test_apache_refuses_a_weak_if_match_on_its_own(scratch: str) -> None:
-    """Apache compares ``If-Match`` strongly as well: even its own current ETag, sent as ``W/...``, is a 412."""
+    """Apache compares ``If-Match`` strongly as well.
+
+    Even its own current ETag, sent as ``W/...``, is a 412.
+    """
     path = f"{scratch}/weakmatch.txt"
     _http("PUT", path, data=b"v1").raise_for_status()
     time.sleep(1.2)
@@ -1060,7 +1097,8 @@ def test_apache_refuses_a_weak_if_match_on_its_own(scratch: str) -> None:
 def test_apache_file_etag_directive_does_not_make_a_fresh_etag_strong(
     tmp_path: Path,
 ) -> None:
-    """``FileETag`` picks what the value is made of (inode, size, mtime), not whether it is weak -
+    """``FileETag`` picks what the value is made of (inode, size, mtime), not whether it is weak.
+
     ``docs/apache-compliance-check.md`` used to recommend it for that, which does not work.
     """
     with _variant(tmp_path, "etag", extra_conf="FileETag INode MTime Size") as base:
@@ -1081,8 +1119,11 @@ def test_apache_file_etag_directive_does_not_make_a_fresh_etag_strong(
 def test_apache_lock_on_an_unmapped_url_is_lock_null_and_not_a_resource(
     apache_client: FileSystem, scratch: str
 ) -> None:
-    """RFC 2518 sec. 7.4's lock-null state, which RFC 4918 replaced by "an empty resource": PROPFIND
-    finds it (so ``exists()`` is true), GET and HEAD do not, and the parent lists it."""
+    """RFC 2518 sec. 7.4's lock-null state.
+
+    RFC 4918 replaced by "an empty resource": PROPFIND finds it (so ``exists()`` is true), GET and
+    HEAD do not, and the parent lists it.
+    """
     path = f"{scratch}/ln.txt"
     with apache_client.locked(path) as active_lock:
         assert active_lock.token
@@ -1099,8 +1140,11 @@ def test_apache_lock_on_an_unmapped_url_is_lock_null_and_not_a_resource(
 def test_apache_a_lock_null_resource_looks_like_an_empty_file(
     apache_client: FileSystem, scratch: str
 ) -> None:
-    """Its ``resourcetype`` is empty, so ``isfile()`` is true for it - there is nothing else to tell
-    it from a file by (no ``getcontentlength``, no ``getetag``)."""
+    """Its ``resourcetype`` is empty.
+
+    ``isfile()`` is true for it - there is nothing else to tell it from a file by (no
+    ``getcontentlength``, no ``getetag``).
+    """
     path = f"{scratch}/ln-type.txt"
     with apache_client.locked(path):
         assert apache_client.isfile(path)
@@ -1158,28 +1202,38 @@ def _put_in_two_parts(path: str, first: bytes, rest: bytes, *, between: Any) -> 
     return int(status_line.split()[1])
 
 
+def _second_creator(path: str, second: "list[int]") -> "Callable[[], None]":
+    """What runs between the head and the rest of the first request: a second ``If-None-Match: *`` create."""
+
+    def create_in_between() -> None:
+        # long enough for the first request's headers to have been checked
+        time.sleep(0.5)
+        second.append(
+            _http(
+                "PUT", path, data=b"second", headers={"If-None-Match": "*"}
+            ).status_code
+        )
+
+    return create_in_between
+
+
 def test_apache_if_none_match_star_is_checked_before_the_body_is_read(
     apache_client: FileSystem, scratch: str
 ) -> None:
-    """Why ``overwrite=False`` is not a guarantee of exactly one writer on Apache: the condition is
-    evaluated when the request arrives, the file is created when the body is complete. A creator
-    that arrives and finishes in between does not stop the one that was already let through - its
-    file is replaced, and both are told 201."""
+    """Why ``overwrite=False`` is not a guarantee of exactly one writer on Apache.
+
+    The condition is evaluated when the request arrives, the file is created when the body is
+    complete.
+
+    A creator that arrives and finishes in between does not stop the one that was already let through - its file is replaced, and both are told 201.
+    """
     for attempt in range(3):
         path = f"{scratch}/race-{attempt}.txt"
         second: list[int] = []
 
-        def create_in_between(path: str = path, second: "list[int]" = second) -> None:
-            time.sleep(
-                0.5
-            )  # long enough for the first request's headers to have been checked
-            second.append(
-                _http(
-                    "PUT", path, data=b"second", headers={"If-None-Match": "*"}
-                ).status_code
-            )
-
-        first = _put_in_two_parts(path, b"fi", b"rst", between=create_in_between)
+        first = _put_in_two_parts(
+            path, b"fi", b"rst", between=_second_creator(path, second)
+        )
         if first == 201:  # the first request was checked before the second was done
             assert second == [201]
             buf = io.BytesIO()
@@ -1194,8 +1248,11 @@ def test_apache_if_none_match_star_is_checked_before_the_body_is_read(
 def test_apache_concurrent_if_none_match_star_creators_only_ever_get_201_or_412(
     apache_client: FileSystem, scratch: str
 ) -> None:
-    """What does hold, whatever the timing: nothing but 201 and 412, at least one winner, and the
-    file is one writer's whole body. (More than one 201 is possible - see the test above.)
+    """What does hold, whatever the timing.
+
+    Nothing but 201 and 412, at least one winner, and the file is one writer's whole body.
+
+    (More than one 201 is possible - see the test above.)
     """
     path = f"{scratch}/many.txt"
     statuses = _in_parallel(
@@ -1248,9 +1305,7 @@ def test_apache_a_lock_makes_the_creator_exclusive(scratch: str) -> None:
 def test_apache_mkcol_on_an_existing_file_is_405_but_400_with_the_trailing_slash(
     scratch: str,
 ) -> None:
-    """The slash ``mkdir()`` always adds makes Apache's path resolution see "extraneous path
-    components" below a file: a 400 from ``dav_fs_get_resource`` (2.4; trunk answers 404).
-    """
+    """The slash ``mkdir()`` always adds makes Apache's path resolution see "extraneous path components" below a file: a 400 from ``dav_fs_get_resource`` (2.4; trunk answers 404)."""
     _http("PUT", f"{scratch}/f.txt", data=b"x").raise_for_status()
     assert _http("MKCOL", f"{scratch}/f.txt").status_code == 405
     assert _http("MKCOL", f"{scratch}/f.txt/").status_code == 400
@@ -1282,9 +1337,12 @@ def test_apache_mkcol_on_an_existing_collection_is_405(scratch: str) -> None:
 def test_apache_a_mkcol_race_has_one_winner_and_the_rest_are_refused(
     scratch: str,
 ) -> None:
-    """One 201; every other request is refused - mostly 405 ("exists" when they looked), or 403
-    (``apr_dir_make`` failed with EEXIST after they had looked: ``dav_fs_create_collection`` maps every
-    error but ENOSPC/ENOENT to 403). Which code a loser gets is timing, and not pinned.
+    """One 201; every other request is refused.
+
+    Mostly 405 ("exists" when they looked), or 403 (``apr_dir_make`` failed with EEXIST after they
+    had looked: ``dav_fs_create_collection`` maps every error but ENOSPC/ENOENT to 403).
+
+    Which code a loser gets is timing, and not pinned.
     """
     path = f"{scratch}/race-{uuid.uuid4().hex}"
     statuses = _in_parallel(24, lambda _i: _http("MKCOL", path).status_code)
@@ -1337,8 +1395,10 @@ def test_apache_423_is_the_cores_html_error_page_and_never_a_dav_error(
 def test_apache_a_new_member_of_a_locked_collection_is_a_207_and_not_created(
     apache_client: FileSystem, scratch: str, depth: str
 ) -> None:
-    """The parent is what is locked: the 423 is reported for the parent, with a 424 for the new
-    member, under a 207 - a status a PUT is not expected to answer (``DAV_VALIDATE_PARENT``).
+    """The parent is what is locked.
+
+    The 423 is reported for the parent, with a 424 for the new member, under a 207 - a status a PUT
+    is not expected to answer (``DAV_VALIDATE_PARENT``).
     """
     token = _token(_lock(scratch, depth=depth))
     try:
@@ -1374,8 +1434,11 @@ def test_apache_an_existing_member_of_an_infinity_locked_collection_is_a_plain_4
 def test_apache_the_client_reports_a_new_member_in_a_locked_collection_as_a_multistatuserror(
     apache_client: FileSystem, scratch: str
 ) -> None:
-    """The 207 is not a created resource: the client raises, naming the locked parent - it is not
-    a ``ResourceLockedError``, since the member itself is not what is locked."""
+    """The 207 is not a created resource.
+
+    The client raises, naming the locked parent - it is not a ``ResourceLockedError``, since the
+    member itself is not what is locked.
+    """
     assert _Apache.url is not None
     with (
         FileSystem(_Apache.url, auth=_Apache.auth) as other,
@@ -1393,8 +1456,7 @@ def test_apache_the_client_reports_a_new_member_in_a_locked_collection_as_a_mult
 def test_apache_delete_blocked_by_a_locked_member_is_a_424_that_deletes_nothing(
     apache_client: FileSystem, scratch: str
 ) -> None:
-    """``DAV_VALIDATE_USE_424``: the whole DELETE is refused up front, the multistatus names only the
-    member that is locked - the other members and the collection itself stay."""
+    """``DAV_VALIDATE_USE_424``: the whole DELETE is refused up front, the multistatus names only the member that is locked - the other members and the collection itself stay."""
     apache_client.mkdir(f"{scratch}/tree")
     apache_client.upload_fileobj(io.BytesIO(b"x"), f"{scratch}/tree/ok.txt")
     apache_client.upload_fileobj(io.BytesIO(b"x"), f"{scratch}/tree/locked.txt")
@@ -1438,9 +1500,12 @@ def test_apache_move_out_of_a_locked_collection_is_a_424_naming_the_collection(
 def test_apache_untagged_if_with_a_lock_token_fails_for_a_copy_onto_a_locked_file(
     scratch: str,
 ) -> None:
-    """An untagged list is evaluated for every resource the method touches, the unlocked source
-    included - where the token is false, so the whole request is a 412. Tagged with the
-    destination it applies to the destination alone (what ``Session.copy`` sends)."""
+    """An untagged list is evaluated for every resource the method touches, the unlocked source included.
+
+    Where the token is false, so the whole request is a 412.
+
+    Tagged with the destination it applies to the destination alone (what ``Session.copy`` sends).
+    """
     _http("PUT", f"{scratch}/src.txt", data=b"source").raise_for_status()
     _http("PUT", f"{scratch}/dst.txt", data=b"old").raise_for_status()
     token = _token(_lock(f"{scratch}/dst.txt"))
@@ -1511,8 +1576,10 @@ def test_apache_untagged_if_with_a_token_fails_for_a_new_member_but_a_tagged_one
 def test_apache_the_session_tags_the_tokens_it_sends(
     apache_client: FileSystem, scratch: str
 ) -> None:
-    """The reason the untagged form is not used: every write of the session under a held lock
-    works - member into a locked collection, copy onto a locked file, move out of a collection.
+    """The reason the untagged form is not used.
+
+    Every write of the session under a held lock works - member into a locked collection, copy onto
+    a locked file, move out of a collection.
     """
     session: Session = apache_client._session
     apache_client.upload_fileobj(io.BytesIO(b"x"), f"{scratch}/a.txt")
@@ -1682,7 +1749,10 @@ def test_apache_the_client_asks_for_600_seconds_by_default_and_for_none_with_non
 def test_apache_a_refresh_answers_the_new_timeout_and_no_lock_token(
     scratch: str,
 ) -> None:
-    """A LOCK without a body and with the token in ``If`` (RFC 4918 sec. 9.10.2) - nothing new is created."""
+    """A LOCK without a body and with the token in ``If`` (RFC 4918 sec. 9.10.2).
+
+    Nothing new is created.
+    """
     path = f"{scratch}/refresh.txt"
     token = _token(_lock(path, timeout="Second-30"))
     try:
@@ -1852,7 +1922,10 @@ def test_apache_locking_needs_the_lockdb_of_mod_dav_fs_but_not_mod_dav_lock(
 def test_apache_copy_of_a_collection_needs_no_trailing_slash(
     apache_client: FileSystem, scratch: str
 ) -> None:
-    """Unlike nginx (see docs/nginx-compliance-check.md): with or without the slash, the subtree is copied."""
+    """Unlike nginx (see docs/nginx-compliance-check.md).
+
+    With or without the slash, the subtree is copied.
+    """
     apache_client.mkdir(f"{scratch}/tree")
     apache_client.mkdir(f"{scratch}/tree/sub")
     apache_client.upload_fileobj(io.BytesIO(b"1"), f"{scratch}/tree/sub/f.txt")
@@ -1904,9 +1977,7 @@ def test_apache_copy_into_a_missing_parent_is_a_conflict(scratch: str) -> None:
     bool(_ENV_URL), reason="a remote instance may serve its directories"
 )
 def test_apache_get_on_a_collection_is_the_cores_404(scratch: str) -> None:
-    """mod_dav leaves GET to the core (``handle_get`` is off for the filesystem provider), whose
-    default handler refuses a directory ("Attempt to serve directory") - with no ``mod_dir`` or
-    ``mod_autoindex`` loaded, as here, that is a 404."""
+    """mod_dav leaves GET to the core (``handle_get`` is off for the filesystem provider), whose default handler refuses a directory ("Attempt to serve directory") - with no ``mod_dir`` or ``mod_autoindex`` loaded, as here, that is a 404."""
     assert _http("GET", f"{scratch}/").status_code == 404
 
 
@@ -1943,6 +2014,7 @@ def _in_parallel(count: int, work: Any) -> list[Any]:
         barrier.wait()
         try:
             results.append(work(index))
+        # pylint: disable-next=broad-exception-caught
         except BaseException as exc:  # noqa: BLE001 - handed to the test thread below
             errors.append(exc)
 
@@ -1957,9 +2029,9 @@ def _in_parallel(count: int, work: Any) -> list[Any]:
 
 
 def test_apache_an_expired_lock_is_gone_and_its_token_is_refused(scratch: str) -> None:
-    """A lock is not a record that is swept on a timer: it is dropped when the next request looks at
-    it. From then on the resource is free for everybody - and the old token is worth nothing:
-    writing with it is a 412, so is refreshing it, and ``UNLOCK`` of it is a 400 (not 409).
+    """A lock is not a record that is swept on a timer: it is dropped when the next request looks at it.
+
+    From then on the resource is free for everybody - and the old token is worth nothing: writing with it is a 412, so is refreshing it, and ``UNLOCK`` of it is a 400 (not 409).
     """
     path = f"{scratch}/expiring.txt"
     _http("PUT", path, data=b"v1").raise_for_status()
@@ -1984,9 +2056,11 @@ def test_apache_an_expired_lock_is_gone_and_its_token_is_refused(scratch: str) -
 def test_apache_the_client_meets_an_expired_lock_with_a_412_and_a_log_line(
     apache_client: FileSystem, scratch: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A write under an expired lock, and a refresh of it, are ``PreconditionFailedError`` - the lock
-    is not silently taken for held. Leaving the block tries to release it: Apache answers 400 for
-    the token it no longer knows, which is logged as a lock that is already gone, not as a failure.
+    """A write under an expired lock, and a refresh of it, are ``PreconditionFailedError``.
+
+    The lock is not silently taken for held.
+
+    Leaving the block tries to release it: Apache answers 400 for the token it no longer knows, which is logged as a lock that is already gone, not as a failure.
     """
     path = f"{scratch}/client-expiry.txt"
     apache_client.upload_fileobj(io.BytesIO(b"v1"), path)
@@ -2007,10 +2081,9 @@ def test_apache_the_client_meets_an_expired_lock_with_a_412_and_a_log_line(
 def test_apache_an_expired_lock_null_resource_stays_visible_until_it_is_locked_again(
     apache_client: FileSystem, scratch: str
 ) -> None:
-    """A client that locks an unmapped URL and never comes back leaves a lock-null entry behind that
-    outlives its lock: ``PROPFIND`` on the path keeps answering (so ``exists()`` stays true), ``GET``
-    does not - and ``DELETE`` cannot remove what is not a resource (404). What clears it is another
-    ``LOCK`` + ``UNLOCK`` of the path, or a ``PUT`` / ``MKCOL`` that makes it a real one.
+    """A client that locks an unmapped URL and never comes back leaves a lock-null entry behind that outlives its lock: ``PROPFIND`` on the path keeps answering (so ``exists()`` stays true), ``GET`` does not - and ``DELETE`` cannot remove what is not a resource (404).
+
+    What clears it is another ``LOCK`` + ``UNLOCK`` of the path, or a ``PUT`` / ``MKCOL`` that makes it a real one.
     """
     ghosts = [
         f"{scratch}/ghost-{name}" for name in ("unlock", "put", "mkcol", "delete")
@@ -2039,7 +2112,10 @@ def test_apache_an_expired_lock_null_resource_stays_visible_until_it_is_locked_a
 def _collection_with_expired_lock_null_entries(
     apache_client: FileSystem, scratch: str, count: int
 ) -> str:
-    """A collection that holds ``count`` lock-null entries whose locks have run out (1 s) - nobody has asked since."""
+    """A collection that holds ``count`` lock-null entries whose locks have run out (1 s).
+
+    Nobody has asked since.
+    """
     collection = f"{scratch}/poisoned-{count}"
     apache_client.mkdir(collection)
     for index in range(count):
@@ -2051,11 +2127,15 @@ def _collection_with_expired_lock_null_entries(
 def test_apache_a_listing_that_meets_an_expired_lock_null_entry_is_aborted_once_per_entry(
     apache_client: FileSystem, scratch: str
 ) -> None:
-    """An Apache bug (``dav_fs_get_locks``: it drops the expired lock while ``PROPFIND`` has the lock
-    database open read-only, which ``DAV_DEBUG`` - compiled in, not a setting - turns into a 500 with
-    "INTERNAL DESIGN ERROR ... opened readonly" in the error log, after the answer has started): the
-    connection is closed with no response. The entry is dropped all the same, so the *next* listing
-    works - one failed listing per expired entry."""
+    """An Apache bug (``dav_fs_get_locks``.
+
+    It drops the expired lock while ``PROPFIND`` has the lock database open read-only, which
+    ``DAV_DEBUG`` - compiled in, not a setting - turns into a 500 with "INTERNAL DESIGN ERROR ...
+    opened readonly" in the error log, after the answer has started): the connection is closed with
+    no response.
+
+    The entry is dropped all the same, so the *next* listing works - one failed listing per expired entry.
+    """
     collection = _collection_with_expired_lock_null_entries(apache_client, scratch, 2)
     for _ in range(2):
         with pytest.raises(requests.exceptions.ConnectionError):
@@ -2072,8 +2152,11 @@ def test_apache_a_listing_that_meets_an_expired_lock_null_entry_is_aborted_once_
 def test_apache_ls_gets_through_an_expired_lock_null_entry_by_retrying(
     apache_client: FileSystem, scratch: str
 ) -> None:
-    """``PROPFIND`` is retried (``retry=True``, three attempts), so the aborted listing is absorbed:
-    a little slower (the retry waits), no error. Up to two entries are absorbed this way.
+    """``PROPFIND`` is retried (``retry=True``, three attempts).
+
+    The aborted listing is absorbed: a little slower (the retry waits), no error.
+
+    Up to two entries are absorbed this way.
     """
     collection = _collection_with_expired_lock_null_entries(apache_client, scratch, 1)
     started = time.monotonic()
@@ -2084,9 +2167,11 @@ def test_apache_ls_gets_through_an_expired_lock_null_entry_by_retrying(
 def test_apache_ls_fails_once_past_the_retries_and_then_works_for_a_collection_with_many(
     apache_client: FileSystem, scratch: str
 ) -> None:
-    """With more expired entries than there are attempts the first ``ls`` is a ``ConnectionError`` -
-    which cleared some of them, so asking again is all it takes (the cost of leaving a lock on a name
-    nothing was ever written to)."""
+    """With more expired entries than there are attempts the first ``ls`` is a ``ConnectionError``.
+
+    Which cleared some of them, so asking again is all it takes (the cost of leaving a lock on a
+    name nothing was ever written to).
+    """
     collection = _collection_with_expired_lock_null_entries(apache_client, scratch, 4)
     with pytest.raises(requests.exceptions.ConnectionError):
         apache_client.ls(collection)
@@ -2100,16 +2185,20 @@ def test_apache_ls_fails_once_past_the_retries_and_then_works_for_a_collection_w
 def test_apache_a_connection_the_server_closes_after_a_few_requests_is_not_an_error(
     tmp_path: Path,
 ) -> None:
-    """``MaxKeepAliveRequests 3``: every third answer says ``Connection: close`` - for sixty requests
-    in a row, writes included (which are never retried), the client opens a new connection each time.
+    """``MaxKeepAliveRequests 3``.
+
+    Every third answer says ``Connection: close`` - for sixty requests in a row, writes included
+    (which are never retried), the client opens a new connection each time.
     """
     extra_conf = "KeepAlive On\nMaxKeepAliveRequests 3"
-    with _requests_seen(tmp_path / "keepalive_max") as seen:
-        with _variant_fs(tmp_path, "keepalive_max", extra_conf=extra_conf) as fs:
-            for index in range(20):
-                fs.upload_fileobj(io.BytesIO(b"x"), f"f{index}.txt")
-                assert fs.exists(f"f{index}.txt")
-                fs.remove(f"f{index}.txt")
+    with (
+        _requests_seen(tmp_path / "keepalive_max") as seen,
+        _variant_fs(tmp_path, "keepalive_max", extra_conf=extra_conf) as fs,
+    ):
+        for index in range(20):
+            fs.upload_fileobj(io.BytesIO(b"x"), f"f{index}.txt")
+            assert fs.exists(f"f{index}.txt")
+            fs.remove(f"f{index}.txt")
     # a write is never sent twice because its connection was closed: one PUT, one 201, per file
     assert [call.status for call in seen if call.method == "PUT"] == [201] * 20
     assert [call.status for call in seen if call.method == "DELETE"] == [204] * 20
@@ -2118,17 +2207,17 @@ def test_apache_a_connection_the_server_closes_after_a_few_requests_is_not_an_er
 def test_apache_a_connection_that_idled_past_the_keepalive_timeout_is_not_an_error(
     tmp_path: Path,
 ) -> None:
-    """``KeepAliveTimeout 1``: the server has closed the pooled connection by the time the next
-    request goes out, a write included - the client must see that before it sends, not after.
-    """
+    """``KeepAliveTimeout 1``: the server has closed the pooled connection by the time the next request goes out, a write included - the client must see that before it sends, not after."""
     extra_conf = "KeepAlive On\nKeepAliveTimeout 1"
-    with _requests_seen(tmp_path / "keepalive_idle") as seen:
-        with _variant_fs(tmp_path, "keepalive_idle", extra_conf=extra_conf) as fs:
-            fs.upload_fileobj(io.BytesIO(b"x"), "first.txt")
-            for index in range(2):
-                time.sleep(1.4)
-                fs.upload_fileobj(io.BytesIO(b"y"), f"idle{index}.txt")
-            assert fs.exists("idle1.txt")
+    with (
+        _requests_seen(tmp_path / "keepalive_idle") as seen,
+        _variant_fs(tmp_path, "keepalive_idle", extra_conf=extra_conf) as fs,
+    ):
+        fs.upload_fileobj(io.BytesIO(b"x"), "first.txt")
+        for index in range(2):
+            time.sleep(1.4)
+            fs.upload_fileobj(io.BytesIO(b"y"), f"idle{index}.txt")
+        assert fs.exists("idle1.txt")
     assert [call.status for call in seen if call.method == "PUT"] == [201] * 3
 
 
@@ -2160,8 +2249,10 @@ def _slow(parts: "list[bytes]", pause: float) -> BinaryIO:
 def test_apache_gives_up_on_a_stalled_upload_with_408_and_creates_nothing(
     tmp_path: Path,
 ) -> None:
-    """``Timeout 1``: a body that stops for longer than that is a 408 (not retried, a PUT) - no partial
-    file, not even a temporary one the next listing could show - while a slow but moving one is fine.
+    """``Timeout 1``: a body that stops for longer than that is a 408 (not retried, a PUT).
+
+    No partial file, not even a temporary one the next listing could show - while a slow but moving
+    one is fine.
     """
     with _variant_fs(tmp_path, "timeout", extra_conf="Timeout 1") as fs:
         with pytest.raises(HTTPStatusError) as exc_info:
@@ -2177,8 +2268,10 @@ def test_apache_gives_up_on_a_stalled_upload_with_408_and_creates_nothing(
 def test_apache_limitrequestbody_refuses_with_413_before_anything_is_stored(
     tmp_path: Path,
 ) -> None:
-    """With ``LimitRequestBody 1048576``: below the limit it is stored; above it - announced by its
-    length, huge, or streamed without a length - a 413, and the file that was there stays as it was.
+    """With ``LimitRequestBody 1048576``.
+
+    Below the limit it is stored; above it - announced by its length, huge, or streamed without a
+    length - a 413, and the file that was there stays as it was.
     """
     extra_conf = "LimitRequestBody 1048576"
     with _variant_fs(tmp_path, "limit", extra_conf=extra_conf) as fs:
@@ -2319,9 +2412,7 @@ _ODD_NAMES = [
 def test_apache_a_name_survives_the_round_trip(
     apache_client: FileSystem, scratch: str, name: str
 ) -> None:
-    """Every character that means something in a URL, and some that are not ASCII, is stored under
-    exactly that name - ``%20`` stays the six characters it is, it is not read as a space.
-    """
+    """Every character that means something in a URL, and some that are not ASCII, is stored under exactly that name - ``%20`` stays the six characters it is, it is not read as a space."""
     path = f"{scratch}/{name}"
     apache_client.upload_fileobj(io.BytesIO(name.encode()), path)
     buf = io.BytesIO()
@@ -2398,12 +2489,13 @@ def _dav_state_dir_is_protected(apache_client: FileSystem) -> bool:
 def test_apache_the_lock_database_directory_cannot_be_written(
     apache_client: FileSystem, scratch: str, path: str
 ) -> None:
-    """``dav_fs_is_state_path``: ``.DAV`` holds Apache's own state (locks, properties) - a client does
-    not get to name it, at any level of the tree, on a server new enough to check for it - see
-    :func:`_dav_state_dir_is_protected`. On an older one, a plain write naming ``.DAV`` just succeeds
-    (nothing stops it), and the ``.DAV/inside`` case fails for an unrelated, mundane reason: ``.DAV``
-    was never materialized as a real directory here, so it is the same "parent collection missing" 409
-    any other nonexistent two-level path gets."""
+    """``dav_fs_is_state_path``: ``.DAV`` holds Apache's own state (locks, properties).
+
+    A client does not get to name it, at any level of the tree, on a server new enough to check for
+    it - see :func:`_dav_state_dir_is_protected`.
+
+    On an older one, a plain write naming ``.DAV`` just succeeds (nothing stops it), and the ``.DAV/inside`` case fails for an unrelated, mundane reason: ``.DAV`` was never materialized as a real directory here, so it is the same "parent collection missing" 409 any other nonexistent two-level path gets.
+    """
     if _dav_state_dir_is_protected(apache_client):
         with pytest.raises(ForbiddenError):
             apache_client.upload_fileobj(io.BytesIO(b"x"), f"{scratch}/{path}")
@@ -2433,15 +2525,18 @@ def _dav_fixup_hook_blocks_every_method(scratch: str) -> bool:
 
 
 def test_apache_the_lock_database_directory_cannot_be_read(scratch: str) -> None:
-    """A GET of the property database a real PROPPATCH just wrote under ``.DAV`` - on sdbm (the
-    release-tarball default; see ``_dbm_is_sdbm``), a per-resource ``<name>.pag``/``.dir`` pair.
+    """A GET of the property database a real PROPPATCH just wrote under ``.DAV``.
+
+    On sdbm (the release-tarball default; see ``_dbm_is_sdbm``), a per-resource
+    ``<name>.pag``/``.dir`` pair.
 
     httpd 2.4.68's CVE-2026-42535 fix blocks the write
     (:func:`_dav_state_dir_is_protected`) but not this: confirmed live, 2.4.68 still answers `200`
     with the database's real bytes to a plain GET - writes were blocked, reads were not. Only
     2.4.69's added ``dav_fs_fixups`` hook (see :func:`_dav_fixup_hook_blocks_every_method`) also
     refuses this, for every method, before mod_dav or mod_dav_fs's own resource handling ever
-    sees the request."""
+    sees the request.
+    """
     protected = _dav_fixup_hook_blocks_every_method(scratch)
     _http("PUT", f"{scratch}/probe.txt", data=b"x").raise_for_status()
     _http(
@@ -2487,9 +2582,12 @@ def _dbm_is_sdbm(instance_dir: Path) -> bool:
 
 @contextmanager
 def _isolated_instance(tmp_path: Path) -> Iterator[tuple[str, Path]]:
-    """An instance of its own - its base URL and directory - for a test that writes to the lock or
-    property database from many clients at once. With Berkeley DB that can damage the database for
-    good: the shared instance, and every test after, must not have to live with it."""
+    """An instance of its own - its base URL and directory.
+
+    For a test that writes to the lock or property database from many clients at once.
+
+    With Berkeley DB that can damage the database for good: the shared instance, and every test after, must not have to live with it.
+    """
     with _variant(tmp_path, "dbm") as base:
         yield base, tmp_path / "dbm"
 
@@ -2515,10 +2613,10 @@ def test_apache_parallel_uploads_through_one_filesystem_arrive_intact(
 def test_apache_of_many_simultaneous_locks_on_one_resource_one_is_granted_on_sdbm(
     tmp_path: Path,
 ) -> None:
-    """The lock database is shared by all the server's processes. With sdbm exactly one request gets
-    the lock and the rest a 423. With Berkeley DB (Debian, Ubuntu) two can be granted the same lock -
-    seen once in 25 rounds of sixteen on Ubuntu's 2.4.58 - so only "at least one, nothing but 200
-    and 423" holds there."""
+    """The lock database is shared by all the server's processes.
+
+    With sdbm exactly one request gets the lock and the rest a 423. With Berkeley DB (Debian, Ubuntu) two can be granted the same lock - seen once in 25 rounds of sixteen on Ubuntu's 2.4.58 - so only "at least one, nothing but 200 and 423" holds there.
+    """
     with _isolated_instance(tmp_path) as (base, instance_dir):
         _http("PUT", "contended.txt", base=base, data=b"x").raise_for_status()
         results = _in_parallel(16, lambda _i: _lock("contended.txt", base=base))
@@ -2541,9 +2639,9 @@ def test_apache_of_many_simultaneous_locks_on_one_resource_one_is_granted_on_sdb
 def test_apache_many_simultaneous_locks_on_different_resources_are_all_granted(
     tmp_path: Path,
 ) -> None:
-    """Every request is told 200 with a token of its own. Whether the lock database then holds all of
-    them depends on its DBM type: with sdbm none is lost; with Berkeley DB (Debian, Ubuntu) up to a
-    fifth were not enforced a second later (1 to 8 of 40 in half of the rounds on Ubuntu's 2.4.58).
+    """Every request is told 200 with a token of its own.
+
+    Whether the lock database then holds all of them depends on its DBM type: with sdbm none is lost; with Berkeley DB (Debian, Ubuntu) up to a fifth were not enforced a second later (1 to 8 of 40 in half of the rounds on Ubuntu's 2.4.58).
     """
     with _isolated_instance(tmp_path) as (base, instance_dir):
         for index in range(40):
@@ -2562,11 +2660,12 @@ def test_apache_many_simultaneous_locks_on_different_resources_are_all_granted(
 def test_apache_through_the_client_a_contended_lock_is_held_by_one_and_leaks_none(
     tmp_path: Path,
 ) -> None:
-    """The client side holds everywhere: each outcome is "held", "refused" or - the lock was granted and
-    the server then no longer knew it, a 412 on the write - "lost"; the session keeps no token afterwards.
-    With sdbm nothing is lost, at least one is held, and no lock is left on the server. With Berkeley DB
-    (Debian, Ubuntu) a lock can be lost, a lost update can undo an ``UNLOCK``, and the database can be
-    damaged.
+    """The client side holds everywhere.
+
+    Each outcome is "held", "refused" or - the lock was granted and the server then no longer knew
+    it, a 412 on the write - "lost"; the session keeps no token afterwards.
+
+    With sdbm nothing is lost, at least one is held, and no lock is left on the server. With Berkeley DB (Debian, Ubuntu) a lock can be lost, a lost update can undo an ``UNLOCK``, and the database can be damaged.
     """
     with (
         _isolated_instance(tmp_path) as (base, instance_dir),
@@ -2600,8 +2699,10 @@ def test_apache_through_the_client_a_contended_lock_is_held_by_one_and_leaks_non
 def test_apache_simultaneous_overwrites_leave_exactly_one_whole_file(
     scratch: str,
 ) -> None:
-    """The temporary file is renamed over the target: whichever writer is last wins, whole - the result
-    is never a mixture of two bodies."""
+    """The temporary file is renamed over the target.
+
+    Whichever writer is last wins, whole - the result is never a mixture of two bodies.
+    """
     path = f"{scratch}/overwritten.bin"
     bodies = {index: bytes([65 + index]) * (2 << 20) for index in range(16)}
     results = _in_parallel(16, lambda i: _http("PUT", path, data=bodies[i]).status_code)
@@ -2638,9 +2739,10 @@ def test_apache_a_reader_never_sees_a_half_written_file(scratch: str) -> None:
 def test_apache_simultaneous_property_updates_on_one_resource_are_kept_on_sdbm(
     tmp_path: Path,
 ) -> None:
-    """Sixteen clients each set their own property on the same file: all are told 207. With sdbm all
-    sixteen properties are there afterwards; with Berkeley DB (Debian, Ubuntu) one or more were lost
-    in most rounds (one of sixteen in six of ten on Ubuntu's 2.4.58)."""
+    """Sixteen clients each set their own property on the same file: all are told 207.
+
+    With sdbm all sixteen properties are there afterwards; with Berkeley DB (Debian, Ubuntu) one or more were lost in most rounds (one of sixteen in six of ten on Ubuntu's 2.4.58).
+    """
     namespace = "https://example.org/ns"
 
     def update(index: int, base: str) -> int:
@@ -2670,10 +2772,9 @@ def test_apache_simultaneous_property_updates_on_one_resource_are_kept_on_sdbm(
 def test_apache_copy_move_and_delete_of_one_source_at_once_have_one_winner_where_one_is_possible(
     scratch: str,
 ) -> None:
-    """A source can be copied any number of times, but only moved or deleted once. The losers are told
-    an error: 404 (it was gone when they looked), 500 (it went between looking and renaming:
-    ``dav_fs_move_resource`` answers "Could not rename resource" for the ENOENT) or 403 (a failed
-    removal) - which one is timing, and not pinned: only that exactly one wins.
+    """A source can be copied any number of times, but only moved or deleted once.
+
+    The losers are told an error: 404 (it was gone when they looked), 500 (it went between looking and renaming: ``dav_fs_move_resource`` answers "Could not rename resource" for the ENOENT) or 403 (a failed removal) - which one is timing, and not pinned: only that exactly one wins.
     """
     _http("PUT", f"{scratch}/src.txt", data=b"src").raise_for_status()
     copies = _in_parallel(
@@ -2726,8 +2827,6 @@ Header always add Set-Cookie "srv2=2; Path=/; HttpOnly"
 
 def test_apache_with_mod_deflate_and_cookies(tmp_path: Path) -> None:
     """Compressed listings, identity downloads and the cookies a server sets all keep working."""
-    from webdav.fsspec import WebdavFileSystem  # noqa: PLC0415
-
     with _variant(
         tmp_path,
         "deflate",
@@ -2788,8 +2887,6 @@ def test_apache_with_add_encoding_stores_and_serves_a_gz_file_as_it_is(
     tmp_path: Path,
 ) -> None:
     """``AddEncoding x-gzip .gz`` labels the 201 of the PUT and every GET of ``a.gz``."""
-    from webdav.fsspec import WebdavFileSystem  # noqa: PLC0415
-
     payload = gzip.compress(b"hello world\n" * 1000)
     with _variant(tmp_path, "gzip", extra_conf="AddEncoding x-gzip .gz\n") as url:
         with FileSystem(url, auth=_Apache.auth) as fs:
@@ -2886,10 +2983,13 @@ def test_apache_a_moved_resource_takes_its_lock_token_with_it(
 
 
 @pytest.fixture(scope="module")
-def _prefixed_instance(
+def prefixed_instance(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[tuple[str, Path]]:
-    """An instance with ``mod_dir`` and ``mod_alias``, the WebDAV tree at ``/dav``: its base URL and directory."""
+    """An instance with ``mod_dir`` and ``mod_alias``, the WebDAV tree at ``/dav``.
+
+    Its base URL and directory.
+    """
     if apache_instance.missing_prerequisites():
         pytest.skip(
             "starts a second, differently configured Apache - needs a local install"
@@ -2910,9 +3010,9 @@ def _prefixed_instance(
 
 
 @pytest.fixture(scope="module")
-def prefixed(_prefixed_instance: tuple[str, Path]) -> str:
+def prefixed(prefixed_instance: tuple[str, Path]) -> str:
     """The base URL of the instance with ``mod_dir`` and the tree at ``/dav``."""
-    return _prefixed_instance[0]
+    return prefixed_instance[0]
 
 
 @pytest.fixture
@@ -2928,9 +3028,7 @@ def prefixed_fs(prefixed: str) -> Iterator[FileSystem]:
 def test_apache_with_mod_dir_a_collection_without_its_slash_is_redirected(
     prefixed: str, method: str
 ) -> None:
-    """``mod_dir`` (``DirectorySlash On``, its default) answers every method for a directory
-    asked for without the trailing slash with a 301 to the slash form - before ``mod_dav`` sees it.
-    """
+    """``mod_dir`` (``DirectorySlash On``, its default) answers every method for a directory asked for without the trailing slash with a 301 to the slash form - before ``mod_dav`` sees it."""
     name = f"redirected-{uuid.uuid4().hex[:8]}"
     created = requests.request(
         "MKCOL", f"{prefixed}/{name}/", auth=_Apache.auth, timeout=10
@@ -2953,7 +3051,7 @@ def test_apache_with_mod_dir_a_collection_without_its_slash_is_redirected(
 
 
 def test_apache_with_mod_dir_the_client_handles_a_collection_without_its_slash(
-    prefixed: str, prefixed_fs: FileSystem
+    prefixed_fs: FileSystem,
 ) -> None:
     """Every call that takes a collection works with the path as the caller wrote it, no slash.
 
@@ -2986,20 +3084,22 @@ def test_apache_with_mod_dir_the_client_handles_a_collection_without_its_slash(
     assert not fs.exists(f"{base}-moved")
     with pytest.raises(ResourceAlreadyExistsError):
         fs.mkdir(base)
-    with pytest.raises(IsACollectionError):
-        with fs.open(base, "rb"):
-            pass  # pragma: no cover - a collection is not opened
+    with (
+        pytest.raises(IsACollectionError),
+        fs.open(base, "rb"),
+    ):
+        pass  # pragma: no cover - a collection is not opened
     fs.remove(base)
 
 
 def test_apache_with_mod_dir_a_collection_costs_a_request_for_the_redirect(
-    _prefixed_instance: tuple[str, Path], prefixed_fs: FileSystem
+    prefixed_instance: tuple[str, Path], prefixed_fs: FileSystem
 ) -> None:
     """The slash form is one request, the form without it two: the redirect, then the repeat."""
     fs = prefixed_fs
     name = f"cost-{uuid.uuid4().hex[:8]}"
     fs.mkdir(name)
-    instance_dir = _prefixed_instance[1]
+    instance_dir = prefixed_instance[1]
     with _requests_seen(instance_dir) as with_slash:
         fs.ls(f"{name}/")
     with _requests_seen(instance_dir) as without:
@@ -3024,9 +3124,7 @@ _NAMES_UNDER_A_PREFIX = [name for name in _ODD_NAMES if len(name.encode()) <= 10
 def test_apache_under_a_path_prefix_a_name_survives_every_operation(
     prefixed_fs: FileSystem, name: str
 ) -> None:
-    """Each of these names, in a collection below ``/dav``, through every call that puts the name
-    into a header or a body: ``Destination``, the tagged ``If``, a property, a collection lock.
-    """
+    """Each of these names, in a collection below ``/dav``, through every call that puts the name into a header or a body: ``Destination``, the tagged ``If``, a property, a collection lock."""
     fs = prefixed_fs
     top = f"names-{uuid.uuid4().hex[:8]}"
     fs.mkdir(top)
@@ -3076,10 +3174,9 @@ def test_apache_an_xml_body_over_the_limit_is_a_413(
 
 @_needs_local_apache
 def test_apache_a_dead_property_value_has_a_size_limit_on_sdbm(tmp_path: Path) -> None:
-    """An sdbm entry (the key and the value together) is at most about a kilobyte. A value of 2000
-    bytes is a 500 from ``mod_dav`` - ``Invalid argument`` from the DBM in the error log - that the
-    client reports as the failed property, and nothing of the update is kept. Berkeley DB has no such
-    limit that was seen: what was written is read back whole or the update is refused.
+    """An sdbm entry (the key and the value together) is at most about a kilobyte.
+
+    A value of 2000 bytes is a 500 from ``mod_dav`` - ``Invalid argument`` from the DBM in the error log - that the client reports as the failed property, and nothing of the update is kept. Berkeley DB has no such limit that was seen: what was written is read back whole or the update is refused.
     """
     namespace = "https://example.org/ns"
     with (
@@ -3127,8 +3224,11 @@ def test_apache_a_dead_property_value_has_a_size_limit_on_sdbm(tmp_path: Path) -
 def test_apache_a_path_longer_than_the_file_system_allows_is_a_403_and_longer_than_a_line_a_414(
     apache_client: FileSystem, scratch: str
 ) -> None:
-    """Under the limit of ``LimitRequestLine`` (8190) the path still has to fit ``PATH_MAX``: ``Cannot map``
-    in the error log, a 403. Over the request line the core refuses before anything is mapped: 414.
+    """Under the limit of ``LimitRequestLine`` (8190) the path still has to fit ``PATH_MAX``.
+
+    ``Cannot map`` in the error log, a 403.
+
+    Over the request line the core refuses before anything is mapped: 414.
     """
 
     def segments(length: int) -> str:
@@ -3148,8 +3248,10 @@ def test_apache_a_path_longer_than_the_file_system_allows_is_a_403_and_longer_th
 def test_apache_a_depth_infinity_lock_over_a_locked_member_is_refused_and_leaves_nothing(
     apache_client: FileSystem, scratch: str
 ) -> None:
-    """The ``LOCK`` is a 207: the member is ``423 Locked``, the collection ``424``. The client raises
-    ``MultiStatusError`` naming both, and the collection is not left locked."""
+    """The ``LOCK`` is a 207: the member is ``423 Locked``, the collection ``424``.
+
+    The client raises ``MultiStatusError`` naming both, and the collection is not left locked.
+    """
     apache_client.mkdir(f"{scratch}/tree")
     apache_client.upload_fileobj(io.BytesIO(b"x"), f"{scratch}/tree/m.txt")
     assert _Apache.url is not None
@@ -3157,9 +3259,11 @@ def test_apache_a_depth_infinity_lock_over_a_locked_member_is_refused_and_leaves
         FileSystem(_Apache.url, auth=_Apache.auth) as other,
         other.locked(f"{scratch}/tree/m.txt"),
     ):
-        with pytest.raises(MultiStatusError) as exc_info:
-            with apache_client.locked(f"{scratch}/tree", depth="infinity"):
-                pass  # pragma: no cover - the lock is refused
+        with (
+            pytest.raises(MultiStatusError) as exc_info,
+            apache_client.locked(f"{scratch}/tree", depth="infinity"),
+        ):
+            pass  # pragma: no cover - the lock is refused
         assert exc_info.value.statuses == {
             f"/{scratch}/tree (lockdiscovery)": "Failed Dependency",
             f"/{scratch}/tree/m.txt": "Locked",
@@ -3176,9 +3280,8 @@ def test_apache_a_download_is_resumed_after_the_connection_is_cut(
     apache_client: FileSystem, scratch: str, fresh: bool
 ) -> None:
     """The proxy drops the first answer after 3 MiB, more than a second after the file was written.
-    The client asks for the rest with a ``Range`` and the file is whole. For a file written less than
-    a second before the first answer, that answer has a weak ETag and the resumed one a strong one:
-    a weak ETag is no validator, so the check is the modification time, and the resume is accepted.
+
+    The client asks for the rest with a ``Range`` and the file is whole. For a file written less than a second before the first answer, that answer has a weak ETag and the resumed one a strong one: a weak ETag is no validator, so the check is the modification time, and the resume is accepted.
     """
     assert _Apache.url is not None
     parts = urlsplit(_Apache.url)

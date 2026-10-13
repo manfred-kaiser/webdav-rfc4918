@@ -1,4 +1,7 @@
-"""Reading a response body within a size and a time budget - and the deadline around a whole request."""
+"""Reading a response body within a size and a time budget.
+
+And the deadline around a whole request.
+"""
 
 import io
 import time
@@ -21,6 +24,7 @@ from webdav import Session
 from webdav.exceptions import ClientError
 from webdav.session import DEFAULT_MAX_RESPONSE_SIZE
 from webdav.transport.body import iter_body, read_bounded
+from webdav.transport.deadline import enforce
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -77,6 +81,7 @@ def test_a_body_error_surfaces_as_the_matching_requests_error(
     response.raw = _FailingRaw(raised)
     with pytest.raises(requests.exceptions.RequestException) as excinfo:
         list(iter_body(response, 65536))
+    # pylint: disable-next=unidiomatic-typecheck
     assert type(excinfo.value) is expected
 
 
@@ -135,8 +140,10 @@ def test_the_limits_of_read_bounded_have_to_be_asked_for_by_name() -> None:
     response = requests.Response()
     response.raw = io.BytesIO(b"abc")
     with pytest.raises(TypeError):
+        # pylint: disable-next=missing-kwoa
         read_bounded(response)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
+        # pylint: disable-next=missing-kwoa,too-many-function-args
         read_bounded(response, 10, 10)  # type: ignore[misc]
 
 
@@ -170,21 +177,22 @@ def test_a_chunk_size_that_is_no_positive_integer_is_refused_when_it_is_set(
 
 
 def test_the_deadline_of_an_outer_block_wins_over_an_inner_one() -> None:
-    from webdav.transport.deadline import enforce  # noqa: PLC0415
-
     started = time.monotonic()
-    with pytest.raises(ClientError, match="configured time of 0.2 seconds"):
-        with enforce(0.2):
-            with enforce(30):
-                time.sleep(0.3)
+    with (
+        pytest.raises(ClientError, match=r"configured time of 0\.2 seconds"),
+        enforce(0.2),
+        enforce(30),
+    ):
+        time.sleep(0.3)
     assert time.monotonic() - started < 5
 
 
 def test_a_block_without_a_deadline_is_left_alone() -> None:
-    from webdav.transport.deadline import enforce  # noqa: PLC0415
-
     with enforce(None):
         pass
-    with pytest.raises(ZeroDivisionError):
-        with enforce(None):
-            1 / 0  # noqa: B018
+    with (
+        pytest.raises(ZeroDivisionError),
+        enforce(None),
+    ):
+        # pylint: disable-next=pointless-statement
+        1 / 0  # noqa: B018 - the division is what raises

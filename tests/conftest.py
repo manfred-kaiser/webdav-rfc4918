@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from tests.credentials import AUTH
+from tests.server import webdav_server
 from webdav import FileSystem, Session
 from webdav.fsspec import WebdavFileSystem
 
@@ -38,7 +39,6 @@ def storage_dir(tmp_path: Path) -> Path:
 def server_url(storage_dir: Path) -> Iterator[str]:
     """Run a real WebDAV server (wsgidav) for the duration of a test."""
     # Imported here: tests that only use the scripted/rogue servers do not need it.
-    from tests.server import webdav_server  # noqa: PLC0415
 
     with webdav_server(str(storage_dir)) as url:
         yield url

@@ -1,7 +1,5 @@
 """Credentials: which ones are sent, where they may go, and what never reads them from the environment."""
 
-# ruff: noqa: SIM117, PLC0415, PTH208, S105, RUF001, S108, S301, PT031, EM101
-
 import os
 from pathlib import Path
 
@@ -16,28 +14,30 @@ from webdav import RedirectPolicy, Session
 def test_credentials_do_not_reach_a_foreign_origin_on_its_second_hop(
     policy: str,
 ) -> None:
-    with scripted_server(
-        lambda r: redirect(307, "/final") if r.path == "/hop" else OK
-    ) as (b_url, b_rec):
-        with scripted_server(lambda _r: redirect(307, f"{b_url}/hop")) as (
+    with (
+        scripted_server(
+            lambda r: redirect(307, "/final") if r.path == "/hop" else OK
+        ) as (b_url, b_rec),
+        scripted_server(lambda _r: redirect(307, f"{b_url}/hop")) as (
             a_url,
             _a_rec,
-        ):
-            if policy == "all":
-                session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
-            else:
-                session = Session(
-                    redirect_policy=RedirectPolicy.WHITELIST,
-                    trusted_redirect_origins=[b_url],
-                    retry=False,
-                )
-            session.auth = ("u", "SECRET")
-            session.headers["X-Api-Key"] = "K"
-            session.cookies.set("sid", "cookie-secret", domain="127.0.0.1")
-            session.locks.add(f"{a_url}/f", "opaquelocktoken:t", "0")
-            response = session.put(
-                f"{a_url}/f", data=b"x", headers={"Authorization": "Bearer T"}
+        ),
+    ):
+        if policy == "all":
+            session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
+        else:
+            session = Session(
+                redirect_policy=RedirectPolicy.WHITELIST,
+                trusted_redirect_origins=[b_url],
+                retry=False,
             )
+        session.auth = ("u", "SECRET")
+        session.headers["X-Api-Key"] = "K"
+        session.cookies.set("sid", "cookie-secret", domain="127.0.0.1")
+        session.locks.add(f"{a_url}/f", "opaquelocktoken:t", "0")
+        response = session.put(
+            f"{a_url}/f", data=b"x", headers={"Authorization": "Bearer T"}
+        )
 
     assert response.status_code == 204
     assert [r.path for r in b_rec.requests] == ["/hop", "/final"]
@@ -49,19 +49,21 @@ def test_credentials_do_not_reach_a_foreign_origin_on_its_second_hop(
 
 
 def test_credentials_do_not_reach_a_third_origin_either() -> None:
-    with scripted_server(always(OK)) as (a_url, a_rec):
-        with scripted_server(lambda _r: redirect(307, f"{a_url}/back")) as (
+    with (
+        scripted_server(always(OK)) as (a_url, a_rec),
+        scripted_server(lambda _r: redirect(307, f"{a_url}/back")) as (
             b_url,
             _b_rec,
+        ),
+    ):
+        session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
+        session.auth = ("u", "SECRET")
+        with scripted_server(lambda _r: redirect(307, f"{b_url}/x")) as (
+            start_url,
+            _s_rec,
         ):
-            session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
-            session.auth = ("u", "SECRET")
-            with scripted_server(lambda _r: redirect(307, f"{b_url}/x")) as (
-                start_url,
-                _s_rec,
-            ):
-                # start -> b (foreign) -> a (foreign to start): nothing may go to a.
-                session.put(f"{start_url}/f", data=b"x")
+            # start -> b (foreign) -> a (foreign to start): nothing may go to a.
+            session.put(f"{start_url}/f", data=b"x")
     assert all("authorization" not in r.headers for r in a_rec.requests)
 
 
@@ -90,14 +92,16 @@ def test_a_cross_origin_answer_cannot_set_cookies_in_the_session() -> None:
     def storage(_r: Seen) -> tuple[int, dict[str, str], bytes]:
         return 204, {"Set-Cookie": "sid=attacker; Path=/"}, b""
 
-    with scripted_server(storage) as (storage_url, _s):
-        with scripted_server(lambda _r: redirect(307, f"{storage_url}/t")) as (
+    with (
+        scripted_server(storage) as (storage_url, _s),
+        scripted_server(lambda _r: redirect(307, f"{storage_url}/t")) as (
             gateway_url,
             _g,
-        ):
-            session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
-            session.put(f"{gateway_url}/f", data=b"x")
-            assert len(session.cookies) == 0
+        ),
+    ):
+        session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
+        session.put(f"{gateway_url}/f", data=b"x")
+        assert len(session.cookies) == 0
 
 
 def test_the_documented_environment_is_what_tests_run_in() -> None:

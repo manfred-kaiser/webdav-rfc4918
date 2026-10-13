@@ -8,7 +8,7 @@ import pytest
 import requests
 
 import webdav
-from webdav import ClientError, FileSystem, Session
+from webdav import ClientError, FileSystem, Session, cli
 from webdav.fsspec import WebdavFileSystem
 
 #: TEST-NET-1: never answers. With the switch the request is sent and fails to connect; without
@@ -79,8 +79,6 @@ def test_http_without_credentials_needs_no_switch() -> None:
 
 
 def test_the_command_line_has_the_switch(capsys: pytest.CaptureFixture[str]) -> None:
-    from webdav import cli  # noqa: PLC0415
-
     url = f"webdav://user:secret@{HOST}/"
     base = ["--timeout", "0.05", "--no-retry"]
     assert cli.main(["ls", *base, url]) == 1

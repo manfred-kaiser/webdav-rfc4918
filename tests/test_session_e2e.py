@@ -57,7 +57,10 @@ def _created(_seen: Seen) -> Reply:
 
 
 def test_an_empty_upload_has_a_content_length_and_is_not_chunked() -> None:
-    """A chunked body of zero bytes is a lone terminator, which a server that answers first leaves behind."""
+    """A chunked body of zero bytes is a lone terminator.
+
+    A server that answers first leaves behind.
+    """
     with scripted_server(_created) as (url, recorder), FileSystem(url) as client:
         client.upload_fileobj(io.BytesIO(b""), "f", overwrite=True)
         client.upload_fileobj(io.BytesIO(b"x"), "g", overwrite=True)

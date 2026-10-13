@@ -1,5 +1,6 @@
 """``Retry-After`` (RFC 9110 sec. 10.2.3): waited for when it is reasonable, never when it is not."""
 
+import time as real_time
 import types
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
@@ -10,6 +11,7 @@ import pytest
 from tests.scripted_server import Reply, Seen, scripted_server
 from webdav import Session
 from webdav import session as session_module
+from webdav.response import Response
 from webdav.transport import retry as retry_module
 from webdav.transport.retry import MAX_RETRY_AFTER
 
@@ -34,8 +36,6 @@ def redirect_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     ``perf_counter`` is forwarded to the real one (not faked): session.py
     also uses it, unconditionally, to time every response's ``.elapsed``.
     """
-    import time as real_time  # noqa: PLC0415
-
     waited: list[float] = []
     monkeypatch.setattr(
         session_module,
@@ -125,11 +125,11 @@ def test_a_write_is_not_retried_whatever_the_server_asks(sleeps: list[float]) ->
 def test_a_discarded_streamed_response_is_closed_before_the_retry(
     sleeps: list[float], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The 503 from the first attempt is never read or returned - only its
-    connection matters, and it must go back to the pool before the next
-    attempt, or a server that keeps failing leaks one connection per try."""
-    from webdav.response import Response  # noqa: PLC0415
+    """The 503 from the first attempt is never read or returned.
 
+    Only its connection matters, and it must go back to the pool before the next attempt, or a
+    server that keeps failing leaks one connection per try.
+    """
     closed: list[int] = []
     original_close = Response.close
 
@@ -152,8 +152,9 @@ def test_a_discarded_streamed_response_is_closed_before_the_retry(
 # ---------------------------------------------------------------------------
 
 
-def test_a_retry_after_on_a_redirect_is_waited_for(redirect_sleeps: list[float]) -> None:
-
+def test_a_retry_after_on_a_redirect_is_waited_for(
+    redirect_sleeps: list[float],
+) -> None:
     def respond(seen: Seen) -> "tuple[int, dict[str, str], bytes]":
         if seen.path == "/a":
             return 301, {"Location": "/b", "Retry-After": "2"}, b""
@@ -169,7 +170,6 @@ def test_a_retry_after_on_a_redirect_is_waited_for(redirect_sleeps: list[float])
 def test_a_redirects_retry_after_past_the_cap_refuses_the_redirect(
     redirect_sleeps: list[float],
 ) -> None:
-
     asked = str(int(MAX_RETRY_AFTER) + 1)
 
     def respond(seen: Seen) -> "tuple[int, dict[str, str], bytes]":
@@ -188,7 +188,6 @@ def test_a_redirects_retry_after_past_the_cap_refuses_the_redirect(
 def test_a_redirects_retry_after_as_an_http_date_past_the_cap_also_refuses(
     redirect_sleeps: list[float],
 ) -> None:
-
     when = format_datetime(
         datetime.now(UTC) + timedelta(seconds=MAX_RETRY_AFTER + 60), usegmt=True
     )

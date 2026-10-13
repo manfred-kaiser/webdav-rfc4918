@@ -1,3 +1,4 @@
+# pylint: disable=no-value-for-parameter  # _strip_protocol is a class method through server_aware, which pylint cannot see
 """Every path method fsspec has refuses a URL for another server - also one a later fsspec adds.
 
 The check sits in ``_strip_protocol`` (see ``server_aware``), which fsspec's methods call on the
@@ -8,6 +9,7 @@ fails, and the method needs a check of its own in ``GuardedFileSystem``.
 import inspect
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import fsspec
 import pytest
@@ -52,9 +54,8 @@ def test_every_path_method_of_fsspec_refuses_another_server() -> None:
         except ValueError as exc:
             if "bound to one server" not in str(exc):
                 not_refused.append(name)
-        except (
-            Exception
-        ):  # noqa: BLE001 - anything else means it went on towards the server
+        # pylint: disable-next=broad-exception-caught
+        except Exception:  # noqa: BLE001 - whatever else it raises, it was not refused
             not_refused.append(name)
         else:
             not_refused.append(name)
@@ -100,7 +101,7 @@ def seeded(ffs: WebdavFileSystem) -> WebdavFileSystem:
         lambda fs: fs.read_text(FOREIGN),
     ],
 )
-def test_FS07_a_url_for_another_server_is_refused_at_every_entry_point(
+def test_fs07_a_url_for_another_server_is_refused_at_every_entry_point(
     seeded: WebdavFileSystem, call: Any, tmp_path: Path
 ) -> None:
     with pytest.raises(ValueError, match="bound to one server"):
@@ -109,11 +110,9 @@ def test_FS07_a_url_for_another_server_is_refused_at_every_entry_point(
     assert not (tmp_path / "copy.txt").exists()
 
 
-def test_FS07_guard_the_servers_own_host_works_everywhere(
+def test_fs07_guard_the_servers_own_host_works_everywhere(
     seeded: WebdavFileSystem, server_url: str
 ) -> None:
-    from urllib.parse import urlsplit
-
     netloc = urlsplit(server_url).netloc
     url = f"webdavs://{netloc}/secret.txt"
     assert seeded.cat_file(url) == b"S"
@@ -129,14 +128,12 @@ def test_FS07_guard_the_servers_own_host_works_everywhere(
     )  # no host: the base_url's server
 
 
-def test_FS07_the_class_level_strip_protocol_is_untouched() -> None:
+def test_fs07_the_class_level_strip_protocol_is_untouched() -> None:
     assert WebdavFileSystem._strip_protocol("webdavs://other.example/a/b") == "/a/b"
     assert WebdavFileSystem._strip_protocol(["webdav://h/a", "/b"]) == ["/a", "/b"]
 
 
-def test_FS07_guard_fsspec_front_doors(server_url: str) -> None:
-    from urllib.parse import urlsplit
-
+def test_fs07_guard_fsspec_front_doors(server_url: str) -> None:
     netloc = urlsplit(server_url).netloc
     options = {"base_url": server_url, "auth": AUTH}
     filesystem = fsspec.filesystem("webdavs", **options)

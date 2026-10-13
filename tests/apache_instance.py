@@ -34,9 +34,11 @@ REQUIRED_MODULES = (
     ("mod_dav_lock.so", "dav_lock_module"),
 )
 TEST_USER = "testuser"
-TEST_PASSWORD = "testpass123"  # noqa: S105
+TEST_PASSWORD = (
+    "testpass123"  # noqa: S105 - made-up credentials of the throwaway instance
+)
 #: More users, with non-ASCII names and passwords: ``htpasswd`` stores the bytes it is given, UTF-8.
-UNICODE_USERS = (("üser", "päss"), ("名前", "пароль"))  # noqa: S105
+UNICODE_USERS = (("üser", "päss"), ("名前", "пароль"))
 HOST = "127.0.0.1"
 PORT = 8765
 
@@ -212,6 +214,7 @@ def missing_prerequisites() -> list[str]:
     ]
 
 
+# pylint: disable-next=too-many-locals
 def write_instance(
     instance_dir: Path,
     *,
@@ -301,7 +304,9 @@ def wait_until_up(url: str, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=0.5):  # noqa: S310
+            with urllib.request.urlopen(  # noqa: S310 - the URL of the instance this module started
+                url, timeout=0.5
+            ):
                 pass
         except urllib.error.HTTPError as exc:
             exc.close()  # an open HTTPError is a ResourceWarning when collected (Python 3.14)

@@ -1,3 +1,4 @@
+# pylint: disable=too-many-lines  # one file per server or per topic: the length is the number of checks
 """Edge cases of the fsspec filesystem that fsspec's own conformance suite does not reach.
 
 ``tests/test_fsspec_abstract.py`` runs the official suite, which checks what *every* backend
@@ -645,7 +646,7 @@ def test_moving_a_file_onto_itself_keeps_the_file(fs: WebdavFileSystem) -> None:
 def test_moving_a_path_onto_itself_is_a_no_op_whatever_its_spelling(
     fs: WebdavFileSystem, destination: str
 ) -> None:
-    """fsspec compares the strings; ``mv("/d", "d")`` would copy ``d`` into itself, then delete it."""
+    """``fsspec`` compares the strings; ``mv("/d", "d")`` would copy ``d`` into itself, then delete it."""
     fs.pipe_file("/d/f", b"1")
     fs.pipe_file("/d/sub/g", b"2")
     fs.mv("/d", destination, recursive=True)
@@ -657,8 +658,7 @@ def test_moving_a_path_onto_itself_is_a_no_op_whatever_its_spelling(
 def test_a_directory_is_never_copied_or_moved_into_itself(
     fs: WebdavFileSystem, operation: str, destination: str
 ) -> None:
-    """Into an *existing* directory below it the work is done entry by entry, and
-    ``mv`` ends by deleting the source - the whole tree, with the copy in it."""
+    """Into an *existing* directory below it the work is done entry by entry, and ``mv`` ends by deleting the source - the whole tree, with the copy in it."""
     fs.pipe_file("/d/f", b"1")
     fs.pipe_file("/d/sub/g", b"2")
     with pytest.raises(PermissionError):
@@ -667,7 +667,7 @@ def test_a_directory_is_never_copied_or_moved_into_itself(
 
 
 def test_a_directory_is_never_copied_onto_itself(fs: WebdavFileSystem) -> None:
-    """fsspec would nest it: ``cp("/d", "/d")`` is a copy into the existing directory ``/d``."""
+    """``fsspec`` would nest it: ``cp("/d", "/d")`` is a copy into the existing directory ``/d``."""
     fs.pipe_file("/d/f", b"1")
     for destination in ("/d", "d/", "./d"):
         with pytest.raises(PermissionError):
@@ -860,7 +860,7 @@ def test_put_file_replaces_what_is_there(
 
 def _through_pickle(value: _T) -> _T:
     """What a process boundary does to ``value``: serialise, then restore."""
-    return cast("_T", pickle.loads(pickle.dumps(value)))  # noqa: S301 - our own bytes
+    return cast("_T", pickle.loads(pickle.dumps(value)))
 
 
 def test_a_pickled_filesystem_keeps_its_credentials(
@@ -897,7 +897,7 @@ def test_a_filesystem_survives_a_json_round_trip(
     folder = tmp_path_factory.mktemp("cert")
     certfile, keyfile = str(folder / "client.pem"), str(folder / "client.key")
     for name in (certfile, keyfile):  # never used: the test server speaks plain HTTP
-        Path(name).write_text("")
+        Path(name).write_text("", encoding="utf-8")
     original = WebdavFileSystem(
         server_url, auth=AUTH, timeout=(5, 30), cert=(certfile, keyfile)
     )
@@ -956,6 +956,7 @@ def test_one_filesystem_serves_several_threads(fs: WebdavFileSystem) -> None:
                 fs.pipe_file(path, payload)
                 assert fs.cat_file(path) == payload
             assert len(fs.ls(f"/thread{number}", detail=False)) == 5
+        # pylint: disable-next=broad-exception-caught
         except BaseException as exc:  # noqa: BLE001 - the main thread reports it
             errors.append(exc)
 
@@ -970,7 +971,7 @@ def test_one_filesystem_serves_several_threads(fs: WebdavFileSystem) -> None:
 def test_the_first_writes_into_one_new_directory_race_without_failing(
     server_url: str,
 ) -> None:
-    """dask and zarr write many files into a directory that does not exist yet, at once.
+    """``dask`` and zarr write many files into a directory that does not exist yet, at once.
 
     WsgiDAV answers the MKCOL that loses the race with a 500, not the 405 of "exists already".
     """
@@ -981,6 +982,7 @@ def test_the_first_writes_into_one_new_directory_race_without_failing(
         try:
             barrier.wait()
             filesystem.pipe_file(f"{directory}/{number}.bin", b"x")
+        # pylint: disable-next=broad-exception-caught
         except BaseException as exc:  # noqa: BLE001 - the main thread reports it
             errors.append(exc)
 
@@ -1014,7 +1016,7 @@ def test_the_first_writes_into_one_new_directory_race_without_failing(
 def test_the_options_fsspec_hands_every_filesystem_are_accepted(
     server_url: str, option: str, value: object
 ) -> None:
-    """zarr and xarray open ``webdavs:///...`` with ``asynchronous=True``."""
+    """``zarr`` and xarray open ``webdavs:///...`` with ``asynchronous=True``."""
     filesystem = fsspec.filesystem(
         "webdavs", base_url=server_url, auth=AUTH, **{option: value}
     )
@@ -1345,7 +1347,7 @@ def test_a_resource_without_a_size_cannot_be_opened_for_reading() -> None:
         fs.filesystem.close()
 
 
-def test_BUG04_ls_keeps_a_trailing_space(ffs: WebdavFileSystem, tmp_path: Path) -> None:
+def test_bug04_ls_keeps_a_trailing_space(ffs: WebdavFileSystem, tmp_path: Path) -> None:
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "plain.txt").write_text("1")
     (tmp_path / "data ").mkdir()
@@ -1355,14 +1357,14 @@ def test_BUG04_ls_keeps_a_trailing_space(ffs: WebdavFileSystem, tmp_path: Path) 
     assert "/data /spaced.txt" in ffs.find("/")
 
 
-def test_BUG04_file_with_a_trailing_space(
+def test_bug04_file_with_a_trailing_space(
     ffs: WebdavFileSystem, tmp_path: Path
 ) -> None:
     (tmp_path / "trail ").write_text("x")
     assert ffs.ls("/trail ", detail=False) == ["/trail "]
 
 
-def test_BUG04_guard_plain_paths(ffs: WebdavFileSystem, tmp_path: Path) -> None:
+def test_bug04_guard_plain_paths(ffs: WebdavFileSystem, tmp_path: Path) -> None:
     (tmp_path / "d").mkdir()
     (tmp_path / "d" / "a").write_text("1")
     assert ffs.ls("d", detail=False) == ["/d/a"]
@@ -1371,7 +1373,7 @@ def test_BUG04_guard_plain_paths(ffs: WebdavFileSystem, tmp_path: Path) -> None:
     assert ffs.ls("", detail=False) == ["/d"]
 
 
-def test_BUG05_transaction_defers_the_put_until_commit(
+def test_bug05_transaction_defers_the_put_until_commit(
     ffs: WebdavFileSystem, tmp_path: Path
 ) -> None:
     with ffs.transaction:
@@ -1381,18 +1383,22 @@ def test_BUG05_transaction_defers_the_put_until_commit(
     assert (tmp_path / "tx1.txt").read_bytes() == b"abc"
 
 
-def test_BUG05_transaction_rolls_back_on_an_error(
+def test_bug05_transaction_rolls_back_on_an_error(
     ffs: WebdavFileSystem, tmp_path: Path
 ) -> None:
-    with pytest.raises(RuntimeError):
+    def fail_inside_a_transaction() -> None:
         with ffs.transaction:
             with ffs.open("/tx2.txt", "wb") as f:
                 f.write(b"abc")
-            raise RuntimeError("boom")
+            message = "boom"
+            raise RuntimeError(message)
+
+    with pytest.raises(RuntimeError):
+        fail_inside_a_transaction()
     assert not (tmp_path / "tx2.txt").exists()
 
 
-def test_BUG05_transaction_two_files_and_text_mode(
+def test_bug05_transaction_two_files_and_text_mode(
     ffs: WebdavFileSystem, tmp_path: Path
 ) -> None:
     with ffs.transaction:
@@ -1404,43 +1410,46 @@ def test_BUG05_transaction_two_files_and_text_mode(
     assert (tmp_path / "b.txt").read_text() == "b"
 
 
-def test_BUG05_transaction_does_not_hold_a_big_file_in_memory(
+def test_bug05_transaction_does_not_hold_a_big_file_in_memory(
     ffs: WebdavFileSystem, tmp_path: Path
 ) -> None:
     data = os.urandom(20 * 1024 * 1024)
-    with ffs.transaction:
-        with ffs.open("/big.bin", "wb") as f:
-            f.write(data)
-            assert f._rolled  # type: ignore[attr-defined]  # on disk, not in RAM
+    with (
+        ffs.transaction,
+        ffs.open("/big.bin", "wb") as f,
+    ):
+        f.write(data)
+        assert f._rolled  # on disk, not in RAM
     assert (tmp_path / "big.bin").read_bytes() == data
 
 
-def test_BUG05_a_failing_commit_leaves_no_open_file(
+def test_bug05_a_failing_commit_leaves_no_open_file(
     ffs: WebdavFileSystem, tmp_path: Path
 ) -> None:
     (
         tmp_path / "taken"
     ).mkdir()  # a collection where the PUT goes: the server refuses it
     held = []
-    with pytest.raises(IsADirectoryError):
+
+    def write_in_a_transaction(path: str, *, then_fail: bool) -> None:
         with ffs.transaction:
-            f = ffs.open("/taken", "wb")
+            f = ffs.open(path, "wb")
             f.write(b"1")
             f.close()
             held.append(f)
+            if then_fail:
+                raise RuntimeError
+
+    with pytest.raises(IsADirectoryError):
+        write_in_a_transaction("/taken", then_fail=False)
     assert all(f.closed for f in held)
     with pytest.raises(RuntimeError):
-        with ffs.transaction:
-            g = ffs.open("/other.txt", "wb")
-            g.write(b"1")
-            g.close()
-            held.append(g)
-            raise RuntimeError
+        write_in_a_transaction("/other.txt", then_fail=True)
     assert all(f.closed for f in held)
     assert not (tmp_path / "other.txt").exists()
 
 
-def test_BUG05_guard_plain_open_uploads_on_close(
+def test_bug05_guard_plain_open_uploads_on_close(
     ffs: WebdavFileSystem, tmp_path: Path
 ) -> None:
     with ffs.open("/plain.txt", "wb") as f:
@@ -1453,17 +1462,20 @@ def test_BUG05_guard_plain_open_uploads_on_close(
     assert f2.closed
 
 
-def test_BUG05_guard_an_exception_in_a_plain_with_discards(
+def test_bug05_guard_an_exception_in_a_plain_with_discards(
     ffs: WebdavFileSystem, tmp_path: Path
 ) -> None:
-    with pytest.raises(RuntimeError):
+    def write_and_fail() -> None:
         with ffs.open("/nope.txt", "wb") as f:
             f.write(b"x")
             raise RuntimeError
+
+    with pytest.raises(RuntimeError):
+        write_and_fail()
     assert not (tmp_path / "nope.txt").exists()
 
 
-def test_BUG06_the_fsspec_front_doors(ffs: WebdavFileSystem, tmp_path: Path) -> None:
+def test_bug06_the_fsspec_front_doors(ffs: WebdavFileSystem, tmp_path: Path) -> None:
     buf = io.BytesIO(b"HEADER:payload")
     buf.seek(7)
     ffs.upload_fileobj(buf, "/a.bin")
@@ -1476,23 +1488,26 @@ def test_BUG06_the_fsspec_front_doors(ffs: WebdavFileSystem, tmp_path: Path) -> 
     assert (tmp_path / "b.bin").read_bytes() == b"piped"
 
 
-def test_BUG10_guard_fsspec_makedirs_exist_ok(ffs: WebdavFileSystem) -> None:
+def test_bug10_guard_fsspec_makedirs_exist_ok(ffs: WebdavFileSystem) -> None:
     ffs.makedirs("/a/b", exist_ok=True)
     ffs.makedirs("/a/b", exist_ok=True)
 
 
-def test_BUG11_guard_an_unclosed_upload_file_still_uploads_and_warns(
+def test_bug11_guard_an_unclosed_upload_file_still_uploads_and_warns(
     ffs: WebdavFileSystem, tmp_path: Path
 ) -> None:
-    with pytest.warns(ResourceWarning):
+    def open_and_forget() -> None:
         f = ffs.open("/gc.txt", "wb")
         f.write(b"x")
         del f
         gc.collect()
+
+    with pytest.warns(ResourceWarning):
+        open_and_forget()
     assert (tmp_path / "gc.txt").read_bytes() == b"x"
 
 
-def test_BUG11_an_unclosed_transaction_file_is_not_uploaded_by_the_collector(
+def test_bug11_an_unclosed_transaction_file_is_not_uploaded_by_the_collector(
     ffs: WebdavFileSystem, tmp_path: Path
 ) -> None:
     with ffs.transaction:
@@ -1505,13 +1520,13 @@ def test_BUG11_an_unclosed_transaction_file_is_not_uploaded_by_the_collector(
     assert (tmp_path / "held.txt").read_bytes() == b"x"
 
 
-def test_DOS04_a_deep_but_finite_tree_is_walked(ffs: WebdavFileSystem) -> None:
+def test_dos04_a_deep_but_finite_tree_is_walked(ffs: WebdavFileSystem) -> None:
     path = "/" + "/".join(f"l{i}" for i in range(40))
     ffs.pipe_file(path + "/leaf.txt", b"x")
     assert ffs.find("/") == [path + "/leaf.txt"]
 
 
-def test_DOS04_guard_the_fsspec_contract_of_walk(ffs: WebdavFileSystem) -> None:
+def test_dos04_guard_the_fsspec_contract_of_walk(ffs: WebdavFileSystem) -> None:
     ffs.pipe_file("/d/a/1.txt", b"1")
     ffs.pipe_file("/d/b/2.txt", b"2")
     ffs.pipe_file("/d/top.txt", b"t")
@@ -1544,7 +1559,7 @@ def _two_dirs(
 
 
 @pytest.mark.parametrize("source", ["/d/", "/d"])
-def test_FS01_recursive_get_does_not_follow_a_symlink_out_of_the_destination(
+def test_fs01_recursive_get_does_not_follow_a_symlink_out_of_the_destination(
     ffs: WebdavFileSystem, tmp_path_factory: pytest.TempPathFactory, source: str
 ) -> None:
     ffs.pipe_file("/d/sub/f.txt", b"REMOTE")
@@ -1556,7 +1571,7 @@ def test_FS01_recursive_get_does_not_follow_a_symlink_out_of_the_destination(
     assert not list(outside.iterdir())
 
 
-def test_FS01_follow_symlinks_restores_the_old_behaviour(
+def test_fs01_follow_symlinks_restores_the_old_behaviour(
     ffs: WebdavFileSystem, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     ffs.pipe_file("/d/photos/f.txt", b"REMOTE")
@@ -1566,7 +1581,7 @@ def test_FS01_follow_symlinks_restores_the_old_behaviour(
     assert (big / "f.txt").read_bytes() == b"REMOTE"
 
 
-def test_FS01_guard_the_destination_root_may_be_a_symlink(
+def test_fs01_guard_the_destination_root_may_be_a_symlink(
     ffs: WebdavFileSystem, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     ffs.pipe_file("/d/sub/f.txt", b"REMOTE")
@@ -1577,7 +1592,7 @@ def test_FS01_guard_the_destination_root_may_be_a_symlink(
     assert (base / "mnt" / "sub" / "f.txt").read_bytes() == b"REMOTE"
 
 
-def test_FS01_guard_a_symlink_inside_the_tree_that_points_inside(
+def test_fs01_guard_a_symlink_inside_the_tree_that_points_inside(
     ffs: WebdavFileSystem, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     ffs.pipe_file("/d/sub/f.txt", b"REMOTE")
@@ -1588,7 +1603,7 @@ def test_FS01_guard_a_symlink_inside_the_tree_that_points_inside(
     assert (dst / "real" / "f.txt").read_bytes() == b"REMOTE"
 
 
-def test_FS01_guard_a_single_file_and_lists_follow_the_callers_paths(
+def test_fs01_guard_a_single_file_and_lists_follow_the_callers_paths(
     ffs: WebdavFileSystem, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     ffs.pipe_file("/one.txt", b"1")
@@ -1599,7 +1614,7 @@ def test_FS01_guard_a_single_file_and_lists_follow_the_callers_paths(
     real.write_bytes(b"old")
     # the caller named the file itself; the download replaces the link's *name* only if it is
     # a plain file - download_file refuses to write through a symlink at the target
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match="symlink"):
         ffs.get("/one.txt", str(base / "link.txt"))
     outside = base / "outside"
     outside.mkdir()
@@ -1607,7 +1622,7 @@ def test_FS01_guard_a_single_file_and_lists_follow_the_callers_paths(
     assert (outside / "a").read_bytes() == b"1"
 
 
-def test_FS01_guard_a_plain_recursive_get(
+def test_fs01_guard_a_plain_recursive_get(
     ffs: WebdavFileSystem, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     ffs.pipe_file("/d/a/1.txt", b"1")
@@ -1618,7 +1633,7 @@ def test_FS01_guard_a_plain_recursive_get(
     assert (dst / "2.txt").read_bytes() == b"2"
 
 
-def test_FS02_recursive_put_refuses_a_symlink_out_of_the_tree(
+def test_fs02_recursive_put_refuses_a_symlink_out_of_the_tree(
     ffs: WebdavFileSystem, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     base = tmp_path_factory.mktemp("up")
@@ -1631,19 +1646,19 @@ def test_FS02_recursive_put_refuses_a_symlink_out_of_the_tree(
     assert not (tmp_path / "dest" / "innocent.txt").exists()
 
 
-def test_FS02_a_glob_put_checks_against_the_directory_before_the_glob(
+def test_fs02_a_glob_put_checks_against_the_directory_before_the_glob(
     ffs: WebdavFileSystem, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     base = tmp_path_factory.mktemp("up")
     (base / "src").mkdir()
     (base / "secret.txt").write_text("TOP-SECRET")
     (base / "src" / "innocent.txt").symlink_to(base / "secret.txt")
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match="outside the source tree"):
         ffs.put(str(base / "src" / "*.txt"), "/dest/")
     assert not (tmp_path / "dest" / "innocent.txt").exists()
 
 
-def test_FS02_follow_symlinks_restores_the_old_behaviour(
+def test_fs02_follow_symlinks_restores_the_old_behaviour(
     ffs: WebdavFileSystem, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     base = tmp_path_factory.mktemp("up")
@@ -1654,7 +1669,7 @@ def test_FS02_follow_symlinks_restores_the_old_behaviour(
     assert (tmp_path / "dest" / "link.txt").read_text() == "DATA"
 
 
-def test_FS02_guard_symlinks_inside_the_tree_and_a_named_symlink_work(
+def test_fs02_guard_symlinks_inside_the_tree_and_a_named_symlink_work(
     ffs: WebdavFileSystem, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     base = tmp_path_factory.mktemp("up")
@@ -1672,7 +1687,7 @@ def test_FS02_guard_symlinks_inside_the_tree_and_a_named_symlink_work(
     assert (tmp_path / "listed.txt").read_text() == "e"
 
 
-def test_FS02_guard_the_source_root_may_be_a_symlink(
+def test_fs02_guard_the_source_root_may_be_a_symlink(
     ffs: WebdavFileSystem, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     base = tmp_path_factory.mktemp("up")

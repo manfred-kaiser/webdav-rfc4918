@@ -4,8 +4,6 @@ Every server here keeps each single socket operation well inside the
 per-read ``timeout=``; only the deadline over the whole request stops it.
 """
 
-# ruff: noqa: SIM117, PLC0415, PTH208, S105, RUF001
-
 import contextlib
 import socket
 import ssl
@@ -372,7 +370,7 @@ def _tls_proxy(
 
     def handler(conn: socket.socket) -> None:
         with ctx.wrap_socket(conn, server_side=True) as outer:
-            head = _read_request_head(outer)  # type: ignore[arg-type]
+            head = _read_request_head(outer)
             assert head.startswith(b"CONNECT ")
             outer.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
             after_connect(outer)
@@ -462,8 +460,6 @@ def test_a_body_trickled_through_an_https_proxy_tunnel_is_cut_off(
 
 
 def test_a_response_that_drips_forever_hits_a_total_deadline() -> None:
-    import time
-
     reply = (200, {DRIP: "0.05", NO_CONTENT_LENGTH: "1"}, b"x" * 400)
     with scripted_server(always(reply)) as (url, _rec):
         session = Session(retry=False)

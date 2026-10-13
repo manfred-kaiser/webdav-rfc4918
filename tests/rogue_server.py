@@ -41,7 +41,9 @@ class RogueBehavior:
 
 def _make_handler(behavior: RogueBehavior) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, fmt: str, *args: object) -> None:
+        """Answers every request the way the chosen ``RogueBehavior`` says."""
+
+        def log_message(self, *_args: object) -> None:
             """Keep test output quiet; inspect ``behavior.requests`` instead."""
 
         def _read_body(self) -> bytes:

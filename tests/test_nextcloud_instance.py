@@ -11,7 +11,6 @@ def test_the_nextcloud_container_is_published_on_loopback_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Docker publishes ``-p 8767:80`` on every interface, past the host firewall."""
-
     commands: list[list[str]] = []
 
     def fake_run(command: list[str], **_kwargs: object) -> types.SimpleNamespace:

@@ -1,7 +1,5 @@
 """The settings of a session: what is accepted, when it is refused, and that it survives a pickle."""
 
-# ruff: noqa: SIM117, PLC0415, PTH208, S105, RUF001, S301, PT031, EM101
-
 import base64
 import copy
 import logging
@@ -71,10 +69,10 @@ def test_a_base_url_is_never_shown_with_its_credentials_in_the_error() -> None:
 
 
 def test_base_url_is_immutable_after_construction() -> None:
-    """Internal code (releasing a lock on cleanup, ...) replays an absolute URL it
-    captured earlier, trusting it was already checked against this session's
-    origin - a base_url that could later point elsewhere would silently
-    invalidate that check. A session for a different server is a new Session."""
+    """Internal code (releasing a lock on cleanup, ...) replays an absolute URL it captured earlier, trusting it was already checked against this session's origin - a base_url that could later point elsewhere would silently invalidate that check.
+
+    A session for a different server is a new Session.
+    """
     session = Session("http://dav.example/base")
     with pytest.raises(AttributeError):
         session.base_url = "https://other.example:8443/x/"  # type: ignore[misc]
@@ -107,7 +105,7 @@ def test_the_whitelist_policy_needs_trusted_origins_also_when_set_later() -> Non
 def test_a_redirect_policy_given_for_one_call_is_checked_too() -> None:
     session = Session("http://dav.example", retry=False)
     with pytest.raises(TypeError, match="RedirectPolicy"):
-        session.get("/x", redirect_policy="all")  # type: ignore[arg-type]
+        session.get("/x", redirect_policy="all")
     with pytest.raises(ValueError, match="trusted_redirect_origins"):
         session.get("/x", redirect_policy=RedirectPolicy.WHITELIST)
 
@@ -149,11 +147,13 @@ def test_max_response_time_is_a_constructor_argument_everywhere() -> None:
     assert Session(max_response_time=7).max_response_time == 7
     assert Session(max_response_time=None).max_response_time is None
     assert FileSystem(max_response_time=7)._session.max_response_time == 7
-    with scripted_server(always(OK)) as (url, _rec):
-        # The one-off functions take it too (it reaches the session they open):
-        # removing the root is refused by the library before anything is sent.
-        with pytest.raises(webdav.ClientError, match="root"):
-            webdav.remove(f"{url}/", max_response_time=3)
+    # The one-off functions take it too (it reaches the session they open):
+    # removing the root is refused by the library before anything is sent.
+    with (
+        scripted_server(always(OK)) as (url, _rec),
+        pytest.raises(webdav.ClientError, match="root"),
+    ):
+        webdav.remove(f"{url}/", max_response_time=3)
 
 
 def _configured() -> Session:
@@ -385,9 +385,11 @@ def test_a_connection_error_through_an_environment_proxy_says_so(
     monkeypatch.setenv("http_proxy", dead)
     monkeypatch.delenv("NO_PROXY", raising=False)
     monkeypatch.delenv("no_proxy", raising=False)
-    with caplog.at_level(logging.WARNING, logger="webdav"):
-        with pytest.raises(requests.exceptions.ConnectionError) as caught:
-            Session(retry=False).get("http://dav.invalid/x")
+    with (
+        caplog.at_level(logging.WARNING, logger="webdav"),
+        pytest.raises(requests.exceptions.ConnectionError) as caught,
+    ):
+        Session(retry=False).get("http://dav.invalid/x")
     notes = " ".join(getattr(caught.value, "__notes__", []))
     assert "trust_env=False" in notes
     assert "trust_env=False" in caplog.text

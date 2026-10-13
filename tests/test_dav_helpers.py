@@ -125,7 +125,7 @@ def test_an_obs_text_byte_in_an_etag_is_refused() -> None:
     If-header-bracket-safety reason in conditional.py's module docstring.)
     Pinned here so a future change to that choice is a conscious one.
     """
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="not a valid entity-tag"):
         strong_etag('"a\x80b"')
 
 
@@ -167,7 +167,7 @@ def test_what_one_caller_gets_cannot_be_changed_for_the_next() -> None:
 # ---------------------------------------------------------------------------
 
 URL = "http://dav.example/docs/a.txt"
-TOKEN = "opaquelocktoken:1"  # noqa: S105
+TOKEN = "opaquelocktoken:1"  # noqa: S105 - a made-up lock token
 
 
 def _held() -> LockRegistry:

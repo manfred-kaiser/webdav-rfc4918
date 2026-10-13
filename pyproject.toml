@@ -101,11 +101,22 @@ dependencies = [
 [tool.hatch.envs.lint.scripts]
 check = [
   "pytest",
-  "black --check src/webdav",
+  "black --check src/webdav tests",
   "bandit -c pyproject.toml -r src/webdav",
-  "ruff check src/webdav",
-  "flake8 src/webdav",
+  # The tests get the same checks as the library, minus what a test is for: made-up passwords and
+  # tokens (B105, B106), pickles of earlier releases that must still load (B301, B403), XML the
+  # tests build themselves (B314), a fixed local URL (B310), and the helpers that start Apache,
+  # nginx and Nextcloud from a fixed list of binaries (B404, B603).
+  "bandit -c pyproject.toml -r tests -s B101,B105,B106,B108,B301,B310,B314,B403,B404,B405,B603",
+  "ruff check src/webdav tests",
+  "flake8 src/webdav tests",
   "pylint src/webdav",
+  # Fixtures redefine their own names as arguments (pytest's way, W0621), tests reach into
+  # internals on purpose (W0212, as SLF001 for ruff), a test is documented by its name (C0116, as
+  # D103), ``assert x == []`` checks the type as well, which ``assert not x`` does not (C1803),
+  # pylint reports a name that an earlier item of a parenthesized ``with`` binds as used before
+  # assignment (E0601, a false positive), and ``http.server`` handlers are called ``do_GET``.
+  "pylint tests --disable=redefined-outer-name,protected-access,missing-function-docstring,use-implicit-booleaness-not-comparison,used-before-assignment --good-names-rgxs=^do_[A-Z]+$",
   "mypy",
 ]
 
@@ -161,14 +172,20 @@ max-args = 18
 "tools/**" = [ "INP001", "S603", "T201" ] # standalone scripts, not a package - printing status is the point
 "src/webdav/cli.py" = [ "T201" ] # it's a CLI, printing to stdout is the point
 "tests/**" = [
-  "ANN",    # return/argument types not required on test functions
-  "D",      # test names are self-documenting, no docstring convention here
-  "DTZ002",
-  "PGH003", # blanket `type: ignore` is fine in tests
-  "S106",
-  "S314",
+  "D103",   # a test is documented by its name; helpers, classes and methods still need a docstring
+  "S106",   # made-up passwords and tokens
+  "S314",   # XML the tests build themselves
   "SLF001", # tests intentionally reach into internals to set up scenarios
 ]
+# The pickles these tests load are the ones they made, or the stored ones of earlier releases:
+# loading them is what is under test.
+"tests/test_exceptions.py" = [ "S301" ]
+"tests/test_insecure_transport_enum.py" = [ "S301" ]
+"tests/test_session_settings.py" = [ "S301" ]
+"tests/test_tls_configuration.py" = [ "S301" ]
+"tests/test_fsspec_e2e.py" = [ "S301" ]
+"tests/test_fsspec_edge_cases.py" = [ "S301" ]
+"tests/test_session_api.py" = [ "S301" ]
 # Test infrastructure (standing a throwaway Apache/nginx/Nextcloud instance
 # up/down), not a test itself - same reasoning as tools/** below: a fixed
 # list of trusted, hardcoded binaries (httpd, htpasswd, nginx, docker),
@@ -278,12 +295,6 @@ files = [ "src/webdav", "tests", "docs" ]
 [[tool.mypy.overrides]]
 module = [ "fsspec", "fsspec.*", "wsgidav.*" ]
 ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = [ "tests.*" ]
-disallow_untyped_defs = false
-disallow_incomplete_defs = false
-warn_unused_ignores = false
 
 [tool.bumpversion]
 current_version = "1.2.0"

@@ -11,7 +11,7 @@ from pathlib import Path
 
 def _openssl(*args: str) -> None:
     argv = ["openssl", *args]  # nosec B607 -- fixed executable, not attacker-controlled
-    subprocess.run(argv, check=True, capture_output=True)  # noqa: S603 # nosec B603
+    subprocess.run(argv, check=True, capture_output=True)  # noqa: S603  # nosec B603
 
 
 class Certificates:

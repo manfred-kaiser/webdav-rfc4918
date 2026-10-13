@@ -1,7 +1,5 @@
 """How ``cert=``/``verify=``/``tls=`` end up on a session."""
 
-# ruff: noqa: SIM117, PLC0415, S105, S108, S301, PT031, EM101
-
 import base64
 import copy
 import logging
@@ -26,6 +24,7 @@ from tests.scripted_server import (
 )
 from webdav import RedirectPolicy, Session, exceptions
 from webdav.exceptions import ClientError, TLSConfigError
+from webdav.transport.deadline import DeadlineAdapter
 from webdav.transport.tls import SSLContextAdapter, TLSOptions, build_ssl_context
 
 
@@ -104,9 +103,11 @@ def test_disabling_verification_is_logged_too_not_only_a_python_warning(
     def connect_insecurely(url: str) -> None:
         Session(retry=False, verify=False).get(f"{url}/a")
 
-    with scripted_server(always(OK)) as (url, _rec):
-        with pytest.warns(exceptions.TLSHardeningDisabledWarning):
-            connect_insecurely(url)
+    with (
+        scripted_server(always(OK)) as (url, _rec),
+        pytest.warns(exceptions.TLSHardeningDisabledWarning),
+    ):
+        connect_insecurely(url)
     assert any(
         "TLS hardening disabled" in r.message and "verification" in r.message
         for r in caplog.records
@@ -172,24 +173,26 @@ def test_a_foreign_hop_uses_its_own_adapter_and_no_client_certificate(
 ) -> None:
     cert, key = Certificates(tmp_path).issue_client_cert("client")
     seen: dict[str, Any] = {}
-    with scripted_server(always(OK)) as (storage_url, _storage):
-        with scripted_server(lambda _r: redirect(307, f"{storage_url}/t")) as (
+    with (
+        scripted_server(always(OK)) as (storage_url, _storage),
+        scripted_server(lambda _r: redirect(307, f"{storage_url}/t")) as (
             gateway_url,
             _g,
-        ):
-            session = Session(
-                redirect_policy=RedirectPolicy.ALL,
-                cert=(str(cert), str(key)),
-                retry=False,
-            )
-            real = session._foreign_adapter.send
+        ),
+    ):
+        session = Session(
+            redirect_policy=RedirectPolicy.ALL,
+            cert=(str(cert), str(key)),
+            retry=False,
+        )
+        real = session._foreign_adapter.send
 
-            def spy(request: Any, **kwargs: Any) -> Any:
-                seen.update(kwargs)
-                return real(request, **kwargs)
+        def spy(request: Any, **kwargs: Any) -> Any:
+            seen.update(kwargs)
+            return real(request, **kwargs)
 
-            monkeypatch.setattr(session._foreign_adapter, "send", spy)
-            response = session.put(f"{gateway_url}/f", data=b"x")
+        monkeypatch.setattr(session._foreign_adapter, "send", spy)
+        response = session.put(f"{gateway_url}/f", data=b"x")
     assert response.status_code == 204
     assert seen["cert"] is None
 
@@ -249,11 +252,13 @@ def test_the_adapter_leaves_verification_to_its_context_alone() -> None:
     adapter = SSLContextAdapter(build_ssl_context())
 
     class Conn:
+        """A stand-in for the connection the adapter configures."""
+
         cert_reqs = None
         ca_certs = "/certifi/cacert.pem"
         ca_cert_dir = "/somewhere"
-        cert_file = "/tmp/other.pem"
-        key_file = "/tmp/other.key"
+        cert_file = "/elsewhere/other.pem"
+        key_file = "/elsewhere/other.key"
 
     conn = Conn()
     adapter.cert_verify(conn, "https://dav.example/", False, ("/a", "/b"))
@@ -268,11 +273,13 @@ def test_the_adapter_carries_verify_false_through_to_the_connection() -> None:
         adapter = SSLContextAdapter(build_ssl_context(verify=False), verify=False)
 
     class Conn:
+        """A stand-in for the connection the adapter configures."""
+
         cert_reqs = None
         ca_certs = "/certifi/cacert.pem"
         ca_cert_dir = "/somewhere"
-        cert_file = "/tmp/other.pem"
-        key_file = "/tmp/other.key"
+        cert_file = "/elsewhere/other.pem"
+        key_file = "/elsewhere/other.key"
 
     conn = Conn()
     adapter.cert_verify(conn, "https://dav.example/", False, ("/a", "/b"))
@@ -307,8 +314,6 @@ def test_an_encrypted_key_without_a_password_fails_instead_of_prompting(
 
 
 def test_an_ssl_adapter_refuses_to_be_pickled() -> None:
-    import pickle
-
     with pytest.raises(TypeError, match="cannot be pickled"):
         pickle.dumps(SSLContextAdapter(build_ssl_context()))
 
@@ -372,14 +377,14 @@ def test_a_clone_with_tls_keeps_verify_and_cert_changes_too(
 def test_a_tls_session_pickle_of_the_previous_release_loads() -> None:
     session = pickle.loads(base64.b64decode("".join(old.TLS)))
     assert session.verify is True
-    assert session.get_adapter("https://x").verifies  # type: ignore[attr-defined]
+    assert session.get_adapter("https://x").verifies
 
 
 def test_verify_set_later_applies_with_tls(certs: Certificates, other_ca: str) -> None:
     with tls_server(certs, always(OK)) as (url, _rec):
         with pytest.warns(exceptions.TLSHardeningDisabledWarning):
             session = Session(verify=False, tls=TLSOptions(), retry=False)
-            assert session.get(f"{url}/x").status_code == 204
+        assert session.get(f"{url}/x").status_code == 204
         session.verify = other_ca
         assert session.verify == other_ca
         with pytest.raises(requests.exceptions.SSLError):
@@ -388,7 +393,7 @@ def test_verify_set_later_applies_with_tls(certs: Certificates, other_ca: str) -
         assert session.get(f"{url}/x").status_code == 204
         with pytest.warns(exceptions.TLSHardeningDisabledWarning):
             session.verify = False
-            assert session.get(f"{url}/x").status_code == 204
+        assert session.get(f"{url}/x").status_code == 204
 
 
 def test_the_verify_getter_of_a_tls_session_is_the_real_value(
@@ -409,9 +414,11 @@ def test_verify_false_for_one_call_does_not_switch_a_verifying_tls_session_off(
         session = Session(verify=other_ca, tls=TLSOptions(), retry=False)
         with warnings.catch_warnings():
             warnings.simplefilter("error")  # no "verification is off" - it is not
-            with caplog.at_level(logging.WARNING, logger="webdav"):
-                with pytest.raises(requests.exceptions.SSLError):
-                    session.get(f"{url}/x", verify=False)
+            with (
+                caplog.at_level(logging.WARNING, logger="webdav"),
+                pytest.raises(requests.exceptions.SSLError),
+            ):
+                session.get(f"{url}/x", verify=False)
     assert any("ignored" in r.message for r in caplog.records)
 
 
@@ -421,13 +428,13 @@ def test_verify_true_for_one_call_is_refused_where_the_context_does_not_verify(
     with tls_server(certs, always(OK)) as (url, rec):
         with pytest.warns(exceptions.TLSHardeningDisabledWarning):
             session = Session(verify=False, tls=TLSOptions(), retry=False)
-            with pytest.raises(ClientError, match=r"session\.verify"):
-                session.get(f"{url}/x", verify=True)
-            with pytest.raises(ClientError, match=r"session\.verify"):
-                session.get(f"{url}/x", verify=str(certs.ca_cert))
-            # per call None, and False (what the session does anyway), stay as they were
-            assert session.get(f"{url}/x", verify=None).status_code == 204
-            assert session.get(f"{url}/x", verify=False).status_code == 204
+        with pytest.raises(ClientError, match=r"session\.verify"):
+            session.get(f"{url}/x", verify=True)
+        with pytest.raises(ClientError, match=r"session\.verify"):
+            session.get(f"{url}/x", verify=str(certs.ca_cert))
+        # per call None, and False (what the session does anyway), stay as they were
+        assert session.get(f"{url}/x", verify=None).status_code == 204
+        assert session.get(f"{url}/x", verify=False).status_code == 204
     assert len(rec.requests) == 2
 
 
@@ -463,6 +470,7 @@ def test_changing_verify_while_other_threads_send_breaks_nothing(
                     session.get(f"{url}/x")
                 except requests.exceptions.RequestException:
                     pass  # a request that met a swap may fail; it must not crash
+                # pylint: disable-next=broad-exception-caught
                 except BaseException as exc:  # noqa: BLE001
                     errors.append(exc)
 
@@ -503,7 +511,10 @@ def test_a_path_object_is_a_ca_bundle_without_and_with_tls(
 
 
 def test_a_falsy_verify_in_an_old_pickle_stays_what_it_meant() -> None:
-    """The pickled session ran unverified (loudly); loading it must not turn that into an error or into verification."""
+    """The pickled session ran unverified (loudly).
+
+    Loading it must not turn that into an error or into verification.
+    """
     with pytest.warns(exceptions.TLSHardeningDisabledWarning):
         session = pickle.loads(base64.b64decode("".join(old.FALSY_VERIFY)))
     assert session.verify is False
@@ -513,7 +524,7 @@ def test_a_refused_verify_leaves_the_session_as_it_was(certs: Certificates) -> N
     with tls_server(certs, always(OK)) as (url, _rec):
         session = Session(verify=str(certs.ca_cert), tls=TLSOptions(), retry=False)
         with pytest.raises(TypeError):
-            session.verify = ""  # type: ignore[assignment]
+            session.verify = ""
         assert session.verify == str(certs.ca_cert)
         assert session.get(f"{url}/x").status_code == 204
 
@@ -543,33 +554,35 @@ def test_a_redirect_target_that_cannot_meet_the_tls_policy_is_not_reached(
     certs: Certificates, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SSL_CERT_FILE", str(certs.ca_cert))  # the foreign hop's trust
-    with tls_server(certs, always(OK), max_version=ssl.TLSVersion.TLSv1_2) as (
-        old_url,
-        old_rec,
-    ):
-        with tls_server(certs, lambda _r: redirect(307, f"{old_url}/t")) as (
+    with (
+        tls_server(certs, always(OK), max_version=ssl.TLSVersion.TLSv1_2) as (
+            old_url,
+            old_rec,
+        ),
+        tls_server(certs, lambda _r: redirect(307, f"{old_url}/t")) as (
             gateway,
             _g,
-        ):
-            strict = Session(
-                redirect_policy=RedirectPolicy.ALL,
-                tls=TLSOptions(
-                    ca_files=str(certs.ca_cert),
-                    minimum_version=ssl.TLSVersion.TLSv1_3,
-                ),
-                retry=False,
-            )
-            with pytest.raises(requests.exceptions.SSLError):
-                strict.get(f"{gateway}/x")
-            assert old_rec.requests == []
-            # the same without the floor: the hop works, as it always did
-            relaxed = Session(
-                redirect_policy=RedirectPolicy.ALL,
-                tls=TLSOptions(ca_files=str(certs.ca_cert)),
-                retry=False,
-            )
-            assert relaxed.get(f"{gateway}/x").status_code == 204
-            assert len(old_rec.requests) == 1
+        ),
+    ):
+        strict = Session(
+            redirect_policy=RedirectPolicy.ALL,
+            tls=TLSOptions(
+                ca_files=str(certs.ca_cert),
+                minimum_version=ssl.TLSVersion.TLSv1_3,
+            ),
+            retry=False,
+        )
+        with pytest.raises(requests.exceptions.SSLError):
+            strict.get(f"{gateway}/x")
+        assert old_rec.requests == []
+        # the same without the floor: the hop works, as it always did
+        relaxed = Session(
+            redirect_policy=RedirectPolicy.ALL,
+            tls=TLSOptions(ca_files=str(certs.ca_cert)),
+            retry=False,
+        )
+        assert relaxed.get(f"{gateway}/x").status_code == 204
+        assert len(old_rec.requests) == 1
 
 
 def test_the_foreign_context_takes_policy_and_nothing_of_the_origins_own(
@@ -607,6 +620,4 @@ def test_the_foreign_adapter_follows_verify_false_and_a_changed_verify(
 
 
 def test_without_tls_the_foreign_adapter_is_the_plain_one() -> None:
-    from webdav.transport.deadline import DeadlineAdapter
-
-    assert type(Session()._foreign_adapter) is DeadlineAdapter
+    assert Session()._foreign_adapter.__class__ is DeadlineAdapter
