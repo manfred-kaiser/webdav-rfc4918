@@ -20,6 +20,7 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
 ]
 dependencies = [ "requests>=2.32.4,<3", "urllib3>=2.7.0,<3" ]
 
@@ -69,7 +70,7 @@ extra-dependencies = [
 run = "pytest{env:HATCH_TEST_ARGS:} {args:tests/}"
 
 [[tool.hatch.envs.hatch-test.matrix]]
-python = [ "3.11", "3.12", "3.13", "3.14" ]
+python = [ "3.11", "3.12", "3.13", "3.14", "3.15" ]
 
 [tool.hatch.envs.docs]
 detached = false
@@ -121,7 +122,7 @@ check = [
 ]
 
 [[tool.hatch.envs.lint.matrix]]
-python = [ "3.11", "3.12", "3.13", "3.14" ]
+python = [ "3.11", "3.12", "3.13", "3.14", "3.15" ]
 
 [tool.flake8]
 # __init__.py re-exports the public API .
