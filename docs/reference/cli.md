@@ -163,11 +163,13 @@ without end. `0` is rejected, so a typo cannot remove a limit by accident.
   `--no-proxy` ignores the proxy variables.
 - **CA bundles.** `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` are ignored.
   Without a TLS flag, the server is verified against the `certifi` bundle
-  (a distribution may patch it to the system store). With `--key-password`,
+  (a distribution may patch it to the system store), or against the CA that
+  OpenSSL's `SSL_CERT_FILE` or `SSL_CERT_DIR` name. With `--key-password`,
   `--ciphers`, `--tls-min-version`, `--tls-max-version` or `--crl-cert`, it is
-  the operating system's store instead, and OpenSSL's `SSL_CERT_FILE` and
-  `SSL_CERT_DIR` apply: whoever controls your environment can choose the CAs
-  you trust. Use `--ca-cert` to name the CA explicitly.
+  the operating system's store instead, plus those two. Whoever controls your
+  environment can choose the CAs you trust. Use `--ca-cert` to name the CA
+  explicitly: the environment does not change it. `--no-proxy` ignores
+  `SSL_CERT_FILE` and `SSL_CERT_DIR` as well.
 - **`~/.netrc`** is not read.
 - **An encrypted client key.** `--key-password` and `$WEBDAV_KEY_PASSWORD`
   hold the passphrase as plain text. In a library call, the same

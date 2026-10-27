@@ -36,7 +36,9 @@ All security defaults, TLS and otherwise, are listed in the
 [README](https://github.com/manfred-kaiser/webdav-rfc4918#security).
 
 `REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` from the environment are ignored (they
-would replace the CA you configured), and so is `~/.netrc`. Proxies from the
+would replace the CA you configured), and so is `~/.netrc`.
+`SSL_CERT_FILE`/`SSL_CERT_DIR` are used, but only where no CA is configured
+(see [Where the trust comes from](#where-the-trust-comes-from)). Proxies from the
 environment (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) are used, as in
 `requests`; `trust_env=False` (`dav --no-proxy`) turns that off.
 
@@ -46,15 +48,17 @@ It is not "the system trust store" on every path:
 
 | Configuration | Trusted CAs |
 |---|---|
-| `verify=True` (no `tls=`) | What `requests` uses: the `certifi` bundle (or your distribution's own, where it patches `certifi`) |
+| `verify=True` (no `tls=`) | What `requests` uses: the `certifi` bundle (or your distribution's own, where it patches `certifi`). If `SSL_CERT_FILE` or `SSL_CERT_DIR` is set, only that CA (the file, if both are set; `trust_env=False` ignores them) |
 | `verify="ca.pem"` (no `tls=`) | Only that bundle |
 | `tls=TLSOptions()` | OpenSSL's default locations: the operating system's store, **plus** whatever `SSL_CERT_FILE`/`SSL_CERT_DIR` name |
 | `tls=TLSOptions(ca_files=...)` or `verify="ca.pem"` with `tls=` | Only those files (`ca_files` wins if both are given) |
 
-`SSL_CERT_FILE`/`SSL_CERT_DIR` therefore widen the trust of a session with
-`tls=` and no CA of its own, but not of one without `tls=`. A company CA in the
-operating system's store works with `tls=`, and only there. Naming the CA is
-the one way to a trust anchor that no environment variable can widen. A
+`SSL_CERT_FILE`/`SSL_CERT_DIR` therefore choose the trust of a session that
+names no CA of its own, with or without `tls=`. Without `tls=` they replace the
+bundle, so the file has to hold every CA you need (the system bundle, for a
+company CA). With `tls=` they come on top of the operating system's store.
+Naming the CA is the one way to a trust anchor that no environment variable can
+widen. A
 redirect to another origin is verified against the default locations in the
 `tls=` case, never against `ca_files` (see [Redirects to another
 origin](#redirects-to-another-origin)).

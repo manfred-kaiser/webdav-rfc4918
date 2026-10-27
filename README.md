@@ -117,8 +117,9 @@ list of defaults:
   `verify=False` emits and logs a `TLSHardeningDisabledWarning` that
   `urllib3.disable_warnings()` does not silence. So does a `TLSOptions` with a
   TLS version below 1.2 or with strict chain checking off.
-- `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` are ignored, so the environment
-  cannot replace the CA you configured. `~/.netrc` is ignored too: without
+- `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` are ignored. `SSL_CERT_FILE` and
+  `SSL_CERT_DIR` name the CA of a session with the default `verify=True`; a CA
+  you name in the code always wins, so the environment cannot replace it. `~/.netrc` is ignored too: without
   `auth=`, no credentials are sent.
 - A URL with credentials in it (`https://user:pw@host/`) is refused. Pass
   `auth=` instead. [Why](https://webdav.readthedocs.io/en/latest/reference/url-credentials.html).
