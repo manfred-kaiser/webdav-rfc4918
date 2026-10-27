@@ -359,12 +359,35 @@ def test_https_to_http_downgrade_is_never_followed_even_whitelisted() -> None:
     assert "downgrade" in hop.reason
 
 
-def test_http_to_https_upgrade_on_the_same_host_is_a_different_origin() -> None:
-    """Refused by default: the credentials already went out over plain http."""
+def test_http_to_https_upgrade_on_the_same_host_is_followed() -> None:
     response = _redirect_response("http://dav.example/f", "https://dav.example/f", 301)
+    assert _plan(response, "PROPFIND", RedirectPolicy.SAME_ORIGIN) == Follow(
+        "https://dav.example/f", same_origin=True
+    )
+
+
+def test_http_to_https_upgrade_on_the_same_host_may_change_the_port() -> None:
+    response = _redirect_response(
+        "http://dav.example:8080/f", "https://dav.example:8443/f", 301
+    )
+    assert isinstance(_plan(response, "GET", RedirectPolicy.SAME_ORIGIN), Follow)
+
+
+def test_http_to_https_upgrade_on_another_host_is_a_different_origin() -> None:
+    response = _redirect_response(
+        "http://dav.example/f", "https://other.example/f", 301
+    )
     hop = _plan(response, "PROPFIND", RedirectPolicy.SAME_ORIGIN)
     assert isinstance(hop, Refuse)
     assert "another origin" in hop.reason
+
+
+def test_https_to_http_on_the_same_host_is_never_followed() -> None:
+    response = _redirect_response("https://dav.example/f", "http://dav.example/f", 301)
+    for policy in (RedirectPolicy.SAME_ORIGIN, RedirectPolicy.ALL):
+        hop = _plan(response, "GET", policy)
+        assert isinstance(hop, Refuse)
+        assert "downgrade" in hop.reason
 
 
 def test_a_different_port_is_a_different_origin() -> None:
@@ -799,6 +822,35 @@ def test_http_to_https_with_all_still_follows(certs: Certificates) -> None:
         response = session.get(f"{a_url}/start", verify=str(certs.ca_cert))
     assert response.status_code == 204
     assert len(b_rec.requests) == 1
+
+
+def test_http_to_https_on_the_same_host_is_followed_by_default(
+    certs: Certificates,
+) -> None:
+    """127.0.0.1 twice (two ports): the upgrade keeps the session's credentials."""
+    with (
+        tls_server(certs, always(OK)) as (b_url, b_rec),
+        scripted_server(lambda _r: redirect(307, f"{b_url}/t")) as (a_url, _a),
+    ):
+        session = Session(auth=("u", "p"), retry=False)
+        response = session.get(f"{a_url}/start", verify=str(certs.ca_cert))
+    assert response.status_code == 204
+    assert response.redirect_refusal is None
+    assert b_rec.requests[0].headers["authorization"].startswith("Basic ")
+
+
+def test_https_to_http_on_the_same_host_is_not_followed_by_default(
+    certs: Certificates,
+) -> None:
+    with (
+        scripted_server(always(OK)) as (a_url, a_rec),
+        tls_server(certs, lambda _r: redirect(307, f"{a_url}/t")) as (b_url, _b),
+    ):
+        session = Session(redirect_policy=RedirectPolicy.ALL, retry=False)
+        response = session.get(f"{b_url}/start", verify=str(certs.ca_cert))
+    assert response.status_code == 307
+    assert "downgrade" in (response.redirect_refusal or "")
+    assert a_rec.to("/t") == []
 
 
 _SIGNATURE = "SECRETSIG-0123"

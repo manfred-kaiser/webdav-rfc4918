@@ -102,8 +102,9 @@ Whatever the policy:
   other than `http`/`https` is not followed.
 
 Each of these is reported as `RedirectNotFollowedError`. An origin is
-scheme, host and port, so `http` -> `https` on the same host is a
-*different* origin.
+scheme, host and port. The one exception is `http` -> `https` on the same
+host (any port): it is followed under every policy except `NEVER`, as a
+browser does, and the session's credentials go along.
 
 ```{warning}
 `https` -> `http` is never followed, not even with `ALL` or to an origin

@@ -53,11 +53,11 @@ class RedirectPolicy(Enum):
       automatically, refuse (``RedirectNotFollowedError``) anything else
       - safe by construction, since a same-origin redirect can't move a
       request or its body outside the server the caller already chose
-      to trust. An origin is scheme + host + port (RFC 6454), so an
-      ``http`` -> ``https`` upgrade on the same host is a *different*
-      origin and is refused too: the request that produced it already
-      sent its credentials in clear text, and following the redirect
-      would only hide that from the caller. Use an ``https`` URL.
+      to trust. An origin is scheme + host + port (RFC 6454); the one
+      exception is an ``http`` -> ``https`` upgrade on the same host
+      (any port), which is followed like a browser does, with the
+      session's credentials: by default they were never sent over plain
+      ``http`` (see ``insecure_transport``).
     - :data:`WHITELIST`: additionally follow a redirect to an origin
       ``trusted_redirect_origins`` names - e.g. a signed-upload gateway
       on a separate origin. Requires ``trusted_redirect_origins`` to
@@ -214,6 +214,15 @@ def may_follow(
     # no legitimate reason to want the latter. No browser allows it either.
     if source_origin[0] == "https" and target_origin[0] == "http":
         return Refuse("the redirect would downgrade https to http")
+    # The other way round is what a browser does with ``http://host`` too: the
+    # same host over TLS is where the server asks to go, and nothing that was
+    # sent over http is exposed any further by it.
+    if (
+        source_origin[0] == "http"
+        and target_origin[0] == "https"
+        and source_origin[1] == target_origin[1]
+    ):
+        return Follow(target, same_origin=True)
     if policy == RedirectPolicy.ALL or (
         policy == RedirectPolicy.WHITELIST and is_trusted(target)
     ):
