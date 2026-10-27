@@ -17,7 +17,12 @@ from fsspec.callbacks import DEFAULT_CALLBACK
 from fsspec.spec import AbstractFileSystem
 from fsspec.utils import stringify_path
 
-from webdav._webdavs_url import authority_of, check_host, host_and_port
+from webdav._webdavs_url import (
+    authority_of,
+    check_host,
+    host_and_port,
+    transport_of,
+)
 from webdav.exceptions import ClientError
 from webdav.fs import FileSystem
 from webdav.resource import safe_local_name
@@ -202,7 +207,10 @@ class GuardedFileSystem(AbstractFileSystem):
                 if authority:
                     host, port = host_and_port(authority)
                     check_host(
-                        cast("str", self.filesystem.session.base_url), host, port
+                        cast("str", self.filesystem.session.base_url),
+                        host,
+                        port,
+                        transport_of(stringify_path(one)),
                     )
 
     # fsspec's ``exists`` and ``isfile`` swallow every exception from ``info`` and answer

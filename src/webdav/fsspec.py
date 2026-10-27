@@ -150,7 +150,7 @@ class WebdavFileSystem(GuardedFileSystem):
         session: Session | None = None,
         host: "str | None" = None,
         port: "int | None" = None,
-        transport: str = "https",
+        transport: "str | None" = None,
         **session_opts: Any,
     ) -> None:
         """Instantiate with ``base_url``/``auth``, or an existing ``session``.
@@ -171,9 +171,11 @@ class WebdavFileSystem(GuardedFileSystem):
                 host for ``sftp://``. Without a ``base_url`` the server is
                 ``{transport}://host[:port]``; with one, the host has to be that server's.
             port: See ``host``.
-            transport: ``"https"`` (default) or ``"http"`` - the transport a bare ``host``
-                (no ``base_url``) is reached over. fsspec sets this from whichever of
-                ``webdavs://``/``webdav://`` the URL used; irrelevant once ``base_url`` is given.
+            transport: ``"https"`` or ``"http"`` - the transport a bare ``host``
+                (no ``base_url``) is reached over; ``https`` if not given. fsspec sets this from
+                whichever of ``webdavs://``/``webdav://`` the URL used. With a ``base_url``, it
+                has to be that server's scheme (``webdavs://`` on an ``http://`` server is refused,
+                not sent in clear text).
             session_opts: Extra keyword arguments forwarded to
                 :class:`~webdav.session.Session` - except the options fsspec passes to every
                 filesystem (``asynchronous``, ``loop``, ``use_listings_cache``,
@@ -181,7 +183,7 @@ class WebdavFileSystem(GuardedFileSystem):
 
         Raises:
             ValueError: There is no ``base_url``, neither given nor on the ``session``
-                nor in ``host``, or ``host`` is another server than the ``base_url``.
+                nor in ``host``, or ``host`` (or ``transport``) is another server than the ``base_url``.
 
         """
         base_url = server_url(
@@ -333,6 +335,33 @@ class WebdavFileSystem(GuardedFileSystem):
         with translate_exceptions():
             resource = self.filesystem.info(path)
         return info_of(resource)
+
+    def _info_or_none(self, path: str) -> "dict[str, Any] | None":
+        """``info()``, or ``None`` if there is nothing at ``path``.
+
+        Only "not there" is an answer. A TLS, connection, authentication or
+        permission error says nothing about the path and is raised, where
+        fsspec's own ``exists``/``isdir``/``isfile`` would turn it into
+        ``False``.
+        """
+        try:
+            return self.info(path)
+        except (FileNotFoundError, NotADirectoryError):  # the latter: below a file
+            return None
+
+    def exists(self, path: str, **kwargs: Any) -> bool:
+        """Whether there is anything at ``path``; an error other than "not found" is raised."""
+        return self._info_or_none(path) is not None
+
+    def isdir(self, path: str) -> bool:
+        """Whether ``path`` is a collection; an error other than "not found" is raised."""
+        found = self._info_or_none(path)
+        return found is not None and found["type"] == "directory"
+
+    def isfile(self, path: str) -> bool:
+        """Whether ``path`` is a file; an error other than "not found" is raised."""
+        found = self._info_or_none(path)
+        return found is not None and found["type"] == "file"
 
     def rm_file(self, path: str) -> None:
         """Remove a file, or an *empty* directory.

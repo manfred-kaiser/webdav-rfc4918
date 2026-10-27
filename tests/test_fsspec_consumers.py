@@ -97,10 +97,10 @@ def test_pandas_with_the_server_in_the_url(
     pd = pytest.importorskip("pandas")
     netloc = urlsplit(server_url).netloc
     _frame(3).to_csv(
-        f"webdavs://{netloc}/data/h.csv", index=False, storage_options=options
+        f"webdav://{netloc}/data/h.csv", index=False, storage_options=options
     )
     assert pd.read_csv(
-        f"webdavs://{netloc}/data/h.csv", storage_options=options
+        f"webdav://{netloc}/data/h.csv", storage_options=options
     ).shape == (3, 3)
     assert WebdavFileSystem(**options).find("/") == ["/data/h.csv"]
 

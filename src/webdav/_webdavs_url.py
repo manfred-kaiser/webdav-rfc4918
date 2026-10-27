@@ -84,7 +84,7 @@ def server_url(
     base_url: "str | None",
     host: "str | None",
     port: "int | None",
-    transport: str = "https",
+    transport: "str | None" = None,
 ) -> "str | None":
     """The ``base_url`` for what a URL named: the ``host`` and ``port`` of ``webdav(s)://host:port/path``.
 
@@ -101,19 +101,33 @@ def server_url(
         return base_url
     if base_url is None:
         name = f"[{host}]" if ":" in host else host
-        return f"{transport}://{name}" + (f":{port}" if port else "")
-    check_host(base_url, host, port)
+        return f"{transport or 'https'}://{name}" + (f":{port}" if port else "")
+    check_host(base_url, host, port, transport)
     return base_url
 
 
-def check_host(base_url: str, host: str, port: "int | None") -> None:
-    """Refuse a ``host[:port]`` that is not the server of ``base_url``.
+def check_host(
+    base_url: str,
+    host: str,
+    port: "int | None",
+    transport: "str | None" = None,
+) -> None:
+    """Refuse a ``host[:port]`` (and the ``transport`` a URL named) that is not the server of ``base_url``.
+
+    ``webdavs://h/x`` on a filesystem for ``http://h`` would otherwise go out in clear
+    text although the URL asked for TLS.
 
     Raises:
         ValueError: It is another server - a filesystem is bound to one.
 
     """
     given = urlsplit(base_url)
+    if transport is not None and given.scheme != transport:
+        msg = (
+            f"the URL asks for {scheme_for(transport)}:// ({transport}), "
+            f"but base_url is {redact_url(base_url)}: a filesystem is bound to one server"
+        )
+        raise ValueError(msg)
     if (given.hostname or "").lower() != host.lower() or (
         port is not None and port != (given.port or DEFAULT_PORTS.get(given.scheme))
     ):

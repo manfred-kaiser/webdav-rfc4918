@@ -114,13 +114,13 @@ def test_fs07_guard_the_servers_own_host_works_everywhere(
     seeded: WebdavFileSystem, server_url: str
 ) -> None:
     netloc = urlsplit(server_url).netloc
-    url = f"webdavs://{netloc}/secret.txt"
+    url = f"webdav://{netloc}/secret.txt"
     assert seeded.cat_file(url) == b"S"
     assert seeded.cat(url) == b"S"
     assert seeded.exists(url)
     assert seeded.info(url)["size"] == 1
-    assert seeded.find(f"webdavs://{netloc}/") == ["/secret.txt"]
-    assert seeded.glob(f"webdavs://{netloc.upper()}/*.txt") == ["/secret.txt"]
+    assert seeded.find(f"webdav://{netloc}/") == ["/secret.txt"]
+    assert seeded.glob(f"webdav://{netloc.upper()}/*.txt") == ["/secret.txt"]
     with seeded.open(url, "rb") as f:
         assert f.read() == b"S"
     assert (
@@ -138,10 +138,10 @@ def test_fs07_guard_fsspec_front_doors(server_url: str) -> None:
     options = {"base_url": server_url, "auth": AUTH}
     filesystem = fsspec.filesystem("webdavs", **options)
     filesystem.pipe_file("/d/a.txt", b"A")
-    with fsspec.open(f"webdavs://{netloc}/d/a.txt", "rb", **options) as f:
+    with fsspec.open(f"webdav://{netloc}/d/a.txt", "rb", **options) as f:
         assert f.read() == b"A"
     assert [
         x.path
-        for x in fsspec.open_files(f"webdavs://{netloc}/d/*.txt", "rb", **options)
+        for x in fsspec.open_files(f"webdav://{netloc}/d/*.txt", "rb", **options)
     ] == ["/d/a.txt"]
     filesystem.filesystem.close()

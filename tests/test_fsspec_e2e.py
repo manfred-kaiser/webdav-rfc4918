@@ -276,15 +276,15 @@ def test_the_host_of_a_url_is_the_server_of_the_base_url(server_url: str) -> Non
         "/top.txt", b"T"
     )
     with fsspec.open(
-        f"webdavs://{netloc}/top.txt", "rb", base_url=server_url, auth=AUTH
+        f"webdav://{netloc}/top.txt", "rb", base_url=server_url, auth=AUTH
     ) as f:
         assert f.read() == b"T"
     with fsspec.open(
-        f"webdavs://{netloc.upper()}/top.txt", "rb", base_url=server_url, auth=AUTH
+        f"webdav://{netloc.upper()}/top.txt", "rb", base_url=server_url, auth=AUTH
     ) as f:
         assert f.read() == b"T"
     _fs, path = fsspec.core.url_to_fs(
-        f"webdavs://{netloc}/top.txt", base_url=server_url, auth=AUTH
+        f"webdav://{netloc}/top.txt", base_url=server_url, auth=AUTH
     )
     assert path == "/top.txt"
 
@@ -293,7 +293,7 @@ def test_a_host_never_becomes_a_directory_on_the_server(server_url: str) -> None
     """It used to: ``webdavs://127.0.0.1:1234/p/f`` was written to ``/127.0.0.1:1234/p/f``."""
     netloc = urlsplit(server_url).netloc
     with fsspec.open(
-        f"webdavs://{netloc}/p/f.txt", "wb", base_url=server_url, auth=AUTH
+        f"webdav://{netloc}/p/f.txt", "wb", base_url=server_url, auth=AUTH
     ) as f:
         f.write(b"x")
     filesystem = fsspec.filesystem("webdavs", base_url=server_url, auth=AUTH)
@@ -307,7 +307,7 @@ def test_the_base_url_may_have_a_path_the_host_is_still_the_servers(
     root = WebdavFileSystem(server_url, auth=AUTH)
     root.pipe_file("/sub/a.txt", b"A")
     with fsspec.open(
-        f"webdavs://{netloc}/a.txt", "rb", base_url=f"{server_url}/sub", auth=AUTH
+        f"webdav://{netloc}/a.txt", "rb", base_url=f"{server_url}/sub", auth=AUTH
     ) as f:
         assert f.read() == b"A"
 
@@ -331,6 +331,29 @@ def test_a_url_cannot_send_a_filesystem_to_another_server(
         )
 
 
+@pytest.mark.parametrize(
+    "method", ["info", "exists", "isfile", "isdir", "cat_file", "ls"]
+)
+def test_a_webdavs_url_cannot_go_out_over_plain_http(
+    server_url: str, method: str
+) -> None:
+    """``server_url`` is ``http://``: ``webdavs://`` on it is refused, not sent in clear text."""
+    host = urlsplit(server_url).netloc
+    fs = WebdavFileSystem(server_url, auth=AUTH)
+    with pytest.raises(ValueError, match="bound to one server"):
+        getattr(fs, method)(f"webdavs://{host}/f")
+    fs.filesystem.close()
+
+
+def test_a_webdav_url_cannot_be_used_on_a_tls_filesystem() -> None:
+    fs = WebdavFileSystem("https://dav.example", auth=AUTH)
+    with pytest.raises(ValueError, match="bound to one server"):
+        fs.info("webdav://dav.example/f")
+    with pytest.raises(ValueError, match="bound to one server"):
+        WebdavFileSystem("https://dav.example", host="dav.example", transport="http")
+    fs.filesystem.close()
+
+
 def test_the_host_of_a_url_works_through_every_front_door(
     server_url: str, tmp_path: Path
 ) -> None:
@@ -339,7 +362,7 @@ def test_the_host_of_a_url_works_through_every_front_door(
     filesystem = fsspec.filesystem("webdavs", **options)
     filesystem.pipe_file("/d/a.txt", b"A")
     filesystem.pipe_file("/d/b.txt", b"B")
-    base = f"webdavs://{netloc}/d"
+    base = f"webdav://{netloc}/d"
 
     files = fsspec.open_files(f"{base}/*.txt", "rb", **options)
     assert [f.path for f in files] == ["/d/a.txt", "/d/b.txt"]
@@ -347,7 +370,7 @@ def test_the_host_of_a_url_works_through_every_front_door(
     with fsspec.open(
         f"simplecache::{base}/a.txt",
         "rb",
-        webdavs=options,
+        webdav=options,
         simplecache={"cache_storage": str(tmp_path)},
     ) as f:
         assert f.read() == b"A"
@@ -356,7 +379,7 @@ def test_the_host_of_a_url_works_through_every_front_door(
 def test_a_filesystem_made_from_a_url_survives_serialisation(server_url: str) -> None:
     netloc = urlsplit(server_url).netloc
     filesystem, _path = fsspec.core.url_to_fs(
-        f"webdavs://{netloc}/d", base_url=server_url, auth=AUTH
+        f"webdav://{netloc}/d", base_url=server_url, auth=AUTH
     )
     filesystem.pipe_file("/d/a.txt", b"A")
     for restored in (

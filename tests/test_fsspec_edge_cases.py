@@ -29,7 +29,9 @@ import pytest
 from fsspec.callbacks import Callback
 
 from tests.builders import multistatus_doc, sized_entry
+from tests.certificates import Certificates
 from tests.credentials import AUTH
+from tests.mtls_server import mtls_webdav_server
 from tests.scripted_server import DRIP, Reply, Seen, scripted_server
 from webdav.exceptions import (
     ClientError,
@@ -87,6 +89,47 @@ def test_a_missing_path_is_not_an_error_for_exists_and_the_type_checks(
     assert not fs.exists("/nope")
     assert not fs.isdir("/nope")
     assert not fs.isfile("/nope")
+
+
+@pytest.mark.parametrize("method", ["exists", "isdir", "isfile"])
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [(403, PermissionError), (500, InternalServerError)],
+)
+def test_exists_and_the_type_checks_raise_what_is_not_a_missing_path(
+    method: str, status: int, error: type[Exception]
+) -> None:
+    """A server that fails is not a server without the path."""
+    with scripted_server(lambda _seen: (status, {}, b"")) as (url, _recorder):
+        fs = WebdavFileSystem(url)
+        with pytest.raises(error):
+            getattr(fs, method)("/f")
+        fs.filesystem.close()
+
+
+@pytest.mark.parametrize("method", ["exists", "isdir", "isfile"])
+def test_exists_and_the_type_checks_raise_a_connection_error(method: str) -> None:
+    """Nobody listens on the port: the answer is the error, not "no"."""
+    with scripted_server(lambda _seen: (200, {}, b"")) as (url, _recorder):
+        pass  # the server is shut down again, so the port is closed
+    fs = WebdavFileSystem(url)
+    with pytest.raises(OSError):  # noqa: PT011
+        getattr(fs, method)("/f")
+    fs.filesystem.close()
+
+
+@pytest.mark.parametrize("method", ["exists", "isdir", "isfile"])
+def test_exists_and_the_type_checks_raise_a_tls_error(
+    method: str, tmp_path: Path
+) -> None:
+    """An untrusted certificate is not a missing path."""
+    (tmp_path / "certs").mkdir()
+    certs = Certificates(tmp_path / "certs")
+    with mtls_webdav_server(str(tmp_path), certs) as url:
+        fs = WebdavFileSystem(url)
+        with pytest.raises(OSError, match="CERTIFICATE_VERIFY_FAILED"):
+            getattr(fs, method)("/f")
+        fs.filesystem.close()
 
 
 def test_reading_a_directory_as_a_file_is_an_is_a_directory_error(
