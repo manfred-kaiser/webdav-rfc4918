@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `SSL_CERT_FILE` and `SSL_CERT_DIR` name the CA of a session with the default `verify=True`; a CA named in the code wins.
+
+### Fixed
+
+- A redirect from `http` to `https` on the same host is followed.
+- fsspec: `exists`, `isdir` and `isfile` raise a TLS, connection, authentication or server error instead of returning `False`.
+- fsspec: a `webdavs://` URL on a filesystem for an `http://` server is refused (`ValueError`), and `webdav://` on an `https://` one.
+
 ## [1.4.0] - 2026-10-23
 
 ### Added
