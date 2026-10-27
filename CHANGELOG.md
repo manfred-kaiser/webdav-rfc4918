@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-23
+
+### Added
+
+- Python 3.15 is supported.
+
 ## [1.3.0] - 2026-10-14
 
 ### Security
@@ -224,7 +230,8 @@ they were fixed):
   CVE-2025-66418, CVE-2026-21441, CVE-2026-44431, CVE-2026-44432), release job checks the tag against the
   version, workflows pinned by commit, no long-lived publishing token.
 
-[Unreleased]: https://github.com/manfred-kaiser/webdav-rfc4918/compare/1.3.0...main
+[Unreleased]: https://github.com/manfred-kaiser/webdav-rfc4918/compare/1.4.0...main
+[1.4.0]: https://github.com/manfred-kaiser/webdav-rfc4918/releases/tag/1.4.0
 [1.3.0]: https://github.com/manfred-kaiser/webdav-rfc4918/releases/tag/1.3.0
 [1.2.0]: https://github.com/manfred-kaiser/webdav-rfc4918/releases/tag/1.2.0
 [1.1.0]: https://github.com/manfred-kaiser/webdav-rfc4918/releases/tag/1.1.0
