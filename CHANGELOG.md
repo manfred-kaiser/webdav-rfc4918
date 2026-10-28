@@ -7,10 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- `SSL_CERT_FILE` and `SSL_CERT_DIR` name the CA of a session with the default `verify=True`; a CA named in the code wins.
-
 ### Fixed
 
 - A redirect from `http` to `https` on the same host is followed.
