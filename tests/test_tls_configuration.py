@@ -535,15 +535,14 @@ def test_verify_none_for_one_call_means_the_sessions_own() -> None:
     assert len(rec.requests) == 1
 
 
-def test_both_paths_read_ssl_cert_file_unless_a_ca_is_named(
+def test_the_tls_path_reads_ssl_cert_file_and_the_plain_path_does_not(
     certs: Certificates, other_ca: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SSL_CERT_FILE", str(certs.ca_cert))
     with tls_server(certs, always(OK)) as (url, _rec):
-        assert Session(retry=False).get(f"{url}/x").status_code == 204
-        assert Session(tls=TLSOptions(), retry=False).get(f"{url}/x").status_code == 204
         with pytest.raises(requests.exceptions.SSLError):
-            Session(verify=other_ca, retry=False).get(f"{url}/x")
+            Session(retry=False).get(f"{url}/x")
+        assert Session(tls=TLSOptions(), retry=False).get(f"{url}/x").status_code == 204
         # naming the CA is what no environment variable can widen
         with pytest.raises(requests.exceptions.SSLError):
             Session(tls=TLSOptions(ca_files=other_ca), retry=False).get(f"{url}/x")

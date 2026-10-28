@@ -381,9 +381,9 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
                 lands on).
             cert: Client certificate for mTLS - a path to a combined
                 cert+key PEM, or a ``(certfile, keyfile)`` tuple.
-            verify: Server certificate verification - ``True`` (the default:
-                ``certifi``'s bundle unless your distribution patches it, or the
-                CA that ``SSL_CERT_FILE``/``SSL_CERT_DIR`` name), the path of a CA bundle
+            verify: Server certificate verification - ``True`` (the trust
+                store ``requests`` uses, the default: ``certifi``'s bundle
+                unless your distribution patches it), the path of a CA bundle
                 (a ``str`` or path-like), or ``False``. Nothing else is
                 accepted: ``None``, ``0`` or an empty string - say, an unset
                 environment variable - would be read as "do not check" by
@@ -969,42 +969,17 @@ class Session:  # pylint: disable=too-many-public-methods  # grows with its opti
         verify: "bool | str | None",
         cert: "str | tuple[str, str] | None",
     ) -> Any:
-        """Like ``requests``, but a CA bundle named in the environment never replaces the configured one.
+        """Like ``requests``, but a CA bundle is only ever the one configured.
 
         ``requests`` lets ``REQUESTS_CA_BUNDLE``/``CURL_CA_BUNDLE`` from the
         environment replace ``verify=True`` - and so replace, or widen, the
-        CA a caller pinned. Those two are ignored; ``SSL_CERT_FILE`` and
-        ``SSL_CERT_DIR`` (OpenSSL's own) are used for ``verify=True`` only
-        (see :meth:`_default_ca_from_environment`). Proxies from the
-        environment are kept.
+        CA a caller pinned. Proxies from the environment are kept.
         """
         settings = self._transport.merge_environment_settings(
             url, proxies, stream, verify, cert
         )
-        settings["verify"] = self._default_ca_from_environment(
-            verify if verify is not None else self.verify
-        )
+        settings["verify"] = verify if verify is not None else self.verify
         return settings
-
-    def _default_ca_from_environment(self, verify: "bool | str") -> "bool | str":
-        """``verify``, or - for ``True`` - the CA ``SSL_CERT_FILE``/``SSL_CERT_DIR`` name.
-
-        Only the default is widened: a CA named in the code (``verify="ca.pem"``,
-        ``tls=``'s ``ca_files``) always wins, and ``verify=False`` stays off. A
-        session with ``tls=`` loads OpenSSL's default locations, these two
-        included, by itself. ``trust_env=False`` ignores them. With both set,
-        the file is used. A path that does not exist is an error of
-        ``requests``, not a silent fall back to the default bundle.
-        """
-        if (
-            verify is not True
-            or not self.trust_env
-            or isinstance(self._transport.get_adapter("https://"), SSLContextAdapter)
-        ):
-            return verify
-        return (
-            os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR") or verify
-        )
 
     def __getstate__(self) -> dict[str, Any]:
         """Pickle the configuration - ``requests``' own attributes (forwarded) plus ours."""
