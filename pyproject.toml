@@ -1,6 +1,6 @@
 [build-system]
 build-backend = "hatchling.build"
-requires = [ "hatchling==1.32.4" ]
+requires = [ "hatchling==1.33.0" ]
 
 [project]
 name = "webdav-rfc4918"
